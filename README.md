@@ -82,11 +82,11 @@ The video traffic on the wire in WebRTC is called the DataChannel, and this traf
 * Encrypted with DTLS by default
 * Typically peer-to-peer (P2P), though Jitsi Videobridge is an exception for >2 party VTC sessions.
 
-![image](uploads/273abb3ee80c25f85356f0c9e3ca6f01/image.png)
+![image](wiki/images/web_rtc_call_topology.png)
 
 A simple WebRTC Call Topology
 
-![image](uploads/8e3c701bd67b35b711199b588f81f7d9/image.png)
+![image](wiki/images/web_rtc_stack.png)
 
 WebRTC Protocol Stack
 
@@ -130,7 +130,7 @@ As shown above, virtual devices can be used to feed content into any VTC client.
 #### Zoom
 We have demonstrated the virtual device technology on Zoom and captured videos from a live Zoom meeting. These videos can be found here: `/zfs/pharos/pcaps/vtc/zoom_screencaps/`
 
-![2021_02_01-Zoom_VTC_.mov screencap](uploads/f019064810f57ba6a52cf04bfa9bb0b8/2021_02_01_ZoomA_vtc.png)
+![2021_02_01-Zoom_VTC_.mov screencap](wiki/images/2021_02_01_ZoomA_vtc.png)
 
 #### Skype
 _Not currently under consideration as of 2020-10-02._
