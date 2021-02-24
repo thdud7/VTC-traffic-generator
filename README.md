@@ -1,9 +1,9 @@
-[[_TOC_]]
-
 # Video Teleconferencing (VTC)
 
 **VTC** is defined as two-way traffic, consisting of separate
 audio and video streams, between two or more endpoints.
+
+[[_TOC_]]
 
 ## General Questions
 Some overarching testing questions across any VTC solution we decide to
