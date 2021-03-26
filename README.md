@@ -65,7 +65,7 @@ Free source VTC videos: `/zfs/pharos/pcaps/vtc/source_videos/`
 
 **TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
 
-Script audio and video streaming with parameters:
+Script audio and video streaming with input parameters:
  * gender
  * duration
  * number of participants
