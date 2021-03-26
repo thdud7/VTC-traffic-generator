@@ -181,5 +181,20 @@ Some rough numbers:
 > as the number of participants increase. If I joined a Zoom call with
 > 10+, would the throughput also increase linearly? (I wouldn't think so.)
 
+## Traffic Analysis
+
+### Zoom
+
+Zoom web client (browser) seems to use a combination of custom signaling
+with a standardized (H.264?) codec over WebRTC Data channels (as of
+2019?) and, previously, WebSockets.
+
+Unknown if the Zoom applications (mobile, desktop) use similar
+technology or a separate, custom stack.
+
+- [Zoom avoids using WebRTC (2019)](https://webrtchacks.com/zoom-avoids-using-webrtc/)
+- [WebRTC vs Zoom. Who has Better Video Quality? (2018)](https://bloggeek.me/webrtc-vs-zoom-video-quality/)
+- [When will Zoom use WebRTC?](https://bloggeek.me/when-will-zoom-use-webrtc/)
+
 ## Testbed Deployment
 **TBD**
