@@ -1,3 +1,6 @@
+# GPT-2 models
+text_dialogue_generation/gpt-2/models/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
