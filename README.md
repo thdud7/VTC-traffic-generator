@@ -71,7 +71,7 @@ Script audio and video streaming with input parameters:
  * number of participants
 
 ### Device Scripting
-Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
+Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 
 ### WebRTC
 WebRTC (Web Real-Time Communication) is a free, open-source project that provides web browsers and mobile applications with real-time communication (RTC) via simple application programming interfaces (APIs). It allows audio and video communication to work inside web pages by allowing direct peer-to-peer communication, eliminating the need to install plugins or download native apps. WebRTC is **not** a VTC application; it is a set of javascript APIs that can be incorporated into a VTC application.
