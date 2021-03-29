@@ -198,3 +198,14 @@ technology or a separate, custom stack.
 
 ## Testbed Deployment
 **TBD**
+
+### Desktop Client Automation
+
+- Browser: Playwright, Selenium, etc.
+- Desktop:
+    * Windows: AutoHotKey
+    * Linux:
+        - [SikuliX](https://github.com/RaiMan/SikuliX1) (Java, OpenCV)
+        - [UI.Vision](https://ui.vision/)
+
+Key words for desktop automation: "RPA" (Robotic Process Automation)
