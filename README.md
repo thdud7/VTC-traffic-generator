@@ -86,9 +86,17 @@ An excerpt from a single sample of unprompted GPT-2 output text:
 ##### Speech Synthesis
 The plaintext samples generated above are then fed into off-the-shelf text to speech tools to create audio snippets of dialogue for live orchestration. These audio snippets are also generated _a priori_ and stored on the server. Many text to speech tools were evaluated for their suitability for VTC traffic generation. The [Google Cloud Text-to-Speech API](https://cloud.google.com/text-to-speech) has the most natural sounding and varied voices available. There is a free tier option that allows up to 1-4 million characters of speech generation monthly for free, depending on the type of voice selected. 
 
-###### Text to Speech Alternatives
-Alternatives to Google Cloud Platform may be desired for a number of reasons including offline generation, ease of use, or pricing/payment concerns. These options are based on older technology and the realism does not match contemporary commercial text to speech APIs like those provided by Google, Amazon, and Microsoft.    
-![Sample Audio](wiki/audio/espeak-ng_test.mp3)
+**Good Example coming soon**
+
+###### Local Text to Speech Alternatives
+Locally run alternatives to Google Cloud Platform may be desired for a number of reasons including offline generation, ease of use, or pricing/payment concerns. These options are based on older technology, and the realism does not match contemporary commercial text to speech APIs like those provided by Google, Amazon, and Microsoft.    
+
+[Festival](http://festvox.org/festival/) is a free software multi-lingual speech synthesis engine with many custom voices available.  
+![festival-basic](wiki/audio/festival_basic.mp3)
+![festival-advanced](wiki/audio/festival_advanced.mp3)
+
+[espeak-ng](https://github.com/espeak-ng/espeak-ng) is another free speech synthesis engine that supports many languages. espeak-ng is very lightweight and easy to use, but the output is lower quality than the alternatives.   
+![espeak-ng](wiki/audio/espeak-ng_test.mp3)
 
 ### Dialogue Orchestration
 **TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
