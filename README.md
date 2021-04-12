@@ -62,8 +62,6 @@ Video content should represent people talking toward a camera. Preferably this c
 Free source VTC videos: `/zfs/pharos/pcaps/vtc/source_videos/`
 
 #### Audio source generation
-**TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
-
 Audio source generation is broken down into 2 phases: text generation and speech synthesis. These phases can be done _a priori_, storing audio files on disk for quick retrieval by the dialogue orchestration engine.
 
 ##### Text Generation
@@ -86,16 +84,19 @@ An excerpt from a single sample of unprompted GPT-2 output text:
 > Pete Carroll is not the best defensive coach in the NFL. The Seahawks were a pretty good defense in his first couple of years there (not that they did much else), but they haven't been great in the last few years. They are ranked 29th in yards allowed, 31st in points allowed, and 24th in yards allowed/receiver and red-zone defense. That doesn't sound good on the surface. I could talk about how much pressure they bring, why they don't bring pressure as much as they used to, or a host of other possible excuses. But that's just what I do every year. There are still games where they look terrible, but then teams put up more than 20 points and score lots of points. We see some of that this year.
  
 ##### Speech Synthesis
+The plaintext samples generated above are then fed into off-the-shelf text to speech tools to create audio snippets of dialogue for live orchestration. These audio snippets are also generated _a priori_ and stored on the server. Many text to speech tools were evaluated for their suitability for VTC traffic generation. The [Google Cloud Text-to-Speech API](https://cloud.google.com/text-to-speech) has the most natural sounding and varied voices available. There is a free tier option that allows up to 1-4 million characters of speech generation monthly for free, depending on the type of voice selected. 
 
-**TBD**
+###### Text to Speech Alternatives
+Alternatives to Google Cloud Platform may be desired for a number of reasons including offline generation, ease of use, or pricing/payment concerns. These options are based on older technology and the realism does not match contemporary commercial text to speech APIs like those provided by Google, Amazon, and Microsoft.    
+![Sample Audio](wiki/audio/espeak-ng_test.mp3)
 
+### Dialogue Orchestration
+**TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
+Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 Script audio and video streaming with input parameters:
  * gender
  * duration
  * number of participants
-
-### Dialogue Orchestration
-Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 
 ### WebRTC
 WebRTC (Web Real-Time Communication) is a free, open-source project that provides web browsers and mobile applications with real-time communication (RTC) via simple application programming interfaces (APIs). It allows audio and video communication to work inside web pages by allowing direct peer-to-peer communication, eliminating the need to install plugins or download native apps. WebRTC is **not** a VTC application; it is a set of javascript APIs that can be incorporated into a VTC application.
