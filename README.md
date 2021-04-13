@@ -57,12 +57,12 @@ Steps for configuring virtual microphone:
 Driving VTC sessions requires feeding media content (audio and visual) into the virtual devices. This media content must approximate what we'd see in the real world, and it we must have rights to use it in our testbed. 
 
 #### Video sources
-Video content should represent people talking toward a camera. Preferably this content is roughly 720p or 1080p resolution, and the VTC application can re-scale as necessary. Audio is handled via a separate virtual device, so an audio track or dialogue is not necessary. Participant focus in VTC apps is typically done by applying a thresholding algorithm on the audio device, not video, so a constantly moving video feed does not pose a problem and realistic pauses are not necessary. 
+Video content should represent people talking toward a camera. Preferably this content is roughly 720p or 1080p resolution, and the VTC application can re-scale as necessary. Audio is handled via a separate virtual device, so an audio track or dialog is not necessary. Participant focus in VTC apps is typically done by applying a thresholding algorithm on the audio device, not video, so a constantly moving video feed does not pose a problem and realistic pauses are not necessary. 
 
 Free source VTC videos: `/zfs/pharos/pcaps/vtc/source_videos/`
 
 #### Audio source generation
-Audio source generation is broken down into 2 phases: text generation and speech synthesis. These phases can be done _a priori_, storing audio files on disk for quick retrieval by the dialogue orchestration engine.
+Audio source generation is broken down into 2 phases: text generation and speech synthesis. These phases can be done _a priori_, storing audio files on disk for quick retrieval by the dialog orchestration engine.
 
 ##### Text Generation
 
@@ -84,7 +84,7 @@ An excerpt from a single sample of unprompted GPT-2 output text:
 > Pete Carroll is not the best defensive coach in the NFL. The Seahawks were a pretty good defense in his first couple of years there (not that they did much else), but they haven't been great in the last few years. They are ranked 29th in yards allowed, 31st in points allowed, and 24th in yards allowed/receiver and red-zone defense. That doesn't sound good on the surface. I could talk about how much pressure they bring, why they don't bring pressure as much as they used to, or a host of other possible excuses. But that's just what I do every year. There are still games where they look terrible, but then teams put up more than 20 points and score lots of points. We see some of that this year.
  
 ##### Speech Synthesis
-The plaintext samples generated above are then fed into off-the-shelf text to speech tools to create audio snippets of dialogue for live orchestration. These audio snippets are also generated _a priori_ and stored on the server. Many text to speech tools were evaluated for their suitability for VTC traffic generation. The [Google Cloud Text-to-Speech API](https://cloud.google.com/text-to-speech) has the most natural sounding and varied voices available among the speech synthesis solutions. There is a free tier option that allows up to 1-4 million characters of speech generation monthly for free, depending on the type of voice selected.
+The plaintext samples generated above are then fed into off-the-shelf text to speech tools to create audio snippets of dialog for live orchestration. These audio snippets are also generated _a priori_ and stored on the server. Many text to speech tools were evaluated for their suitability for VTC traffic generation. The [Google Cloud Text-to-Speech API](https://cloud.google.com/text-to-speech) has the most natural sounding and varied voices available among the speech synthesis solutions. There is a free tier option that allows up to 1-4 million characters of speech generation monthly for free, depending on the type of voice selected.
 ![Google_cloud_tts](wiki/audio/Google-cloud_tts_test.mp3)
 
 ###### Local Text to Speech Alternatives
@@ -97,7 +97,7 @@ Locally run alternatives to Google Cloud services may be desired for a number of
 [espeak-ng](https://github.com/espeak-ng/espeak-ng) is another free speech synthesis engine that supports many languages. espeak-ng is very lightweight and easy to use, but the output is lower quality than the alternatives.   
 ![espeak-ng](wiki/audio/espeak-ng_test.mp3)
 
-### Dialogue Orchestration
+### Dialog Orchestration
 **TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
 Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 Script audio and video streaming with input parameters:
