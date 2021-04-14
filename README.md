@@ -97,7 +97,7 @@ Locally run alternatives to Google Cloud services may be desired for a number of
 [espeak-ng](https://github.com/espeak-ng/espeak-ng) is another free speech synthesis engine that supports many languages. espeak-ng is very lightweight and easy to use, but the output is lower quality than the alternatives.   
 ![espeak-ng](wiki/audio/espeak-ng_test.mp3)
 
-### Dialog Orchestration
+### Agent Dialog Coordination
 **TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
 Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 Script audio and video streaming with input parameters:
@@ -170,6 +170,13 @@ _Not currently under consideration as of 2020-10-02._
 * Skype requires Windows, provisioned Skype clients, and outbound Internet
 * Internet access does introduce interesting "uncertainty" as traffic
   routes through public Internet
+
+## Experiment Orchestration
+VTC agents (bots) need to run on their own computers in our test environment, and the VTC coordination must happen independently of agent activity. This necessitates a distributed architecture where the agents have an agent API, and the main controller creates a VTC session and issues commands to each agent in the VTC session. This command and control (C2) must happen on a different control plane (network interface) than the VTC traffic itself to avoid polluting the test results with artificial C2 traffic. 
+
+Each agent is running an instance of the agent REST API, and the controller issues commands and configurations to each agent in order to drive the VTC session. 
+
+**TBD: System Diagram Here**
 
 ## Metrics
 **TBD**
