@@ -40,6 +40,8 @@ def sample_model(
      :models_dir : path to parent folder containing model subfolders
      (i.e. contains the <model_name> folder)
     """
+
+    full_output = []
     models_dir = os.path.expanduser(os.path.expandvars(models_dir))
     enc = encoder.get_encoder(model_name, models_dir)
     hparams = model.default_hparams()
@@ -74,6 +76,8 @@ def sample_model(
                 text = enc.decode(out[i])
                 print("=" * 40 + " SAMPLE " + str(generated) + " " + "=" * 40)
                 print(text)
+                full_output.append(text)
+    return full_output
 
 if __name__ == '__main__':
     fire.Fire(sample_model)
