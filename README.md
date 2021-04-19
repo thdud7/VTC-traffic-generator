@@ -26,7 +26,7 @@ In our case, we use [gstreamer](https://gstreamer.freedesktop.org/) to create a 
 
 Steps for configuring virtual camera:
 1. Make kernel module [v4l2loopback](https://github.com/umlaeute/v4l2loopback)
-1. Load kernel module to device `/dev/video5`: `# modprobe v4l2loopback video_nr=5`
+1. Load kernel module to device `/dev/video5`: `# modprobe v4l2loopback video_nr=5` Note: kernel module must be built for the currently running kernel and be found in `/lib/modules/[kernel]`
 1. Make sure [v4l2loopback](https://github.com/umlaeute/v4l2loopback) kernel module is loaded and `/dev/video5` exists. (`$ lsmod`, then look for `v412loopback`)
 1. Install [gstreamer](https://gstreamer.freedesktop.org/documentation/installing/on-linux.html)
 1. Locate source video file (see path below for free source VTC video files.
