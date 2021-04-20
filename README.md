@@ -31,6 +31,7 @@ Steps for configuring virtual camera:
 1. Install [gstreamer](https://gstreamer.freedesktop.org/documentation/installing/on-linux.html)
 1. Locate source video file (see path below for free source VTC video files.
 1. Launch gstreamer pipeline: `$ gst-launch-1.0 -v filesrc location=<video_filename.mp4> ! decodebin ! videoconvert ! "video/x-raw,format=YUY2" ! v4l2sink device=/dev/video5`
+   1. For gstreamer help try: `$ gst-inspect-1.0 videoscale`
 1. Select the appropriate camera device in the VTC UI.
 
 Note:
@@ -46,8 +47,9 @@ The virtual microphone is based on ALSA loopback device [snd_aloop](https://www.
 
 Steps for configuring virtual microphone:
 1. Load `snd_aloop` kernel module: `# modprobe snd_aloop`
-1. Verify loopback devices present with: `$ aplay -l`
+1. Verify loopback devices present with: `$ aplay -L`
 1. Play WAV file with `aplay -D <device_name> <filename.wav>
+   1. Example FLAC playback: `$ flac -c -d VTC_audio_tracks/male_1-en-US-Wavenet-I/convo_1/line_7.flac |aplay -D sysdefault`
 1. Select the appropriate microphone device in the VTC UI. 
 
 * Note, for highest fidelity emulation use WAV audio files, not necessarily because sound quality matters, but because we are emulating low-level microphone devices and audio compression happens wwithin the VTC application, not the device typically. 
