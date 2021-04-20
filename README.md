@@ -100,6 +100,11 @@ Locally run alternatives to Google Cloud services may be desired for a number of
 ![espeak-ng](wiki/audio/espeak-ng_test.mp3)
 
 ### Agent Dialog Coordination
+
+Video feeds must be paired with dialog audio tracks. 
+
+![Example video with generated dialog audio track](wiki/video/example_client_video_dialog.mp4)
+
 **TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
 Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
 Script audio and video streaming with input parameters:
