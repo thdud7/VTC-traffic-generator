@@ -30,7 +30,9 @@ Steps for configuring virtual camera:
 1. Make sure [v4l2loopback](https://github.com/umlaeute/v4l2loopback) kernel module is loaded and `/dev/video5` exists. (`$ lsmod`, then look for `v412loopback`)
 1. Install [gstreamer](https://gstreamer.freedesktop.org/documentation/installing/on-linux.html)
 1. Locate source video file (see path below for free source VTC video files.
-1. Launch gstreamer pipeline: `$ gst-launch-1.0 -v filesrc location=<video_filename.mp4> ! decodebin ! videoconvert ! "video/x-raw,format=YUY2" ! v4l2sink device=/dev/video5`
+1. Use `ffmpeg` to stream from a file to the virtual device. 
+   1. Example with overlay and looping: `ffmpeg -stream_loop -1 -re -i <video_filename>.mp4 -vf "drawtext=text='Bot 1':fontsize=200:fontcolor=red:font=Arial:x=(w-text_w)/2:y=h-th-100,format=yuv420p" -f v4l2 /dev/video5`
+1. (Alternative to ffmpeg) Launch gstreamer pipeline: `$ gst-launch-1.0 -v filesrc location=<video_filename.mp4> ! decodebin ! videoconvert ! "video/x-raw,format=YUY2" ! v4l2sink device=/dev/video5`
    1. For gstreamer help try: `$ gst-inspect-1.0 videoscale`
 1. Select the appropriate camera device in the VTC UI.
 
