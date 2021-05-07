@@ -1,4 +1,5 @@
 {
+    "role": "controller",
     "vtc_platform": "vtc_platform_name",
     "num_clients": "num_clients",
     "vtc_clients":  [

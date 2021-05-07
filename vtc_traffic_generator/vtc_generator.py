@@ -13,6 +13,7 @@ with open('config.json', 'r') as infile:
 def initialize_vtc_client():
     print ("Initializing VTC client")
 
+# XMLRPC
 def play_audio():
     try:
         process = (
@@ -27,6 +28,7 @@ def play_audio():
         print('stderr:', e.stderr.decode('utf8'))
         raise e
 
+# XMLRPC
 def play_video():
     # Setup streaming from file to v4l2 device
     process = (
@@ -48,3 +50,8 @@ def play_video():
     # Terminate process after waiting 3s to ensure process end
     time.sleep(3)
     process.terminate()
+
+# XMLRPC
+def stop_video():
+    print("Stopping video")
+

@@ -1,4 +1,5 @@
 {
+    "role": "client",
     "vtc_platform": "vtc_platform_name",
     "server":{
         "ip":"ip_address",
