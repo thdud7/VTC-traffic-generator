@@ -5,6 +5,7 @@
         "port":"portnumber"
     },
 
+    "bot_name": "bot_name",
     "audio_path": "audio_path",
     "voice_name": "voice_name",
     "video_path": "video_path",
