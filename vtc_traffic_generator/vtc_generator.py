@@ -1,11 +1,8 @@
 import ffmpeg
 import pulsectl
+import sys
 import time
 import json
-
-# Load config(s)
-with open('config.json', 'r') as infile:
-    config = json.load(infile)
 
 # Initialize client, call from controller
 # Set pulse audio devices and device volume
@@ -13,7 +10,7 @@ with open('config.json', 'r') as infile:
 def initialize_vtc_client():
     print ("Initializing VTC client")
 
-# XMLRPC
+# XMLRPC needed
 def play_audio():
     try:
         process = (
@@ -28,7 +25,7 @@ def play_audio():
         print('stderr:', e.stderr.decode('utf8'))
         raise e
 
-# XMLRPC
+# XMLRPC needed
 def play_video():
     # Setup streaming from file to v4l2 device
     process = (
@@ -55,3 +52,33 @@ def play_video():
 def stop_video():
     print("Stopping video")
 
+def run_controller():
+    print("Running controller")
+
+    print(config['num_clients'])
+    # Instantiate clients
+    # Initialize clients
+    # Start client video
+    # Begin client dialog
+
+def run_client():
+    print("Running client")
+    # Mostly be reactionary
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print("Error: must specify configuration JSON file.")
+        exit()
+
+    # read config
+    with open(sys.argv[1], 'r') as infile:
+        config = json.load(infile)
+
+    print(config['version'])
+    print ("Role: " + config['role'])
+
+    if config['role'] == 'controller':
+        run_controller()
+
+    elif config['role'] == 'client':
+        run_client()
