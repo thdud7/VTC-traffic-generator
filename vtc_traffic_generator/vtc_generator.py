@@ -28,7 +28,13 @@ class VTC_client:
             subprocess.run('pactl load-module module-remap-source master="virtual_speaker.monitor" source_name="virtual_mic" source_properties=device.description="virtual_mic"', capture_output=True, shell=True)
 
         # Set volume levels and unmute devices
+        for sink in sinks:
+            pulse.volume_set_all_chans(sink, .7)
+            pulse.mute(sink, False)
 
+        for source in sources:
+            pulse.volume_set_all_chans(source, .7)
+            pulse.mute(source, False)
 
         # Check for v4l2 virtual webcam kernel module
 
