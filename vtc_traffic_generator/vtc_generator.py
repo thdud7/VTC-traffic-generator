@@ -37,7 +37,8 @@ class VTC_client:
             pulse.mute(source, False)
 
         # Check for v4l2 virtual webcam kernel module
-
+        if 'v4l2loopback' not in str(subprocess.run(['lsmod'], capture_output=True)):
+            print("Error: v4l2loopback kernel module not loaded. Try: sudo modprobe v4l2loopback video_nr=5")
 
     # XMLRPC needed
     def play_audio(self):
