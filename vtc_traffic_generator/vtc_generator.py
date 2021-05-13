@@ -8,6 +8,7 @@ import time
 import json
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
+from pathlib import PurePath
 
 class VtcClient:
     print("Creating client object")
@@ -69,9 +70,12 @@ def play_audio():
 def play_video():
     # Setup streaming from file to v4l2 device
     try:
+        video_filepath = str(PurePath(config['video_path'], config['video_name']))
+        print(video_filepath)
+        time.sleep(5)
         process = (
             ffmpeg
-                .input('man_1_270.mp4', re=None, stream_loop=-1)
+                .input(video_filepath, re=None, stream_loop=-1)
                 .filter('format', 'yuv420p')
                 .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
                 .output('/dev/video5', format='v4l2')
