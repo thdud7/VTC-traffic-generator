@@ -17,7 +17,7 @@ class VtcClient:
 # Initialize client, call from controller
 # Set pulse audio devices and device volume
 # Check for v4l2 kernel mod
-def initialize_vtc_client(self):
+def initialize_vtc_client():
     print ("Initializing VTC client")
 
     # Set up audio devices
@@ -41,10 +41,13 @@ def initialize_vtc_client(self):
 
     # Check for v4l2 virtual webcam kernel module
     if 'v4l2loopback' not in str(subprocess.run(['lsmod'], capture_output=True)):
-        print("Error: v4l2loopback kernel module not loaded. Try: sudo modprobe v4l2loopback video_nr=5")
+        print("Error: v4l2loopback kernel module not loaded. Try: sudo modprobe v4l2loopback video_nr=5 exclusive_caps=1")
+
+    print(config['bot_name'] + " configured.")
+    #return True
 
 # XMLRPC needed
-def play_audio(self):
+def play_audio():
     try:
         process = (
             ffmpeg
@@ -59,7 +62,7 @@ def play_audio(self):
         raise e
 
 # XMLRPC needed
-def play_video(self):
+def play_video():
     # Setup streaming from file to v4l2 device
     process = (
         ffmpeg
@@ -82,7 +85,7 @@ def play_video(self):
     process.terminate()
 
 # XMLRPC
-def stop_video(self):
+def stop_video():
     print("Stopping video")
 
 def run_controller():
@@ -95,15 +98,18 @@ def run_controller():
         VTC_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
 
     # Initialize clients
+    uri = 'http://' + VTC_clients[0].ip + ':' + str(VTC_clients[0].port)
+    print(uri)
+    with xmlrpc.client.ServerProxy(uri) as proxy:
+        proxy.initialize_vtc_client()
     # Start client video
     # Begin client dialog
+    print("DONE")
 
 def run_client(config):
-    print("Running client")
-
     # Simply register functions and respond to calls indefinitely
-    server = SimpleXMLRPCServer(("0.0.0.0", int(config['server']['port'])))
-    print("Listening on port: "+ config['server']['port'])
+    server = SimpleXMLRPCServer(("0.0.0.0", config['c2_port']), allow_none=True)
+    print("Listening on port: " + str(config['c2_port']))
 
     server.register_function(initialize_vtc_client, "initialize_vtc_client")
 

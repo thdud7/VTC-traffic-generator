@@ -1,11 +1,7 @@
 {
     "role": "client",
     "vtc_platform": "vtc_platform_name",
-    "server":{
-        "ip":"ip_address",
-        "port":"portnumber"
-    },
-
+    "c2_port": "port_number",
     "bot_name": "bot_name",
     "audio_path": "audio_path",
     "voice_name": "voice_name",
