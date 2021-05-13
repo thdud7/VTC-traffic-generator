@@ -2,6 +2,7 @@ import ffmpeg
 import subprocess
 import pulsectl
 import os
+import random
 import signal
 import sys
 import time
@@ -18,7 +19,8 @@ class VtcClient:
         self.video_pid = 0
 
 
-# Initialize client, call from controller
+# XMLRPC
+# Initialize client
 # Set pulse audio devices and device volume
 # Check for v4l2 kernel mod
 def initialize_vtc_client():
@@ -49,8 +51,22 @@ def initialize_vtc_client():
 
     print(config['bot_name'] + " configured.")
 
+# XMLRPC
+def dialog_cycle():
 
-# XMLRPC needed
+    print(config['bot_name'] + " speaking now.")
+
+    # Calculate the number of sentences a VTC client speaks in a single turn
+    # Left skewed, lower bound at 1, upper bound at number of sentences in a given conversation
+    num_sentences = round(abs(random.gauss(0, 2))) + 1
+
+    # Select conversation
+
+    # Play audio
+
+    return True
+
+# XMLRPC
 def play_audio():
     try:
         process = (
@@ -66,7 +82,7 @@ def play_audio():
         raise e
 
 
-# XMLRPC needed
+# XMLRPC
 def play_video():
     # Setup streaming from file to v4l2 device
     try:
@@ -83,7 +99,7 @@ def play_video():
 
         # Launch video playback
         print("Launching video playback")
-        process = process.run_async(pipe_stdin=True)
+        process = process.run_async(pipe_stdin=True, quiet=True)
 
     except ffmpeg.Error as e:
         print('stdout:', e.stdout.decode('utf8'))
@@ -119,14 +135,35 @@ def run_controller():
         with xmlrpc.client.ServerProxy(uri) as proxy:
             VTC_clients[x].video_pid = proxy.play_video()
 
+        '''
         # Testing Video stopping capability
         time.sleep(15)
-
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(VTC_clients[x].video_pid)
+        '''
+    '''
+    # TODO: must loop this, indefinitely? Debug with a breakpoint.
 
     # Begin client dialog
+    # Randomly select VTC_client as long as it wasn't the last one picked.
+    chosen_client = None
+    candidate_client = random.choice(VTC_clients)
 
+    # start VTC_client selection loop here
+    while candidate_client is chosen_client:
+        candidate_client = random.choice(VTC_clients)
+
+    chosen_client = candidate_client
+
+    # End VTC_client selection loop here
+
+    uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
+
+    # Command selected VTC client to take a dialog cycle
+    with xmlrpc.client.ServerProxy(uri) as proxy:
+        dialog_complete = False
+        dialog_complete = proxy.dialog_cycle()
+    '''
     print("DONE")
 
 
@@ -138,6 +175,7 @@ def run_client(config):
     server.register_function(initialize_vtc_client, "initialize_vtc_client")
     server.register_function(play_video, "play_video")
     server.register_function(stop_video, "stop_video")
+    server.register_function(dialog_cycle, "dialog_cycle")
 
     server.serve_forever()
 
