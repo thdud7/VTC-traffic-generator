@@ -44,7 +44,7 @@ def initialize_vtc_client():
         print("Error: v4l2loopback kernel module not loaded. Try: sudo modprobe v4l2loopback video_nr=5 exclusive_caps=1")
 
     print(config['bot_name'] + " configured.")
-    #return True
+
 
 # XMLRPC needed
 def play_audio():
@@ -64,20 +64,28 @@ def play_audio():
 # XMLRPC needed
 def play_video():
     # Setup streaming from file to v4l2 device
-    process = (
-        ffmpeg
-            .input('man_1.mp4', re=None, stream_loop=-1)
-            .filter('format', 'yuv420p')
-            .drawtext(text='BOT1', x='(w-text_w)/2', y='h-th-100', fontcolor='red', fontsize=200)
-            .output('/dev/video5', format='v4l2')
-    )
+    try:
+        process = (
+            ffmpeg
+                .input('man_1_270.mp4', re=None, stream_loop=-1)
+                .filter('format', 'yuv420p')
+                .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
+                .output('/dev/video5', format='v4l2')
+        )
 
-    # Launch video recording
-    process = process.run_async(pipe_stdin=True)
+        # Launch video playback
+        print("Launching video playback")
+        process = process.run_async(pipe_stdin=True)
+
+    except ffmpeg.Error as e:
+        print('stdout:', e.stdout.decode('utf8'))
+        print('stderr:', e.stderr.decode('utf8'))
+        raise e
+
+    #### FIXME: breakout termination into separate function
 
     time.sleep(15)
-
-    # Stop video recording
+    # Stop video playback
     process.communicate(b'q')  # Equivalent to send a Q
 
     # Terminate process after waiting 3s to ensure process end
@@ -95,14 +103,19 @@ def run_controller():
 
     # Instantiate clients
     for x in range(num_clients):
+
+        # Create VTC client
         VTC_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
 
-    # Initialize clients
-    uri = 'http://' + VTC_clients[0].ip + ':' + str(VTC_clients[0].port)
-    print(uri)
-    with xmlrpc.client.ServerProxy(uri) as proxy:
-        proxy.initialize_vtc_client()
-    # Start client video
+        # Initialize client devices
+        uri = 'http://' + VTC_clients[x].ip + ':' + str(VTC_clients[x].port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.initialize_vtc_client()
+
+        # Start client video stream to virtual camera device
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.play_video()
+
     # Begin client dialog
     print("DONE")
 
@@ -112,6 +125,7 @@ def run_client(config):
     print("Listening on port: " + str(config['c2_port']))
 
     server.register_function(initialize_vtc_client, "initialize_vtc_client")
+    server.register_function(play_video, "play_video")
 
     server.serve_forever()
 
