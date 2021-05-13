@@ -1,6 +1,8 @@
 import ffmpeg
 import subprocess
 import pulsectl
+import os
+import signal
 import sys
 import time
 import json
@@ -12,6 +14,7 @@ class VtcClient:
     def __init__(self, ip='0.0.0.0', port=100):
         self.ip = ip
         self.port = int(port)
+        self.video_pid = 0
 
 
 # Initialize client, call from controller
@@ -61,6 +64,7 @@ def play_audio():
         print('stderr:', e.stderr.decode('utf8'))
         raise e
 
+
 # XMLRPC needed
 def play_video():
     # Setup streaming from file to v4l2 device
@@ -82,19 +86,14 @@ def play_video():
         print('stderr:', e.stderr.decode('utf8'))
         raise e
 
-    #### FIXME: breakout termination into separate function
+    return process.pid
 
-    time.sleep(15)
-    # Stop video playback
-    process.communicate(b'q')  # Equivalent to send a Q
-
-    # Terminate process after waiting 3s to ensure process end
-    time.sleep(3)
-    process.terminate()
 
 # XMLRPC
-def stop_video():
+def stop_video(video_pid):
     print("Stopping video")
+    os.kill(video_pid, signal.SIGTERM)
+
 
 def run_controller():
 
@@ -114,18 +113,27 @@ def run_controller():
 
         # Start client video stream to virtual camera device
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.play_video()
+            video_pid = proxy.play_video()
+
+        # Testing Video stopping capability
+        time.sleep(15)
+
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.stop_video(video_pid)
 
     # Begin client dialog
+
     print("DONE")
 
+
 def run_client(config):
-    # Simply register functions and respond to calls indefinitely
+    # Register functions and respond to calls indefinitely
     server = SimpleXMLRPCServer(("0.0.0.0", config['c2_port']), allow_none=True)
     print("Listening on port: " + str(config['c2_port']))
 
     server.register_function(initialize_vtc_client, "initialize_vtc_client")
     server.register_function(play_video, "play_video")
+    server.register_function(stop_video, "stop_video")
 
     server.serve_forever()
 
