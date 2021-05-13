@@ -113,13 +113,13 @@ def run_controller():
 
         # Start client video stream to virtual camera device
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            video_pid = proxy.play_video()
+            VTC_clients[x].video_pid = proxy.play_video()
 
         # Testing Video stopping capability
         time.sleep(15)
 
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.stop_video(video_pid)
+            proxy.stop_video(VTC_clients[x].video_pid)
 
     # Begin client dialog
 
