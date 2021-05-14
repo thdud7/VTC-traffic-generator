@@ -62,25 +62,37 @@ def dialog_cycle():
 
     # Select conversation
     convo_root = str(PurePath(config['audio_path'], config['voice_name']))
-    print(convo_root)
-
     convo_list = os.listdir(convo_root)
     convo_index = random.randrange(0, len(convo_list))
     convo_path = str(PurePath(convo_root, convo_list[convo_index]))
     print("CONVOPATH:" + convo_path)
 
+    # Select dialog lines and play them
+    audio_filenames = os.listdir(convo_path)
+    if num_sentences > len(audio_filenames):
+        num_sentences = len(audio_filenames)
 
+    print("Number of lines:" + str(num_sentences))
 
-    # Play audio
+    index = 0
+    while index < num_sentences:
+        # Play file
+        filename = "line_" + str(index) + ".flac"
+        audiofile_fullpath = str(PurePath(convo_path, filename))
+
+        # Play audio
+        play_audio(audiofile_fullpath)
+        index += 1
 
     return True
 
-# XMLRPC
-def play_audio():
+# No XMLRPC needed, simply a local function on the remote VTC client
+def play_audio(audio_file_path):
+    print("IN PLAY_AUDIO")
     try:
         process = (
             ffmpeg
-                .input('/home/dave/Desktop/line_9.flac')
+                .input(audio_file_path)
                 .output('virtual_speaker', format='pulse', device='virtual_speaker')
         )
         process = process.run(capture_stdout=True, capture_stderr=True)
@@ -151,29 +163,23 @@ def run_controller():
             proxy.stop_video(VTC_clients[x].video_pid)
         '''
 
-    # TODO: must loop this, indefinitely? Debug with a breakpoint.
-
     # Begin client dialog
     # Randomly select VTC_client as long as it wasn't the last one picked.
     chosen_client = None
     candidate_client = random.choice(VTC_clients)
 
-    # start VTC_client selection loop here
-    while candidate_client is chosen_client:
-        candidate_client = random.choice(VTC_clients)
+    # Infinite loop of conversation dialog.
+    while True:
+        while candidate_client is chosen_client:
+            candidate_client = random.choice(VTC_clients)
 
-    chosen_client = candidate_client
+        chosen_client = candidate_client
+        uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
 
-    # End VTC_client selection loop here
-
-    uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
-
-    # Command selected VTC client to take a dialog cycle
-    with xmlrpc.client.ServerProxy(uri) as proxy:
-        dialog_complete = False
-        dialog_complete = proxy.dialog_cycle()
-
-    print("DONE")
+        # Command selected VTC client to take a dialog cycle
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            dialog_complete = False
+            dialog_complete = proxy.dialog_cycle()
 
 
 def run_client(config):
