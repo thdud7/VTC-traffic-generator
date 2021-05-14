@@ -61,6 +61,15 @@ def dialog_cycle():
     num_sentences = round(abs(random.gauss(0, 2))) + 1
 
     # Select conversation
+    convo_root = str(PurePath(config['audio_path'], config['voice_name']))
+    print(convo_root)
+
+    convo_list = os.listdir(convo_root)
+    convo_index = random.randrange(0, len(convo_list))
+    convo_path = str(PurePath(convo_root, convo_list[convo_index]))
+    print("CONVOPATH:" + convo_path)
+
+
 
     # Play audio
 
@@ -141,7 +150,7 @@ def run_controller():
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(VTC_clients[x].video_pid)
         '''
-    '''
+
     # TODO: must loop this, indefinitely? Debug with a breakpoint.
 
     # Begin client dialog
@@ -163,7 +172,7 @@ def run_controller():
     with xmlrpc.client.ServerProxy(uri) as proxy:
         dialog_complete = False
         dialog_complete = proxy.dialog_cycle()
-    '''
+
     print("DONE")
 
 
