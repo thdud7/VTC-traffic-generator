@@ -88,7 +88,6 @@ def dialog_cycle():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
-    print("IN PLAY_AUDIO")
     try:
         process = (
             ffmpeg
