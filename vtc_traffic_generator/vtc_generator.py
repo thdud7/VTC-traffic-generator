@@ -119,7 +119,8 @@ def play_video():
 
         # Launch video playback
         print("Launching video playback")
-        process = process.run_async(pipe_stdin=True, quiet=True)
+        # process = process.run_async(pipe_stdin=True, quiet=True)
+        process = process.run_async(pipe_stdin=True)
 
     except ffmpeg.Error as e:
         print('stdout:', e.stdout.decode('utf8'))
