@@ -105,30 +105,33 @@ def play_audio(audio_file_path):
 # XMLRPC
 def play_video():
     # Setup streaming from file to v4l2 device
-    try:
-        video_filepath = str(PurePath(config['video_path'], config['video_name']))
-        print(video_filepath)
-        time.sleep(5)
-        process = (
-            ffmpeg
-                .input(video_filepath, re=None, stream_loop=-1)
-                .filter('format', 'yuv420p')
-                .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
-                .output('/dev/video5', format='v4l2')
-        )
+    if config['videoconference'] == True:
+        try:
+            video_filepath = str(PurePath(config['video_path'], config['video_name']))
+            print(video_filepath)
+            time.sleep(5)
+            process = (
+                ffmpeg
+                    .input(video_filepath, re=None, stream_loop=-1)
+                    .filter('format', 'yuv420p')
+                    .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
+                    .output('/dev/video5', format='v4l2')
+            )
 
-        # Launch video playback
-        print("Launching video playback")
-        # process = process.run_async(pipe_stdin=True, quiet=True)
-        process = process.run_async(pipe_stdin=True)
+            # Launch video playback
+            print("Launching video playback")
+            # process = process.run_async(pipe_stdin=True, quiet=True)
+            process = process.run_async(pipe_stdin=True)
 
-    except ffmpeg.Error as e:
-        print('stdout:', e.stdout.decode('utf8'))
-        print('stderr:', e.stderr.decode('utf8'))
-        raise e
+        except ffmpeg.Error as e:
+            print('stdout:', e.stdout.decode('utf8'))
+            print('stderr:', e.stderr.decode('utf8'))
+            raise e
 
-    return process.pid
+        return process.pid
 
+    else:
+        return False
 
 # XMLRPC
 def stop_video(video_pid):
@@ -153,8 +156,9 @@ def run_controller():
             proxy.initialize_vtc_client()
 
         # Start client video stream to virtual camera device
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            VTC_clients[x].video_pid = proxy.play_video()
+        if config['videoconference'] == True:
+            with xmlrpc.client.ServerProxy(uri) as proxy:
+                VTC_clients[x].video_pid = proxy.play_video()
 
         '''
         # Testing Video stopping capability

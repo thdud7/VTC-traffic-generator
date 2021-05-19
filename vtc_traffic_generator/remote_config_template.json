@@ -3,10 +3,10 @@
     "vtc_platform": "vtc_platform_name",
     "c2_port": "port_number",
     "bot_name": "bot_name",
+    "videoconference": true,
     "audio_path": "audio_path",
     "voice_name": "voice_name",
     "video_path": "video_path",
     "video_name": "video_name",
-
     "version": "VTC traffic generator X"
 }
