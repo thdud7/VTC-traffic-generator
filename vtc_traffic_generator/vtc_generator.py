@@ -110,16 +110,23 @@ def play_video():
             video_filepath = str(PurePath(config['video_path'], config['video_name']))
             print(video_filepath)
             time.sleep(5)
-            process = (
-                ffmpeg
-                    .input(video_filepath, re=None, stream_loop=-1)
-                    .filter('format', 'yuv420p')
-                    # Uncomment this line for text overlay on 270p video files
-                    #.drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
-                    # Uncomment this line for text overlay on 1080ssp video files
-                    .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-50', fontcolor='red', fontsize=200)
-                    .output('/dev/video5', format='v4l2')
-            )
+
+            if "270" in config['video_name']:
+                process = (
+                    ffmpeg
+                        .input(video_filepath, re=None, stream_loop=-1)
+                        .filter('format', 'yuv420p')
+                        .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
+                        .output('/dev/video5', format='v4l2')
+                )
+            else:
+                process = (
+                    ffmpeg
+                        .input(video_filepath, re=None, stream_loop=-1)
+                        .filter('format', 'yuv420p')
+                        .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-50', fontcolor='red', fontsize=200)
+                        .output('/dev/video5', format='v4l2')
+                )
 
             # Launch video playback
             print("Launching video playback")
