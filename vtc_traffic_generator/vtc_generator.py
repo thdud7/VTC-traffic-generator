@@ -148,6 +148,9 @@ def stop_video(video_pid):
     print("Stopping video")
     os.kill(video_pid, signal.SIGTERM)
 
+# XMLRPC
+def get_name():
+    return config['bot_name']
 
 def run_controller():
 
@@ -190,6 +193,10 @@ def run_controller():
         chosen_client = candidate_client
         uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
 
+        # Print bot name on controller STDOUT for debugging / manual bot admittance
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            print(proxy.get_name() + " speaking now.")
+
         # Command selected VTC client to take a dialog cycle
         with xmlrpc.client.ServerProxy(uri) as proxy:
             dialog_complete = False
@@ -205,6 +212,7 @@ def run_client(config):
     server.register_function(play_video, "play_video")
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
+    server.register_function(get_name, "get_name")
 
     server.serve_forever()
 
@@ -216,7 +224,10 @@ if __name__ == '__main__':
 
     # read config
     with open(sys.argv[1], 'r') as infile:
-        config = json.load(infile)
+        try:
+            config = json.load(infile)
+        except json.decoder.JSONDecodeError as err:
+            print(f"Invalid JSON: {err}")  # in case json is invalid
 
     print(config['version'])
     print ("Role: " + config['role'])
