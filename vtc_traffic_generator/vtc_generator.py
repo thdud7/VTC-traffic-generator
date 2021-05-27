@@ -46,11 +46,11 @@ def initialize_vtc_client():
 
     # Set volume levels and unmute devices
     for sink in sinks:
-        pulse.volume_set_all_chans(sink, .7)
+        pulse.volume_set_all_chans(sink, .8)
         pulse.mute(sink, False)
 
     for source in sources:
-        pulse.volume_set_all_chans(source, .7)
+        pulse.volume_set_all_chans(source, .8)
         pulse.mute(source, False)
 
     # Check for v4l2 virtual webcam kernel module
@@ -86,7 +86,7 @@ def dialog_cycle():
     index = 0
     while index < num_sentences:
         # Play file
-        filename = "line_" + str(index) + ".flac"
+        filename = str(index) + ".flac"
         audiofile_fullpath = str(PurePath(convo_path, filename))
 
         # Play audio
@@ -98,6 +98,7 @@ def dialog_cycle():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
+    '''
     try:
         process = (
             ffmpeg
@@ -105,11 +106,14 @@ def play_audio(audio_file_path):
                 .output('virtual_speaker', format='pulse', device='virtual_speaker')
         )
         process = process.run(capture_stdout=True, capture_stderr=True)
+        # process = process.run_async()
 
     except ffmpeg.Error as e:
         print('stdout:', e.stdout.decode('utf8'))
         print('stderr:', e.stderr.decode('utf8'))
         raise e
+    '''
+    subprocess.run('paplay -d virtual_speaker ' + audio_file_path, capture_output=True, shell=True)
 
 
 # XMLRPC
