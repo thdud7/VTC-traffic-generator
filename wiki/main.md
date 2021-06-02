@@ -5,8 +5,6 @@ audio and video streams, between two or more endpoints.
 
 [[_TOC_]]
 
-[Link to Wiki](/wiki/main.md)
-
 ## General Questions
 Some overarching testing questions across any VTC solution we decide to
 use:
