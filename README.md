@@ -23,7 +23,10 @@ The necessary files for operating the VTC traffic generator include:
 ## Generating a content library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
-1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](https://gitlab.com/searchlight/pharos/vtc/-/blob/master/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged.   
+1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](https://gitlab.com/searchlight/pharos/vtc/-/blob/master/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
+
+*********************************
+# OLD, this has moved to the wiki
 
 ## General Questions
 Some overarching testing questions across any VTC solution we decide to
