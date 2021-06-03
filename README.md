@@ -12,7 +12,7 @@ The VTC traffic generator requires a testbed of at least 2 machines (physical or
 
 The necessary files for operating the VTC traffic generator include:
 
-1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [generating-a-content-library](#generating-a-content-library) if you would like to create your own content library.  
+1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library.  
 
 ## Configuring the VTC controller
 
@@ -20,10 +20,11 @@ The necessary files for operating the VTC traffic generator include:
 
 ## Executing a VTC session
 
-## Generating a content library
+## Generating a Content Library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
-1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](https://gitlab.com/searchlight/pharos/vtc/-/blob/master/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
+1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
+1. Generate audio files from dialog tracks. This is done using the Google Cloud Platform text to speech service. You can follow the instructions in the Jupyter Notebook [GCP_TTS.ipynb](/text_to_speech/GCP_TTS.ipynb). This requires a Google Cloud account, though the free tier includes up to 1 million characters of voice synthesis per month.  
 
 *********************************
 # OLD, this has moved to the wiki
