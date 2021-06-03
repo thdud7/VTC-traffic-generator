@@ -1,11 +1,29 @@
 # Video Teleconferencing (VTC)
 
 **VTC** is defined as two-way traffic, consisting of separate
-audio and video streams, between two or more endpoints.
+audio and video streams, between two or more endpoints. This document explains how to install and operate the Searchlight VTC traffic generator. For technical details explaining how the generator works or how to populate a content library, see the [wiki](/wiki/main.md). 
 
 [[_TOC_]]
 
-[Link to Wiki](/wiki/main.md)
+## Architecture
+The VTC traffic generator uses virtual devices to automate the camera and microphone inputs to a VTC application. In the **near future**, VTC applications themselves (e.g. Jitsi Meet, Microsoft Teams, Zoom) will be automated for a complete end-to-end solution for traffic generation.
+
+The VTC traffic generator requires a testbed of at least 2 machines (physical or virtual), preferably 3+. The controller operates on one machine and controls multiple clients on separate machines. Each client machine ought to have 2 network interfaces, one for a control plane (controller traffic and status feedback), and another for a data plane (VTC traffic). The control plane network interface on the clients must be accessible by the controller. Using Virtualbox this is achieved by creating a host network and adding a secondary "Host-only" network adapter to each VTC client machine to serve as the control plane adapter. This is in addition to the primary adapter that creates the data plane and connects to the VTC application. Until full client automation is in place, the VTC clients must each be manually driven to configure and join a VTC session via a VTC application.
+
+The necessary files for operating the VTC traffic generator include:
+
+1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [generating-a-content-library](generating-a-content-library) if you would like to create your own content library.  
+
+## Configuring the VTC controller
+
+## Configuring the VTC client(s)
+
+## Executing a VTC session
+
+## Generating a content library
+Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
+1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
+1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](https://gitlab.com/searchlight/pharos/vtc/-/blob/master/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged.   
 
 ## General Questions
 Some overarching testing questions across any VTC solution we decide to
