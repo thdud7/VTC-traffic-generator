@@ -12,7 +12,7 @@ The VTC traffic generator requires a testbed of at least 2 machines (physical or
 
 The necessary files for operating the VTC traffic generator include:
 
-1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [generating-a-content-library](generating-a-content-library) if you would like to create your own content library.  
+1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [generating-a-content-library](#generating-a-content-library) if you would like to create your own content library.  
 
 ## Configuring the VTC controller
 
