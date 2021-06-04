@@ -12,9 +12,26 @@ The VTC traffic generator requires a testbed of at least 2 machines (physical or
 
 The necessary files for operating the VTC traffic generator include:
 
-1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library.  
+1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library. This library must be accessible by each VTC client. It is strongly recommended to copy the library to a shared drive that is mounted within each client virtual machine.  
+1. `vtc_generator.py` python program - This file contains both the VTC controller component and the VTC client. Confusingly, the VTC client actually operates as a server that listens for commands from the controller. This file must be on the controller machine and all VTC client machines. 
+1. `controller_config_template.json` - This file is a template to construct the config file for the controller. This must be on the controller machine. 
+1. `remote_config_template.json` - This file is a template to construct the config file for each VTC client. These configuration files must be on each VTC client machine. 
+1. Various `.ipynb` files - Not necessary to operate the VTC traffic generator, they contain example code demonstrating how to construct a [Content Library](#generating-a-content-library).
 
 ## Configuring the VTC controller
+
+The controller needs:
+1. python3 environment (native or virtual) with only the standard packages. 
+1. `vtc_generator.py` containing the controller code.
+1. A JSON controller configuration file based on `controller_config_template.json`. 
+
+| configuration parameter| description| 
+|---      |---|
+|`role`   |must be set to `controller`|
+|`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts - TBD|
+|`videoconference` | boolean (case sensitive) value, `true` for a video plus audio conference, `false` for audio-only|
+|`vtc_clients`| ip address and port number for each VTC client. Represented as a list of lists, with ip address as a string and port number as an integer|
+|`version` | controller software version number printed at runtime, useful for keeping controller and client configurations in sync |
 
 ## Configuring the VTC client(s)
 
@@ -23,7 +40,7 @@ The necessary files for operating the VTC traffic generator include:
 ## Generating a Content Library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
-1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Note: a CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
+1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Notes: Tensorflow 1.x is required. Current versions are incompatible with `GPT-2`. A CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
 1. Generate audio files from dialog tracks. This is done using the Google Cloud Platform text to speech service. You can follow the instructions in the Jupyter Notebook [GCP_TTS.ipynb](/text_to_speech/GCP_TTS.ipynb). This requires a Google Cloud account, though the free tier includes up to 1 million characters of voice synthesis per month.  
 
 *********************************
