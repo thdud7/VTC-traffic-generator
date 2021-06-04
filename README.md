@@ -12,7 +12,7 @@ The VTC traffic generator requires a testbed of at least 2 machines (physical or
 
 The necessary files for operating the VTC traffic generator include:
 
-1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library. This library must be accessible by each VTC client. It is strongly recommended to copy the library to a shared drive that is mounted within each client virtual machine.  
+1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at [TBD]. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library. This library must be accessible by each VTC client. It is strongly recommended to copy the library to a shared drive that is mounted within each client virtual machine. A sample video and a single dialog conversation are stored in the repository [here](vtc_traffic_generator/sample_media)  
 1. `vtc_generator.py` python program - This file contains both the VTC controller component and the VTC client. Confusingly, the VTC client actually operates as a server that listens for commands from the controller. This file must be on the controller machine and all VTC client machines. 
 1. `controller_config_template.json` - This file is a template to construct the config file for the controller. This must be on the controller machine. 
 1. `remote_config_template.json` - This file is a template to construct the config file for each VTC client. These configuration files must be on each VTC client machine. 
