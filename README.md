@@ -1,7 +1,7 @@
 # Video Teleconferencing (VTC)
 
 **VTC** is defined as two-way traffic, consisting of separate
-audio and video streams, between two or more endpoints. This document explains how to install and operate the Searchlight VTC traffic generator. For technical details explaining how the generator works or how to populate a content library, see the [wiki](/wiki/main.md). 
+audio and video streams, between two or more endpoints. This document explains how to install and operate the Searchlight VTC traffic generator. For technical details explaining how the traffic generator works or how media content is generated, see the [wiki](/wiki/main.md). 
 
 [[_TOC_]]
 
@@ -23,7 +23,7 @@ The necessary files for operating the VTC traffic generator include:
 The controller needs:
 1. python3 environment (native or virtual) with only the standard packages. 
 1. `vtc_generator.py` containing the controller code.
-1. A JSON controller configuration file based on `controller_config_template.json`. 
+1. A JSON controller configuration file based on `controller_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as a separate file, e.g. `controller_config.json`.  
 
 | configuration parameter| description| 
 |---      |---|
@@ -35,267 +35,49 @@ The controller needs:
 
 ## Configuring the VTC client(s)
 
-## Executing a VTC session
+Each client needs a nearly identical configuration. The only difference is that the controller must be able to reach each client at a different IP address. Therefore, when configuring multiple clients, it is often easiest to configure one, then clone that first machine as many times as necessary, specifying the control plane IP address for each as necessary. 
 
+Each client needs:
+1. Linux operating system with the following packages installed:
+    * ffmpeg
+    * pulseaudio (installed by default on Ubuntu)
+1. [`v4l2loopback`](https://github.com/umlaeute/v4l2loopback) kernel module installed and running.
+    * Build and install kernel module as described [here](https://github.com/umlaeute/v4l2loopback).
+    * Load kernel module with `# modprobe v4l2loopback video_nr=5 exclusive_caps=1`
+    * Confirm `v4l2loopback` module is loaded with `$ lsmod|grep v4l2`
+1. python3 environment (native or virtual) with the following packages installed:
+    * [ffmpeg-python](https://pypi.org/project/ffmpeg-python/) 
+    * [pulsectl](https://pypi.org/project/pulsectl/)
+1. Media library containing properly formatted audio and video files, mounted to the local filesystem.
+1. `vtc_generator.py` containing the VTC client (server) code.
+1. A JSON controller configuration file based on `remote_controller_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as separate files for each of *n* VTC clients, e.g. `remote_config_n.json`.  
+
+| configuration parameter| description| 
+|---      |---|
+|`role`   |must be set to `client`|
+|`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts - TBD|
+|`c2_port` | port to run XMLRPC server. Must match the port specified in the controller configuration. Default = 8001|
+|`bot_name` | string for bot name superimposed over video feed into VTC session |
+|`videoconference` | boolean (case sensitive) value, `true` to enable video for this client, `false` for audio-only|
+|`audio_path` | full system path to the root of the audio tracks |
+|`voice_name` | name of voice to use for this VTC client dialog. Must match a directory in `audio_path`|
+|`video_path` | full system path to the root of the video files |
+|`video_name` | name of video file to use for this VTC client. Must match a file in `video_path`|
+|`version` | VTC client software version number printed at runtime, useful for keeping controller and client configurations in sync |
+
+## Executing a VTC session
+1. Ensure each VTC client machine is [configured properly](#configuring-the-vtc-clients). 
+1. Start the VTC client software on each client *n* with: `python vtc_generator.py <remote_config_n.json>`
+1. Start the VTC controller software on the controller with: `python vtc_generator.py <controller_config.json>`
+    * This will start media playback into the virtual devices on each client, starting the conversation. 
+1. On each client, manually connect to the active VTC session. 
+    * You must select `virtual_he microphone and  `Dummy video device 0x0005` as the camera. It is strongly recommended to mute the speaker audio on each VTC client machine. This can be done with the virtual machine audio controls or by simply disabling audio feeding back to the host via the hypervisor UI. 
+    * Note, some VTC applications do not allow guest participation and require a login. Microsoft Teams allows guest participation only through the web client. Google Meet does not allow guest participation. Jitsi and Zoom allow guest participation through their web clients and their native applications.
+1. Admit the VTC bots (if necessary) into the VTC conversation. 
+1. To shut down, kill the process (ctrl-C) on the controller and clients and close the VTC application. 
+    
 ## Generating a Content Library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
 1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Notes: Tensorflow 1.x is required. Current versions are incompatible with `GPT-2`. A CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
 1. Generate audio files from dialog tracks. This is done using the Google Cloud Platform text to speech service. You can follow the instructions in the Jupyter Notebook [GCP_TTS.ipynb](/text_to_speech/GCP_TTS.ipynb). This requires a Google Cloud account, though the free tier includes up to 1 million characters of voice synthesis per month.  
-
-*********************************
-# OLD, this has moved to the wiki
-
-## General Questions
-Some overarching testing questions across any VTC solution we decide to
-use:
-- how do we simulate the webcam for each endpoint?
-    * See: [Virtual Devices](#Virtual Devices)
-- how do we instrument and measure A/V quality?
-    * See: [Metrics](#Metrics) We expect quality to vary as bandwidth is limited. 
-
-## Technologies
-A number of technologies serve as building blocks for automated VTC traffic generation on a testbed. 
-
-### Virtual Devices
-Test and evaluation tasks on the testbed require a capability to automatically generate VTC traffic. In order to emulate the real world with the highest fidelity possible we need to use real VTC software on the testbed. These software packages are primarily meant to accept input streams from cameras and microphones, not static video and audio files on disk. Rather than using real devices and capturing live content, we rely on virtual devices to provide streaming content feeds (audio and visual) to the VTC packages. 
-
-#### Virtual Camera
-The virtual camera is based on a [Video4Linux](https://www.kernel.org/doc/html/v4.9/media/uapi/v4l/v4l2.html) device. The [v4l2loopback](https://github.com/umlaeute/v4l2loopback) kernel module allows you to create "virtual video devices". Normal (v4l2) applications will read these devices as if they were ordinary video devices, but the video will not be read from a camera or video capture card but instead it is generated by another application.  
-
-In our case, we use [gstreamer](https://gstreamer.freedesktop.org/) to create a media pipeline, streaming a video file from disk to the virtual camera device. This device can be selected in the VTC application UI (e.g. Zoom client), and the video is displayed. 
-
-Steps for configuring virtual camera:
-1. Make kernel module [v4l2loopback](https://github.com/umlaeute/v4l2loopback)
-1. Load kernel module to device `/dev/video5`: `# modprobe v4l2loopback video_nr=5 exclusive_caps=1` Note: kernel module must be built for the currently running kernel and be found in `/lib/modules/[kernel]`
-1. Make sure [v4l2loopback](https://github.com/umlaeute/v4l2loopback) kernel module is loaded and `/dev/video5` exists. (`$ lsmod`, then look for `v412loopback`)
-1. Install [gstreamer](https://gstreamer.freedesktop.org/documentation/installing/on-linux.html)
-1. Locate source video file (see path below for free source VTC video files.
-1. Use `ffmpeg` to stream from a file to the virtual device. 
-   1. Example with overlay and looping: `ffmpeg -stream_loop -1 -re -i <video_filename>.mp4 -vf "drawtext=text='Bot 1':fontsize=200:fontcolor=red:font=Arial:x=(w-text_w)/2:y=h-th-100,format=yuv420p" -f v4l2 /dev/video5`
-1. (Alternative to ffmpeg) Launch gstreamer pipeline: `$ gst-launch-1.0 -v filesrc location=<video_filename.mp4> ! decodebin ! videoconvert ! "video/x-raw,format=YUY2" ! v4l2sink device=/dev/video5`
-   1. For gstreamer help try: `$ gst-inspect-1.0 videoscale`
-1. Select the appropriate camera device in the VTC UI.
-
-Note:
-* Alternative virtual camera driver: [akvcam](https://github.com/webcamoid/akvcam)
-
-To Do:
-- Configure video pipeline to repeatedly stream video file or cycle through multiple files
-- Automate virtual camera device selection in target VTC clients
-
-#### Virtual Microphone
-
-The virtual microphone is based on ALSA loopback device [snd_aloop](https://www.alsa-project.org/wiki/Matrix:Module-aloop). Like the virtual camera, the virtual microphone is a a kernel module. Normal applications will read these devices as if they were ordinary microphones, but the audio will be generated by another application. 
-
-Steps for configuring virtual microphone:
-1. Load `snd_aloop` kernel module: `# modprobe snd_aloop`
-1. Verify loopback devices present with: `$ aplay -L`
-1. Play WAV file with `aplay -D <device_name> <filename.wav>
-   1. Example FLAC playback: `$ flac -c -d VTC_audio_tracks/male_1-en-US-Wavenet-I/convo_1/line_7.flac |aplay -D sysdefault`
-1. Select the appropriate microphone device in the VTC UI. 
-
-* Note, for highest fidelity emulation use WAV audio files, not necessarily because sound quality matters, but because we are emulating low-level microphone devices and audio compression happens wwithin the VTC application, not the device typically. 
-
-
-### VTC Media Content
-Driving VTC sessions requires feeding media content (audio and visual) into the virtual devices. This media content must approximate what we'd see in the real world, and it we must have rights to use it in our testbed. 
-
-#### Video sources
-Video content should represent people talking toward a camera. Preferably this content is roughly 720p or 1080p resolution, and the VTC application can re-scale as necessary. Audio is handled via a separate virtual device, so an audio track or dialog is not necessary. Participant focus in VTC apps is typically done by applying a thresholding algorithm on the audio device, not video, so a constantly moving video feed does not pose a problem and realistic pauses are not necessary. 
-
-Free source VTC videos: `/zfs/pharos/pcaps/vtc/source_videos/`
-
-#### Audio source generation
-Audio source generation is broken down into 2 phases: text generation and speech synthesis. These phases can be done _a priori_, storing audio files on disk for quick retrieval by the dialog orchestration engine.
-
-##### Text Generation
-
-[Open AI's](https://openai.com/) [GPT-2](https://github.com/openai/gpt-2) language model is used to generate text that will drive the VTC audio track. GPT-2 is used in "unconditional" mode to create text samples without requiring any prompting. A successor larger language model called GPT-3 exists but is not readily available for use. GPT-2 relies on Tensorflow, so the speed of text generation is greatly improved by running it on a system with a powerful [CUDA](https://developer.nvidia.com/cuda-zone) compatible GPU. Because text generation for VTC is entirely unprompted and the semantic content is unimportant for our testbed, GPT-2 can be run with minor modifications on cloud services such as [Google Colaboratory](https://colab.research.google.com/), which offers free limited GPU usage.
-
-|GPT-2 model parameter | value | rationale |
-|---|---| ---|
-|model_name|1558M | 1.5 billion parameters is the largest GPT-2 model released|
-|seed|None|optional random seed|
-|nsamples|\<variable\>|number of samples to generate, where a sample is typically a few small, contiguous paragraphs on a single topic|
-|batch_size|1|default, affects speed & memory usage|
-|length|None|default, limits the length of each sample|
-|temperature|1|default, affects randomness. Lower is boring repetitive, robotic text |
-|top_k|40|recommended default, controls vocabulary diversity|
-
-Once a GPT-2 environment is established with the proper requirements, generate text with a variant of this command: `(gpt-2_ENV) $ python src/generate_unconditional_samples.py --top_k 40 --model_name=1558M`
-
-An excerpt from a single sample of unprompted GPT-2 output text:
-> Pete Carroll is not the best defensive coach in the NFL. The Seahawks were a pretty good defense in his first couple of years there (not that they did much else), but they haven't been great in the last few years. They are ranked 29th in yards allowed, 31st in points allowed, and 24th in yards allowed/receiver and red-zone defense. That doesn't sound good on the surface. I could talk about how much pressure they bring, why they don't bring pressure as much as they used to, or a host of other possible excuses. But that's just what I do every year. There are still games where they look terrible, but then teams put up more than 20 points and score lots of points. We see some of that this year.
- 
-##### Speech Synthesis
-The plaintext samples generated above are then fed into off-the-shelf text to speech tools to create audio snippets of dialog for live orchestration. These audio snippets are also generated _a priori_ and stored on the server. Many text to speech tools were evaluated for their suitability for VTC traffic generation. The [Google Cloud Text-to-Speech API](https://cloud.google.com/text-to-speech) has the most natural sounding and varied voices available among the speech synthesis solutions. There is a free tier option that allows up to 1-4 million characters of speech generation monthly for free, depending on the type of voice selected.
-![Google_cloud_tts](wiki/audio/Google-cloud_tts_test.mp3)
-
-###### Local Text to Speech Alternatives
-Locally run alternatives to Google Cloud services may be desired for a number of reasons including offline generation, ease of use, or pricing/payment concerns. These options are based on older technology, and the realism does not match contemporary commercial text to speech APIs like those provided by Google, Amazon, and Microsoft.    
-
-[Festival](http://festvox.org/festival/) is a free software multi-lingual speech synthesis engine with many custom voices available.  
-![festival-advanced](wiki/audio/festival_advanced.mp3)
-![festival-basic](wiki/audio/festival_basic.mp3)
-
-[espeak-ng](https://github.com/espeak-ng/espeak-ng) is another free speech synthesis engine that supports many languages. espeak-ng is very lightweight and easy to use, but the output is lower quality than the alternatives.   
-![espeak-ng](wiki/audio/espeak-ng_test.mp3)
-
-### Agent Dialog Coordination
-
-Video feeds must be paired with dialog audio tracks. 
-
-![Example video with generated dialog audio track](wiki/video/example_client_video_dialog.mp4)
-![Example VTC session on cloud platform with 2 bots](wiki/video/example_cloud_VTC_2bots.mp4)
-
-**TBD** - generate speech audio files from text to speech package reading generated natural language (GPT-2). Must have natural cadence and pauses for n-way communication. Create sentence library with male and female voices. Stream audio into loopback device, looping as necessary. Audio must be cut by issuing new streaming commands while pausing to avoid stealing VTC focus. 
-Audio and video devices need to be scripted to approximate real participants in a VTC session. Looped streaming of video feeds through the virtual device is a starting point. One simple improvement is to pause the video stream when another bot is talking. Realistic VTC requires a more sophisticated approach for the audio feeds. The audio conversation must vary and in order to prevent one participant from hogging the VTC focus the audio devices must have pauses proportional to the number of participants in the VTC.
-Script audio and video streaming with input parameters:
- * gender
- * duration
- * number of participants
-
-### WebRTC
-WebRTC (Web Real-Time Communication) is a free, open-source project that provides web browsers and mobile applications with real-time communication (RTC) via simple application programming interfaces (APIs). It allows audio and video communication to work inside web pages by allowing direct peer-to-peer communication, eliminating the need to install plugins or download native apps. WebRTC is **not** a VTC application; it is a set of javascript APIs that can be incorporated into a VTC application.
-
-[WebRTC Security & Technology](https://webrtc-security.github.io/)
-The video traffic on the wire in WebRTC is called the DataChannel, and this traffic has several properties:
-* UDP (not TCP)
-* Encrypted with DTLS by default
-* Typically peer-to-peer (P2P), though Jitsi Videobridge is an exception for >2 party VTC sessions.
-
-![image](wiki/images/web_rtc_call_topology.png)
-
-A simple WebRTC Call Topology
-
-![image](wiki/images/web_rtc_stack.png)
-
-WebRTC Protocol Stack
-
-#### Automating WebRTC
-A simple skeleton program is being built that demonstrates webRTC VTC capabilities. This can potentially be automated by directly hooking into the Javascript, or by driving a web browser with a tool like [Selenium](https://www.selenium.dev/). 
-
-_2021-02-03 update: WebRTC application development paused because it is a lower priority than further developing virtual devices and deploying Jitsi Meet to the testbed._
-
-## Self Hosted VTC Systems
-Some VTC systems can be entirely self-hosted and do not rely on external services. These are well suited for testbed use because they can offer complete control of configuration and instrumentation and do not require external communication bandwidth. However, the underlying technology and user experience may differ from widely adopted commercial VTC solutions. 
-
-### Jitsi Meet
-Jitsi is a collection of free and open-source multiplatform voice (VoIP), videoconferencing, and instant messaging applications for the web platform, Windows, Linux, macOS, iOS, and Android. Jitsi Meet is an open source JavaScript WebRTC application and can be used for videoconferencing.
-
-**Status:** We have deployed Jitsi Meet in development environments. This still needs to be further tested and developed into a testbed capability. _2021-02-03_
-
-### Other Self Hosted VTC Systems
-- [Element Matrix](https://element.io/): open-source Slack/Mattermost with VTC capabilities
-- etc.
-
-## Commercial Cloud VTC Services
-Commercial cloud VTC services are paid or free services offering VTC capabilities where the servers are owned and operated by a third party. Users access the VTC services via clients that can be mobile, browser-based, or standalone binaries. The server provides signaling, videobridge, and various ancillary functionality that cannot be replicated locally. 
-
-Examples include:
-- [Zoom](https://zoom.us/)
-- Google [Hangouts](https://hangouts.google.com/) / [Meet](https://meet.google.com/) 
-- [Microsoft Teams](https://www.microsoft.com/en-us/microsoft-teams/group-chat-software)
-- etc. 
-
-Cloud VTC services are the most widely adopted VTC solutions, so they represent a valuable class of systems for realistic test and evaluation purposes. However, they have several notable drawbacks, primarily because they cannot be replicated entirely in the testbed:
-- External bandwidth demands are high due to the streaming video nature of VTC, particularly when many clients are active.
-- Cloud VTC services require sending data over the public internet, potentially introducing many artifacts to the laboratory-like testbed environment.
-- A large number of user accounts must be purchased and maintained for large scale testing. 
-
-### Small scale testing 
-As shown above, virtual devices can be used to feed content into any VTC client. This allows us to programmatically drive a commercial VTC service with prerecorded footage from within our testbed or development environments. However, this requires real accounts on the VTC service and we have limited external bandwidth on our testbeds, so we are limited to very small scale experiments. At the moment driving commercial cloud services is primarily useful to us in the following ways:
-
-- Technology demonstration
-- Packet capture - we can assemble a pcap dataset drawn from the most popular VTC services for replay or analysis. 
-
-#### Zoom
-We have demonstrated the virtual device technology on Zoom and captured videos from a live Zoom meeting. These videos can be found here: `/zfs/pharos/pcaps/vtc/zoom_screencaps/`
-
-![2021_02_01-Zoom_VTC_.mov screencap](wiki/images/2021_02_01_ZoomA_vtc.png)
-
-#### Skype
-_Not currently under consideration as of 2020-10-02._
-
-* Skype requires Windows, provisioned Skype clients, and outbound Internet
-* Internet access does introduce interesting "uncertainty" as traffic
-  routes through public Internet
-
-## Experiment Orchestration
-VTC agents (bots) need to run on their own computers in our test environment, and the VTC coordination must happen independently of agent activity. This necessitates a distributed architecture where the agents have an agent API, and the main controller creates a VTC session and issues commands to each agent in the VTC session. This command and control (C2) must happen on a different control plane (network interface) than the VTC traffic itself to avoid polluting the test results with artificial C2 traffic. 
-
-Each agent is running an instance of the agent REST API, and the controller issues commands and configurations to each agent in order to drive the VTC session. 
-
-**TBD: System Diagram Here**
-
-## Metrics
-**TBD**
-- Bandwidth
-- Latency
-- Video quality
-- Audio quality
-- "Perceived quality"
-
-Some rough numbers:
-> I did some simple tests to see how much throughput different VTCs were
-> using. So far I've looked at: Zoom, Google Meet, and Jitsi Meet. I'll be
-> able to test Skype (at least audio-only) during our Searchlight sync on
-> Monday.
-> 
-> - Zoom, 4 participants
->   * audio + video: 330 KBps (down) / 150 KBps (up)
-> 
-> - Google Meet, 2 participants
->   * audio-only: ~6 KBps (down) / ~6 KBps (up)
->   * audio + video: 80-100 KBps (down) / 150-300 KBps (up)
->   * no audio (muted), no video (turned off camera): 0 (down) / 40-60 KBps (up)
->     - even with "no activity" I'm sending quite a bit to Google...
-> 
-> - Jitsi Meet, 2 participants
->   * audio + video: ~200 KBps (down) / 300 KBps (up)
-> 
-> - Skype, 6 participants
->   * audio only: ~3-8 KBps (down) / { 0.6 KBps (up, when muted), 3-6
->     KBps (up, when transmitting) }
-> 
-> There are lots of variables that can affect these numbers: presumably
-> each service wants to minimize the amount of bandwidth needed, but will
-> happily grab more if it's available.
-> 
-> For example, I used the Mac's built-in webcam (720p @ 30fps), which is
-> roughly 3000 kbps (375 KBps). If someone had a 4K-quality camera, I'm
-> wondering if each service would upload the highest quality possible.
-> 
-> At some point next week I'll try to see if these numbers are consistent
-> as the number of participants increase. If I joined a Zoom call with
-> 10+, would the throughput also increase linearly? (I wouldn't think so.)
-
-## Traffic Analysis
-
-### Zoom
-
-Zoom web client (browser) seems to use a combination of custom signaling
-with a standardized (H.264?) codec over WebRTC Data channels (as of
-2019?) and, previously, WebSockets.
-
-Unknown if the Zoom applications (mobile, desktop) use similar
-technology or a separate, custom stack.
-
-- [Zoom avoids using WebRTC (2019)](https://webrtchacks.com/zoom-avoids-using-webrtc/)
-- [WebRTC vs Zoom. Who has Better Video Quality? (2018)](https://bloggeek.me/webrtc-vs-zoom-video-quality/)
-- [When will Zoom use WebRTC?](https://bloggeek.me/when-will-zoom-use-webrtc/)
-
-## Testbed Deployment
-**TBD**
-
-### Desktop Client Automation
-
-- Browser: Playwright, Selenium, etc.
-- Desktop:
-    * Windows: AutoHotKey
-    * Linux:
-        - [SikuliX](https://github.com/RaiMan/SikuliX1) (Java, OpenCV)
-        - [UI.Vision](https://ui.vision/)
-
-Key words for desktop automation: "RPA" (Robotic Process Automation)
