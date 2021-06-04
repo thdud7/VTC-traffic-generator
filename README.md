@@ -35,7 +35,7 @@ The controller needs:
 
 ## Configuring the VTC client(s)
 
-Each client needs a nearly identical configuration. The only difference is that the controller must be able to reach each client at a different IP address. Therefore, when configuring multiple clients, it is often easiest to configure one, then clone that first machine as many times as necessary, specifying the control plane IP address for each as necessary. 
+Each client needs a nearly identical configuration. The only difference is that the controller must be able to reach each client at a different IP address. Therefore, when configuring multiple clients, it is often easiest to configure one, then clone that first machine as many times as necessary, specifying the control plane IP address for each. 
 
 Each client needs:
 1. Linux operating system with the following packages installed:
@@ -50,7 +50,7 @@ Each client needs:
     * [pulsectl](https://pypi.org/project/pulsectl/)
 1. Media library containing properly formatted audio and video files, mounted to the local filesystem.
 1. `vtc_generator.py` containing the VTC client (server) code.
-1. A JSON controller configuration file based on `remote_controller_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as separate files for each of *n* VTC clients, e.g. `remote_config_n.json`.  
+1. A JSON controller configuration file based on `remote_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as separate files for each of *n* VTC clients, e.g. `remote_config_n.json`.  
 
 | configuration parameter| description| 
 |---      |---|
@@ -71,7 +71,7 @@ Each client needs:
 1. Start the VTC controller software on the controller with: `python vtc_generator.py <controller_config.json>`
     * This will start media playback into the virtual devices on each client, starting the conversation. 
 1. On each client, manually connect to the active VTC session. 
-    * You must select `virtual_he microphone and  `Dummy video device 0x0005` as the camera. It is strongly recommended to mute the speaker audio on each VTC client machine. This can be done with the virtual machine audio controls or by simply disabling audio feeding back to the host via the hypervisor UI. 
+    * You must select `virtual_mic` and `Dummy video device 0x0005` as the camera. It is strongly recommended to mute the speaker audio on each VTC client machine. This can be done with the virtual machine audio controls or by simply disabling audio feeding back to the host via the hypervisor UI. 
     * Note, some VTC applications do not allow guest participation and require a login. Microsoft Teams allows guest participation only through the web client. Google Meet does not allow guest participation. Jitsi and Zoom allow guest participation through their web clients and their native applications.
 1. Admit the VTC bots (if necessary) into the VTC conversation. 
 1. To shut down, kill the process (ctrl-C) on the controller and clients and close the VTC application. 
