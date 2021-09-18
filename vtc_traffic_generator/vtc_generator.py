@@ -10,7 +10,8 @@ import json
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
 from pathlib import PurePath
-
+import asyncio
+from playwright.async_api import async_playwright
 
 class VtcClient:
     print("Creating client object")
@@ -159,6 +160,39 @@ def play_video():
 
 
 # XMLRPC
+def connect_vtc_session():
+    if config['vtc_platform'].lower() == "jitsi":
+        print("Connecting to Jitsi VTC session")
+        async with async_playwright() as p:
+            # Consider pointing to local chromium, e.g. /usr/bin/google-chrome
+            # browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"], headless=False)
+            browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream"], headless=False)
+            page = await browser.new_page(ignore_https_errors=True)
+            await page.goto("https://192.168.56.1:8443/automated_vtc")
+            # await page.goto("https://localhost:8443/")
+            print(await page.title())
+            # Open microphone settings
+            await page.click("#new-toolbox div div div div >> :nth-match(svg, 2)")
+            # Select virtual_mic
+            await page.click("#new-toolbox div div div div >> :nth-match(div:has-text(\"virtual_mic\"), 5)")
+
+            # Set participant duration
+            await page.pause()
+            # await asyncio.sleep(10)
+            # await browser.close()
+
+
+    else:
+        print("Missing connector to vtc platform: " + config['vtc_platform'])
+
+    # Need to set timer, perhaps in controller
+    # Need client teardown function too, triggered by controller
+
+# XMLRPC
+def client_shutdown():
+    print("Shutting down client")
+
+# XMLRPC
 def stop_video(video_pid):
     print("Stopping video")
     os.kill(video_pid, signal.SIGTERM)
@@ -229,6 +263,8 @@ def run_client(client_config):
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
     server.register_function(get_name, "get_name")
+    server.register_function(connect_vtc_session, "connect_vtc_session")
+    server.register_function(client_shutdown, "client_shutdown")
 
     server.serve_forever()
 
