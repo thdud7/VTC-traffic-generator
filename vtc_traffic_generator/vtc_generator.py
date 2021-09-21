@@ -233,7 +233,7 @@ def connect_vtc_session():
             # browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"], headless=False)
             browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream"], headless=False)
             page = await browser.new_page(ignore_https_errors=True)
-            await page.goto("https://192.168.56.1:8443/automated_vtc")
+            await page.goto(config['vtc_url'])
             # await page.goto("https://localhost:8443/")
             print(await page.title())
             # Open microphone settings

@@ -1,6 +1,7 @@
 {
     "role": "client",
     "vtc_platform": "vtc_platform_name",
+    "vtc_url": "URL",
     "c2_port": "port_number",
     "bot_name": "bot_name",
     "videoconference": true,
