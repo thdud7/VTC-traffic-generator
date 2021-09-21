@@ -13,6 +13,56 @@ from pathlib import PurePath
 import asyncio
 from playwright.async_api import async_playwright
 
+def run_controller():
+    num_clients = len(config['vtc_clients'])
+    vtc_clients = []
+
+    # Instantiate clients
+    for x in range(num_clients):
+
+        # Create VTC client
+        vtc_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
+
+        # Initialize client devices
+        uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.initialize_vtc_client()
+
+        # Start client video stream to virtual camera device
+        if config['videoconference']:
+            with xmlrpc.client.ServerProxy(uri) as proxy:
+                vtc_clients[x].video_pid = proxy.play_video()
+
+        '''
+        # Testing Video stopping capability
+        time.sleep(15)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.stop_video(VTC_clients[x].video_pid)
+        '''
+
+    # Begin client dialog
+    # Randomly select VTC_client as long as it wasn't the last one picked.
+    chosen_client = None
+    candidate_client = random.choice(vtc_clients)
+
+    # Infinite loop of conversation dialog.
+    while True:
+        while candidate_client is chosen_client:
+            candidate_client = random.choice(vtc_clients)
+
+        chosen_client = candidate_client
+        uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
+
+        # Print bot name on controller STDOUT for debugging / manual bot admittance
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            print(proxy.get_name() + " speaking now.")
+
+        # Command selected VTC client to take a dialog cycle
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            dialog_complete = False
+            dialog_complete = proxy.dialog_cycle()
+
+
 class VtcClient:
     print("Creating client object")
 
@@ -20,6 +70,21 @@ class VtcClient:
         self.ip = ip
         self.port = int(port)
         self.video_pid = 0
+
+def run_client(client_config):
+    # Register functions and respond to calls indefinitely
+    server = SimpleXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
+    print("Listening on port: " + str(client_config['c2_port']))
+
+    server.register_function(initialize_vtc_client, "initialize_vtc_client")
+    server.register_function(play_video, "play_video")
+    server.register_function(stop_video, "stop_video")
+    server.register_function(dialog_cycle, "dialog_cycle")
+    server.register_function(get_name, "get_name")
+    server.register_function(connect_vtc_session, "connect_vtc_session")
+    server.register_function(client_shutdown, "client_shutdown")
+
+    server.serve_forever()
 
 
 # XMLRPC
@@ -181,7 +246,6 @@ def connect_vtc_session():
             # await asyncio.sleep(10)
             # await browser.close()
 
-
     else:
         print("Missing connector to vtc platform: " + config['vtc_platform'])
 
@@ -201,72 +265,6 @@ def stop_video(video_pid):
 # XMLRPC
 def get_name():
     return config['bot_name']
-
-
-def run_controller():
-    num_clients = len(config['vtc_clients'])
-    vtc_clients = []
-
-    # Instantiate clients
-    for x in range(num_clients):
-
-        # Create VTC client
-        vtc_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
-
-        # Initialize client devices
-        uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.initialize_vtc_client()
-
-        # Start client video stream to virtual camera device
-        if config['videoconference']:
-            with xmlrpc.client.ServerProxy(uri) as proxy:
-                vtc_clients[x].video_pid = proxy.play_video()
-
-        '''
-        # Testing Video stopping capability
-        time.sleep(15)
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.stop_video(VTC_clients[x].video_pid)
-        '''
-
-    # Begin client dialog
-    # Randomly select VTC_client as long as it wasn't the last one picked.
-    chosen_client = None
-    candidate_client = random.choice(vtc_clients)
-
-    # Infinite loop of conversation dialog.
-    while True:
-        while candidate_client is chosen_client:
-            candidate_client = random.choice(vtc_clients)
-
-        chosen_client = candidate_client
-        uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
-
-        # Print bot name on controller STDOUT for debugging / manual bot admittance
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            print(proxy.get_name() + " speaking now.")
-
-        # Command selected VTC client to take a dialog cycle
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            dialog_complete = False
-            dialog_complete = proxy.dialog_cycle()
-
-
-def run_client(client_config):
-    # Register functions and respond to calls indefinitely
-    server = SimpleXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
-    print("Listening on port: " + str(client_config['c2_port']))
-
-    server.register_function(initialize_vtc_client, "initialize_vtc_client")
-    server.register_function(play_video, "play_video")
-    server.register_function(stop_video, "stop_video")
-    server.register_function(dialog_cycle, "dialog_cycle")
-    server.register_function(get_name, "get_name")
-    server.register_function(connect_vtc_session, "connect_vtc_session")
-    server.register_function(client_shutdown, "client_shutdown")
-
-    server.serve_forever()
 
 
 if __name__ == '__main__':
