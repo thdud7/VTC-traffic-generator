@@ -1,6 +1,7 @@
 {
     "role": "controller",
     "vtc_platform": "vtc_platform_name",
+    "duration": "time (min)",
     "videoconference": true,
     "vtc_clients":  [
                     ["ip1", 11111],
