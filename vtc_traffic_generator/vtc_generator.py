@@ -33,6 +33,11 @@ def run_controller():
             with xmlrpc.client.ServerProxy(uri) as proxy:
                 vtc_clients[x].video_pid = proxy.play_video()
 
+        # Connect to VTC session
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.connect_vtc_session()
+
+
         '''
         # Testing Video stopping capability
         time.sleep(15)
@@ -70,7 +75,10 @@ def run_controller():
         elapsed_time = time.time() - start_time
 
     # Tear down VTC
-
+    for x in range(num_clients):
+        uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.client_shutdown()
 
 class VtcClient:
     print("Creating client object")
@@ -262,6 +270,7 @@ def connect_vtc_session():
 # XMLRPC
 def client_shutdown():
     print("Shutting down client")
+    # Call stop_video
 
 
 # XMLRPC
