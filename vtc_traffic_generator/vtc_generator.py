@@ -45,8 +45,13 @@ def run_controller():
     chosen_client = None
     candidate_client = random.choice(vtc_clients)
 
-    # Infinite loop of conversation dialog.
-    while True:
+
+    # VTC conversation loop
+    start_time = time.time()
+    elapsed_time = 0
+
+    # Converse for VTC duration
+    while elapsed_time < config['duration'] * 60:
         while candidate_client is chosen_client:
             candidate_client = random.choice(vtc_clients)
 
@@ -61,6 +66,10 @@ def run_controller():
         with xmlrpc.client.ServerProxy(uri) as proxy:
             dialog_complete = False
             dialog_complete = proxy.dialog_cycle()
+
+        elapsed_time = time.time() - start_time
+
+    # Tear down VTC
 
 
 class VtcClient:
@@ -249,12 +258,11 @@ def connect_vtc_session():
     else:
         print("Missing connector to vtc platform: " + config['vtc_platform'])
 
-    # Need to set timer, perhaps in controller
-    # Need client teardown function too, triggered by controller
 
 # XMLRPC
 def client_shutdown():
     print("Shutting down client")
+
 
 # XMLRPC
 def stop_video(video_pid):
