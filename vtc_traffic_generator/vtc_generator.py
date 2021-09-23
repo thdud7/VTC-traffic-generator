@@ -35,7 +35,7 @@ def run_controller():
 
         # Connect to VTC session
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.connect_vtc_session()
+            print(proxy.run_connect(config['duration']))
 
 
         '''
@@ -98,7 +98,8 @@ def run_client(client_config):
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
     server.register_function(get_name, "get_name")
-    server.register_function(connect_vtc_session, "connect_vtc_session")
+    #server.register_function(connect_vtc_session, "connect_vtc_session")
+    server.register_function(run_connect, "run_connect")
     server.register_function(client_shutdown, "client_shutdown")
 
     server.serve_forever()
@@ -242,7 +243,8 @@ def play_video():
 
 
 # XMLRPC
-def connect_vtc_session():
+async def connect_vtc_session(duration):
+    print("IN connect_vtc_session")
     if config['vtc_platform'].lower() == "jitsi":
         print("Connecting to Jitsi VTC session")
         async with async_playwright() as p:
@@ -259,13 +261,17 @@ def connect_vtc_session():
             await page.click("#new-toolbox div div div div >> :nth-match(div:has-text(\"virtual_mic\"), 5)")
 
             # Set participant duration
-            await page.pause()
-            # await asyncio.sleep(10)
-            # await browser.close()
+            # await page.pause()
+            await asyncio.sleep(duration * 60)
+            await browser.close()
 
     else:
         print("Missing connector to vtc platform: " + config['vtc_platform'])
 
+    return(config['bot_name'] + " connected to VTC session.")
+
+def run_connect(duration):
+    asyncio.run(connect_vtc_session(duration))
 
 # XMLRPC
 def client_shutdown():
