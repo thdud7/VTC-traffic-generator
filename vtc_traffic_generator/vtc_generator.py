@@ -259,6 +259,8 @@ async def connect_vtc_session(duration):
             await page.click("#new-toolbox div div div div >> :nth-match(svg, 2)")
             # Select virtual_mic
             await page.click("#new-toolbox div div div div >> :nth-match(div:has-text(\"virtual_mic\"), 5)")
+            # Close mic selection dialog
+            await page.click("#new-toolbox div div div div div >> :nth-match(svg, 2)")
 
             # Set participant duration
             # await page.pause()
