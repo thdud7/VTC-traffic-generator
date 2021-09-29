@@ -9,9 +9,12 @@ import time
 import json
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
+import socketserver
 from pathlib import PurePath
 import asyncio
 from playwright.async_api import async_playwright
+import concurrent.futures
+import threading
 
 def run_controller():
     num_clients = len(config['vtc_clients'])
@@ -23,27 +26,18 @@ def run_controller():
         # Create VTC client
         vtc_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
 
-        # Initialize client devices
-        uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.initialize_vtc_client()
-
-        # Start client video stream to virtual camera device
-        if config['videoconference']:
-            with xmlrpc.client.ServerProxy(uri) as proxy:
-                vtc_clients[x].video_pid = proxy.play_video()
-
-        # Connect to VTC session
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            print(proxy.run_connect(config['duration']))
-
-
-        '''
-        # Testing Video stopping capability
-        time.sleep(15)
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.stop_video(VTC_clients[x].video_pid)
-        '''
+    # Threaded VTC client initialization
+    #with concurrent.futures.ProcessPoolExecutor(max_workers=len(vtc_clients)) as executor:
+    #    executor.map(VtcClient.initialize_client, vtc_clients)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(vtc_clients))
+    executor.map(VtcClient.initialize_client, vtc_clients)
+    executor.shutdown(wait=False)
+    '''
+    # Testing Video stopping capability
+    time.sleep(15)
+    with xmlrpc.client.ServerProxy(uri) as proxy:
+        proxy.stop_video(VTC_clients[x].video_pid)
+    '''
 
     # Begin client dialog
     # Randomly select VTC_client as long as it wasn't the last one picked.
@@ -57,6 +51,7 @@ def run_controller():
 
     # Converse for VTC duration
     while elapsed_time < config['duration'] * 60:
+        print("Conversing now")
         while candidate_client is chosen_client:
             candidate_client = random.choice(vtc_clients)
 
@@ -80,6 +75,8 @@ def run_controller():
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.client_shutdown()
 
+class AsyncXMLRPCServer(socketserver.ThreadingMixIn,SimpleXMLRPCServer): pass
+
 class VtcClient:
     print("Creating client object")
 
@@ -88,9 +85,27 @@ class VtcClient:
         self.port = int(port)
         self.video_pid = 0
 
+    def initialize_client(self):
+        # MUST FILL THIS OUT
+        uri = 'http://' + self.ip + ':' + str(self.port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.initialize_vtc_client()
+
+        # Start client video stream to virtual camera device
+        if config['videoconference']:
+            with xmlrpc.client.ServerProxy(uri) as proxy:
+                self.video_pid = proxy.play_video()
+
+        # Connect to VTC session
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            print(proxy.run_connect(config['duration']))
+            #print(proxy.connect_vtc_session(config['duration']))
+
+
 def run_client(client_config):
     # Register functions and respond to calls indefinitely
-    server = SimpleXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
+    #server = SimpleXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
+    server = AsyncXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
     print("Listening on port: " + str(client_config['c2_port']))
 
     server.register_function(initialize_vtc_client, "initialize_vtc_client")
@@ -273,7 +288,8 @@ async def connect_vtc_session(duration):
     return(config['bot_name'] + " connected to VTC session.")
 
 def run_connect(duration):
-    asyncio.run(connect_vtc_session(duration))
+    x=threading.Thread(target=asyncio.run(connect_vtc_session((duration))))
+    #asyncio.run(connect_vtc_session(duration))
 
 # XMLRPC
 def client_shutdown():
