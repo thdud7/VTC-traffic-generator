@@ -7,9 +7,9 @@ import signal
 import sys
 import time
 import json
+import socketserver
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
-import socketserver
 from pathlib import PurePath
 import asyncio
 from playwright.async_api import async_playwright
@@ -27,23 +27,14 @@ def run_controller():
         vtc_clients.append(VtcClient(config['vtc_clients'][x][0], config['vtc_clients'][x][1]))
 
     # Threaded VTC client initialization
-    #with concurrent.futures.ProcessPoolExecutor(max_workers=len(vtc_clients)) as executor:
-    #    executor.map(VtcClient.initialize_client, vtc_clients)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(vtc_clients))
     executor.map(VtcClient.initialize_client, vtc_clients)
     executor.shutdown(wait=False)
-    '''
-    # Testing Video stopping capability
-    time.sleep(15)
-    with xmlrpc.client.ServerProxy(uri) as proxy:
-        proxy.stop_video(VTC_clients[x].video_pid)
-    '''
 
     # Begin client dialog
     # Randomly select VTC_client as long as it wasn't the last one picked.
     chosen_client = None
     candidate_client = random.choice(vtc_clients)
-
 
     # VTC conversation loop
     start_time = time.time()
@@ -51,7 +42,6 @@ def run_controller():
 
     # Converse for VTC duration
     while elapsed_time < config['duration'] * 60:
-        print("Conversing now")
         while candidate_client is chosen_client:
             candidate_client = random.choice(vtc_clients)
 
@@ -70,23 +60,21 @@ def run_controller():
         elapsed_time = time.time() - start_time
 
     # Tear down VTC
+    print("VTC complete, closing session now.")
     for x in range(num_clients):
         uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.client_shutdown()
+            proxy.stop_video(vtc_clients[x].video_pid)
 
 class AsyncXMLRPCServer(socketserver.ThreadingMixIn,SimpleXMLRPCServer): pass
 
 class VtcClient:
-    print("Creating client object")
-
     def __init__(self, ip='0.0.0.0', port=100):
         self.ip = ip
         self.port = int(port)
         self.video_pid = 0
 
     def initialize_client(self):
-        # MUST FILL THIS OUT
         uri = 'http://' + self.ip + ':' + str(self.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.initialize_vtc_client()
@@ -99,7 +87,6 @@ class VtcClient:
         # Connect to VTC session
         with xmlrpc.client.ServerProxy(uri) as proxy:
             print(proxy.run_connect(config['duration']))
-            #print(proxy.connect_vtc_session(config['duration']))
 
 
 def run_client(client_config):
@@ -113,9 +100,8 @@ def run_client(client_config):
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
     server.register_function(get_name, "get_name")
-    #server.register_function(connect_vtc_session, "connect_vtc_session")
     server.register_function(run_connect, "run_connect")
-    server.register_function(client_shutdown, "client_shutdown")
+    server.register_function(stop_video, "stop_video")
 
     server.serve_forever()
 
@@ -197,21 +183,6 @@ def dialog_cycle():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
-    '''
-    try:
-        process = (
-            ffmpeg
-                .input(audio_file_path)
-                .output('virtual_speaker', format='pulse', device='virtual_speaker')
-        )
-        process = process.run(capture_stdout=True, capture_stderr=True)
-        # process = process.run_async()
-
-    except ffmpeg.Error as e:
-        print('stdout:', e.stdout.decode('utf8'))
-        print('stderr:', e.stderr.decode('utf8'))
-        raise e
-    '''
     subprocess.run('paplay -d virtual_speaker ' + audio_file_path, capture_output=True, shell=True)
 
 
@@ -222,7 +193,7 @@ def play_video():
         try:
             video_filepath = str(PurePath(config['video_path'], config['video_name']))
             print(video_filepath)
-            time.sleep(5)
+            # time.sleep(5)
 
             if "270" in config['video_name']:
                 process = (
@@ -291,11 +262,6 @@ def run_connect(duration):
     x=threading.Thread(target=asyncio.run(connect_vtc_session((duration))))
     #asyncio.run(connect_vtc_session(duration))
 
-# XMLRPC
-def client_shutdown():
-    print("Shutting down client")
-    # Call stop_video
-
 
 # XMLRPC
 def stop_video(video_pid):
@@ -322,8 +288,10 @@ if __name__ == '__main__':
 
     print(config['version'])
     print("Role: " + config['role'])
+    print("VTC Platform: " + config['vtc_platform'])
 
     if config['role'] == 'controller':
+        print("Duration: " + config['duration'] + " minutes")
         run_controller()
 
     elif config['role'] == 'client':
