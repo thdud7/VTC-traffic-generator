@@ -86,7 +86,7 @@ class VtcClient:
 
         # Connect to VTC session
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            print(proxy.run_connect(config['duration']))
+            proxy.run_connect(config['duration'])
 
 
 def run_client(client_config):
@@ -291,7 +291,7 @@ if __name__ == '__main__':
     print("VTC Platform: " + config['vtc_platform'])
 
     if config['role'] == 'controller':
-        print("Duration: " + config['duration'] + " minutes")
+        print("Duration: " + str(config['duration']) + " minutes")
         run_controller()
 
     elif config['role'] == 'client':
