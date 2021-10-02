@@ -230,7 +230,6 @@ def play_video():
 
 # XMLRPC
 async def connect_vtc_session(duration):
-    print("IN connect_vtc_session")
     if config['vtc_platform'].lower() == "jitsi":
         print("Connecting to Jitsi VTC session")
         async with async_playwright() as p:
@@ -241,12 +240,23 @@ async def connect_vtc_session(duration):
             await page.goto(config['vtc_url'])
             # await page.goto("https://localhost:8443/")
             print(await page.title())
+
+            # Open microphone settings
+            await asyncio.sleep(3)
+            await page.click("[aria-label=\"Audio settings\"]")
+            await asyncio.sleep(3)
+            await page.click("li[role=\"radio\"]:has-text(\"virtual_mic\")")
+            #await asyncio.sleep(3)
+            #await page.click("#largeVideo")
+
+            '''
             # Open microphone settings
             await page.click("#new-toolbox div div div div >> :nth-match(svg, 2)")
             # Select virtual_mic
             await page.click("#new-toolbox div div div div >> :nth-match(div:has-text(\"virtual_mic\"), 5)")
             # Close mic selection dialog
             await page.click("#new-toolbox div div div div div >> :nth-match(svg, 2)")
+            '''
 
             # Set participant duration
             # await page.pause()
