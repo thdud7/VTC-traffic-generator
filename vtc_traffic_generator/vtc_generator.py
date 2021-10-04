@@ -246,7 +246,8 @@ async def connect_vtc_session(duration):
             await page.click("[aria-label=\"Audio settings\"]")
             await asyncio.sleep(3)
             await page.click("li[role=\"radio\"]:has-text(\"virtual_mic\")")
-            #await asyncio.sleep(3)
+            await asyncio.sleep(2)
+            await page.click("[aria-label=\"Audio settings\"]")
             #await page.click("#largeVideo")
 
             '''
