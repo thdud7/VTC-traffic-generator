@@ -1,0 +1,16 @@
+#
+# Ansible Inventory File
+#
+[all]
+jitsi
+vtc_controller
+client_[0:2]
+
+[jitsi_host]
+jitsi
+
+[vtc_controllers]
+vtc_controller
+
+[vtc_clients]
+client_[0:2]
