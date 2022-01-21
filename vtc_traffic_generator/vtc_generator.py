@@ -235,7 +235,7 @@ async def connect_vtc_session(duration):
         async with async_playwright() as p:
             # Consider pointing to local chromium, e.g. /usr/bin/google-chrome
             # browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"], headless=False)
-            browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream"], headless=True)
+            browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream"], headless=False)
             page = await browser.new_page(ignore_https_errors=True)
             await page.goto(config['vtc_url'])
             # await page.goto("https://localhost:8443/")
