@@ -5,6 +5,24 @@ audio and video streams, between two or more endpoints. This document explains h
 
 [[_TOC_]]
 
+## Source Code 
+```
+Video Teleconference (VTC)
+├── README.md: documentation about VTC (this file)
+├── testbed: Merge testbed-specific experiment model files
+├── text_dialog_generation: GPT-2 based text dialog generator
+├── text_to_speech: Speech dialog generator using Google Cloud Platform text to speech
+├── VTC_AV: Pregenerated audio and video media files
+├── vtc_traffic_generator: VTC traffic generation from pregenerated media
+│   ├── controller_config_template.json: VTC Controller configuration template
+│   ├── remote_config_template.json: VTC Client configuration template
+│   ├── run_client.sh: helper script for running clients in headless mode
+│   ├── sample_media: Sample A/V media for debugging
+│   ├── vtc_automation: Sample workspace to develop further Playwright browser automation
+│   └── vtc_generator.py: Core VTC generator controller and client program
+└── wiki: Wiki documentation
+```
+
 ## Architecture
 The VTC traffic generator uses virtual devices to automate the camera and microphone inputs to a VTC application. In the **near future**, VTC applications themselves (e.g. Jitsi Meet, Microsoft Teams, Zoom) will be automated for a complete end-to-end solution for traffic generation.
 
@@ -28,7 +46,8 @@ The controller needs:
 | configuration parameter| description| 
 |---      |---|
 |`role`   |must be set to `controller`|
-|`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts - TBD|
+|`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts|
+|`duration` | Duration of the entire VTC session, in minutes|
 |`videoconference` | boolean (case sensitive) value, `true` for a video plus audio conference, `false` for audio-only|
 |`vtc_clients`| ip address and port number for each VTC client. Represented as a list of lists, with ip address as a string and port number as an integer|
 |`version` | controller software version number printed at runtime, useful for keeping controller and client configurations in sync |
@@ -81,6 +100,27 @@ Audio and visual content is pregenerated and can be found at [TBD]. If you want 
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
 1. Generate textual dialog tracks. This is done using the GPT-2 transformer. You can follow the instructions in the Jupyter Notebook [gpt-2_collect_google_colab.ipynb](/text_dialog_generation/gpt-2_collect_google_colab.ipynb). Notes: Tensorflow 1.x is required. Current versions are incompatible with `GPT-2`. A CUDA compatible GPU will dramatically speed up text generation. The notebook demonstrates how to use a free cloud GPU via the [Google Colab service](https://colab.research.google.com/). Warning, the text output might be inappropriate for it's intended purpose. Hand moderating this content for style and content is strongly encouraged. This file must be formatted for later consumption, as shown in [example_dialog](text_to_speech/2021_04_15_gpt2_output_topk-40_1558_moderated_45-convos.txt).    
 1. Generate audio files from dialog tracks. This is done using the Google Cloud Platform text to speech service. You can follow the instructions in the Jupyter Notebook [GCP_TTS.ipynb](/text_to_speech/GCP_TTS.ipynb). This requires a Google Cloud account, though the free tier includes up to 1 million characters of voice synthesis per month.  
+
+## copyright
+
+Copyright (C) 2020–2022  University of Southern California
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+## license
+
+[`GPL-3.0-or-later`](./LICENSE)
 
 **Attribution**: video clips provided by [Videezy.com](https://www.videezy.com/) under the [Videezy standard license](https://support.videezy.com/hc/en-us/articles/115002135672-Videezy-Standard-License-Usage).
 
