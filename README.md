@@ -1,11 +1,17 @@
+# Acknowledgement
+This research was developed with funding from the Defense Advanced Research Projects Agency
+(DARPA). The views, opinions and/or findings expressed are those of the
+author and should not be interpreted as representing the official views or
+policies of the Department of Defense or the U.S. Government.
+
 # Video Teleconferencing (VTC)
 
 **VTC** is defined as two-way traffic, consisting of separate
-audio and video streams, between two or more endpoints. This document explains how to install and operate the Searchlight VTC traffic generator. For technical details explaining how the traffic generator works or how media content is generated, see the [wiki](/wiki/main.md). 
+audio and video streams, between two or more endpoints. This document explains how to install and operate the Searchlight VTC traffic generator. For technical details explaining how the traffic generator works or how media content is generated, see the [wiki](/wiki/main.md).
 
 [[_TOC_]]
 
-## Source Code 
+## Source Code
 ```
 Video Teleconference (VTC)
 ├── README.md: documentation about VTC (this file)
@@ -31,19 +37,19 @@ The VTC traffic generator requires a testbed of at least 2 machines (physical or
 The necessary files for operating the VTC traffic generator include:
 
 1. Content library - Audio and video files that the VTC client feeds into the VTC session, generated in advance. Stored at `users.isi.deterlab.net:/proj/searchlight/traffic-generators/vtc/VTC_media/`. See [Generating a Content Library](#generating-a-content-library) if you would like to create your own content library. This library must be accessible by each VTC client. It is strongly recommended to copy the library to a shared drive that is mounted within each client virtual machine. A sample video and a single dialog conversation are stored in the repository [here](vtc_traffic_generator/sample_media).  
-1. `vtc_generator.py` python program - This file contains both the VTC controller component and the VTC client. Confusingly, the VTC client actually operates as a server that listens for commands from the controller. This file must be on the controller machine and all VTC client machines. 
-1. `controller_config_template.json` - This file is a template to construct the config file for the controller. This must be on the controller machine. 
-1. `remote_config_template.json` - This file is a template to construct the config file for each VTC client. These configuration files must be on each VTC client machine. 
+1. `vtc_generator.py` python program - This file contains both the VTC controller component and the VTC client. Confusingly, the VTC client actually operates as a server that listens for commands from the controller. This file must be on the controller machine and all VTC client machines.
+1. `controller_config_template.json` - This file is a template to construct the config file for the controller. This must be on the controller machine.
+1. `remote_config_template.json` - This file is a template to construct the config file for each VTC client. These configuration files must be on each VTC client machine.
 1. Various `.ipynb` files - Not necessary to operate the VTC traffic generator, they contain example code demonstrating how to construct a [Content Library](#generating-a-content-library).
 
 ## Configuring the VTC controller
 
 The controller needs:
-1. python3 environment (native or virtual) with only the standard packages. 
+1. python3 environment (native or virtual) with only the standard packages.
 1. `vtc_generator.py` containing the controller code.
 1. A JSON controller configuration file based on `controller_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as a separate file, e.g. `controller_config.json`.  
 
-| configuration parameter| description| 
+| configuration parameter| description|
 |---      |---|
 |`role`   |must be set to `controller`|
 |`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts|
@@ -54,7 +60,7 @@ The controller needs:
 
 ## Configuring the VTC client(s)
 
-Each client needs a nearly identical configuration. The only difference is that the controller must be able to reach each client at a different IP address. Therefore, when configuring multiple clients, it is often easiest to configure one, then clone that first machine as many times as necessary, specifying the control plane IP address for each. 
+Each client needs a nearly identical configuration. The only difference is that the controller must be able to reach each client at a different IP address. Therefore, when configuring multiple clients, it is often easiest to configure one, then clone that first machine as many times as necessary, specifying the control plane IP address for each.
 
 Each client needs:
 1. Linux operating system with the following packages installed:
@@ -65,13 +71,13 @@ Each client needs:
     * Load kernel module with `# modprobe v4l2loopback video_nr=5 exclusive_caps=1`
     * Confirm `v4l2loopback` module is loaded with `$ lsmod|grep v4l2`
 1. python3 environment (native or virtual) with the following packages installed:
-    * [ffmpeg-python](https://pypi.org/project/ffmpeg-python/) 
+    * [ffmpeg-python](https://pypi.org/project/ffmpeg-python/)
     * [pulsectl](https://pypi.org/project/pulsectl/)
 1. Media library containing properly formatted audio and video files, mounted to the local filesystem.
 1. `vtc_generator.py` containing the VTC client (server) code.
 1. A JSON controller configuration file based on `remote_config_template.json`. Copy this file and change the configuration parameters as necessary. Save it as separate files for each of *n* VTC clients, e.g. `remote_config_n.json`.  
 
-| configuration parameter| description| 
+| configuration parameter| description|
 |---      |---|
 |`role`   |must be set to `client`|
 |`vtc_platform` | name of VTC platform, used for selecting platform-specific automation scripts - TBD|
@@ -85,16 +91,16 @@ Each client needs:
 |`version` | VTC client software version number printed at runtime, useful for keeping controller and client configurations in sync |
 
 ## Executing a VTC session
-1. Ensure each VTC client machine is [configured properly](#configuring-the-vtc-clients). 
+1. Ensure each VTC client machine is [configured properly](#configuring-the-vtc-clients).
 1. Start the VTC client software on each client *n* with: `python vtc_generator.py <remote_config_n.json>`
 1. Start the VTC controller software on the controller with: `python vtc_generator.py <controller_config.json>`
-    * This will start media playback into the virtual devices on each client, starting the conversation. 
-1. On each client, manually connect to the active VTC session. 
-    * You must select `virtual_mic` and `Dummy video device 0x0005` as the camera. It is strongly recommended to mute the speaker audio on each VTC client machine. This can be done with the virtual machine audio controls or by simply disabling audio feeding back to the host via the hypervisor UI. 
+    * This will start media playback into the virtual devices on each client, starting the conversation.
+1. On each client, manually connect to the active VTC session.
+    * You must select `virtual_mic` and `Dummy video device 0x0005` as the camera. It is strongly recommended to mute the speaker audio on each VTC client machine. This can be done with the virtual machine audio controls or by simply disabling audio feeding back to the host via the hypervisor UI.
     * Note, some VTC applications do not allow guest participation and require a login. Microsoft Teams allows guest participation only through the web client. Google Meet does not allow guest participation. Jitsi and Zoom allow guest participation through their web clients and their native applications.
-1. Admit the VTC bots (if necessary) into the VTC conversation. 
-1. To shut down, kill the process (ctrl-C) on the controller and clients and close the VTC application. 
-    
+1. Admit the VTC bots (if necessary) into the VTC conversation.
+1. To shut down, kill the process (ctrl-C) on the controller and clients and close the VTC application.
+
 ## Generating a Content Library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).
@@ -123,4 +129,3 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 [`GPL-3.0-or-later`](./LICENSE)
 
 **Attribution**: video clips provided by [Videezy.com](https://www.videezy.com/) under the [Videezy standard license](https://support.videezy.com/hc/en-us/articles/115002135672-Videezy-Standard-License-Usage).
-
