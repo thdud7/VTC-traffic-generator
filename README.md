@@ -24,7 +24,7 @@ Video Teleconference (VTC)
 │   ├── remote_config_template.json: VTC Client configuration template
 │   ├── run_client.sh: helper script for running clients in headless mode
 │   ├── sample_media: Sample A/V media for debugging
-│   ├── vtc_automation: Sample workspace to develop further Playwright browser automation
+│   ├── vtc_automation: Service adapters for VTC application automation
 │   └── vtc_generator.py: Core VTC generator controller and client program
 └── wiki: Wiki documentation
 ```
@@ -89,6 +89,12 @@ Each client needs:
 |`video_path` | full system path to the root of the video files |
 |`video_name` | name of video file to use for this VTC client. Must match a file in `video_path`|
 |`version` | VTC client software version number printed at runtime, useful for keeping controller and client configurations in sync |
+
+Service-specific automation is implemented through adapters under
+[`vtc_traffic_generator/vtc_automation/adapters`](vtc_traffic_generator/vtc_automation/adapters).
+Use `vtc_platform` to select the adapter. Current adapter keys include `jitsi`,
+`webex`, `google_meet`, `bigbluebutton`, `teams`, `zoom`, `messenger`, and
+`discord`.
 
 ## Executing a VTC session
 1. Ensure each VTC client machine is [configured properly](#configuring-the-vtc-clients).

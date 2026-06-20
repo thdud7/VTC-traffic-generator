@@ -1,6 +1,6 @@
 {
     "role": "client",
-    "vtc_platform": "vtc_platform_name",
+    "vtc_platform": "jitsi",
     "vtc_url": "URL",
     "c2_port": "port_number",
     "bot_name": "bot_name",
@@ -9,5 +9,6 @@
     "voice_name": "voice_name",
     "video_path": "video_path",
     "video_name": "video_name",
+    "adapter_config": {},
     "version": "VTC traffic generator X"
 }

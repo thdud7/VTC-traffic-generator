@@ -12,9 +12,10 @@ import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
 from pathlib import PurePath
 import asyncio
-from playwright.async_api import async_playwright
 import concurrent.futures
 import threading
+
+from vtc_automation.adapters import get_adapter
 
 def run_controller():
     num_clients = len(config['vtc_clients'])
@@ -230,48 +231,16 @@ def play_video():
 
 # XMLRPC
 async def connect_vtc_session(duration):
-    if config['vtc_platform'].lower() == "jitsi":
-        print("Connecting to Jitsi VTC session")
-        async with async_playwright() as p:
-            # Consider pointing to local chromium, e.g. /usr/bin/google-chrome
-            # browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"], headless=False)
-            browser = await p.chromium.launch(args=["--use-fake-ui-for-media-stream"], headless=False)
-            page = await browser.new_page(ignore_https_errors=True)
-            await page.goto(config['vtc_url'])
-            # await page.goto("https://localhost:8443/")
-            print(await page.title())
-
-            # Open microphone settings
-            #await asyncio.sleep(3)
-            #await page.click("[aria-label=\"Audio settings\"]")
-            #await asyncio.sleep(3)
-            #await page.click("li[role=\"radio\"]:has-text(\"virtual_mic\")")
-            #await asyncio.sleep(2)
-            #await page.click("[aria-label=\"Audio settings\"]")
-            #await page.click("#largeVideo")
-
-            '''
-            # Open microphone settings
-            await page.click("#new-toolbox div div div div >> :nth-match(svg, 2)")
-            # Select virtual_mic
-            await page.click("#new-toolbox div div div div >> :nth-match(div:has-text(\"virtual_mic\"), 5)")
-            # Close mic selection dialog
-            await page.click("#new-toolbox div div div div div >> :nth-match(svg, 2)")
-            '''
-
-            # Set participant duration
-            # await page.pause()
-            await asyncio.sleep(duration * 60)
-            await browser.close()
-
-    else:
-        print("Missing connector to vtc platform: " + config['vtc_platform'])
-
-    return(config['bot_name'] + " connected to VTC session.")
+    adapter = get_adapter(config)
+    return await adapter.connect(duration)
 
 def run_connect(duration):
-    x=threading.Thread(target=asyncio.run(connect_vtc_session((duration))))
-    #asyncio.run(connect_vtc_session(duration))
+    thread = threading.Thread(
+        target=lambda: asyncio.run(connect_vtc_session(duration)),
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 # XMLRPC

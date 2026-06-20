@@ -1,6 +1,6 @@
 {
     "role": "controller",
-    "vtc_platform": "vtc_platform_name",
+    "vtc_platform": "jitsi",
     "duration": "time (min)",
     "videoconference": true,
     "vtc_clients":  [
