@@ -2,12 +2,13 @@
     "role": "client",
     "vtc_platform": "jitsi_electron",
     "service": "jitsi_electron",
-    "vtc_url": "https://192.168.32.188:8443/icsi-test-001",
+    "vtc_url": "https://192.168.0.6:8443/icsi-test-001",
     "c2_port": "port_number",
     "bot_name": "bot_name",
     "bot": {
         "display_name": "bot_name"
     },
+    "action_log_path": "/tmp/vtc-bot_name/actions.txt",
     "videoconference": true,
     "audio_path": "audio_path",
     "voice_name": "voice_name",

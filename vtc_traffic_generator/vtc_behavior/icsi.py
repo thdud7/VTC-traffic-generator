@@ -59,7 +59,8 @@ class ICSIReplayPolicy:
 
         self.meeting_id = self._select_meeting_id()
         self.speaker_totals = self._speaker_totals(self.meeting_id)
-        self.active_speakers = self._active_speakers(self.speaker_totals)
+        self.available_speakers = self._active_speakers(self.speaker_totals)
+        self.active_speakers = self.available_speakers[: self.bot_count]
         self.speaker_to_bot_index = self._map_speakers_to_bots(self.active_speakers)
         self.events = self._load_events()
 
@@ -121,6 +122,7 @@ class ICSIReplayPolicy:
         return {
             "meeting_id": self.meeting_id,
             "active_speakers": self.active_speakers,
+            "available_speaker_count": len(self.available_speakers),
             "speaker_to_bot_index": self.speaker_to_bot_index,
             "event_count": len(self.events),
             "start_sec": self.start_sec,
@@ -134,7 +136,7 @@ class ICSIReplayPolicy:
                 raise ValueError(f"ICSI meeting not found: {self.requested_meeting_id}")
 
             active_count = self._active_speaker_count(self.requested_meeting_id)
-            if active_count != self.bot_count:
+            if active_count < self.bot_count:
                 raise ValueError(
                     f"ICSI meeting {self.requested_meeting_id} has {active_count} active speakers, "
                     f"but {self.bot_count} bots were requested."
@@ -147,7 +149,13 @@ class ICSIReplayPolicy:
             if self._active_speaker_count(meeting_id) == self.bot_count
         ]
         if not matching:
-            raise ValueError(f"No ICSI meeting has exactly {self.bot_count} active speakers.")
+            matching = [
+                meeting_id
+                for meeting_id in meeting_ids
+                if self._active_speaker_count(meeting_id) >= self.bot_count
+            ]
+        if not matching:
+            raise ValueError(f"No ICSI meeting has at least {self.bot_count} active speakers.")
 
         return sorted(matching)[0]
 
@@ -182,7 +190,7 @@ class ICSIReplayPolicy:
         )
 
     def _map_speakers_to_bots(self, active_speakers: list[str]) -> dict[str, int]:
-        if len(active_speakers) != self.bot_count:
+        if len(active_speakers) < self.bot_count:
             raise ValueError(
                 f"ICSI meeting {self.meeting_id} has {len(active_speakers)} active speakers, "
                 f"but {self.bot_count} bots were requested."

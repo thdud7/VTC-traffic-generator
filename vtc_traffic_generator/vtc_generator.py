@@ -12,6 +12,7 @@ from pathlib import Path, PurePath
 import asyncio
 import concurrent.futures
 import threading
+from datetime import datetime
 
 from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
@@ -32,6 +33,53 @@ except ImportError:
 speech_lock = threading.Lock()
 speech_until = 0
 speech_thread_active = False
+action_log_lock = threading.Lock()
+active_adapter_lock = threading.Lock()
+active_adapter = None
+active_loop = None
+connection_status_lock = threading.Lock()
+connection_status = {
+    "state": "idle",
+    "connected": False,
+    "error": None,
+    "vtc_url": None,
+    "updated_at": None,
+}
+
+
+def append_action_log(log_config, event_name, details=None):
+    details = dict(details or {})
+    path = action_log_path(log_config)
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    bot_name = log_config.get("bot_name") or details.get("bot_name") or log_config.get("role", "unknown")
+    line = (
+        f"{timestamp}\t"
+        f"event={event_name}\t"
+        f"bot={bot_name}\t"
+        f"details={json.dumps(details, sort_keys=True, ensure_ascii=False)}"
+        "\n"
+    )
+    with action_log_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as outfile:
+            outfile.write(line)
+
+
+def action_log_path(log_config):
+    adapter_config = log_config.get("adapter_config", {})
+    if not isinstance(adapter_config, dict):
+        adapter_config = {}
+
+    configured_path = log_config.get("action_log_path") or adapter_config.get("action_log_path")
+    if configured_path:
+        return Path(str(configured_path)).expanduser()
+
+    if log_config.get("role") == "controller":
+        return Path("/tmp/vtc-controller-actions.txt")
+
+    bot_name = str(log_config.get("bot_name") or "bot")
+    return Path(f"/tmp/vtc-{bot_name}-actions.txt")
+
 
 def run_controller():
     num_clients = len(config['vtc_clients'])
@@ -42,7 +90,7 @@ def run_controller():
         icsi_policy = ICSIReplayPolicy.from_config(config, num_clients)
         connect_duration_minutes = max(
             get_duration_minutes(config),
-            (icsi_policy.end_sec / 60) + 1,
+            (configured_icsi_replay_duration_sec(icsi_policy) / 60) + 1,
         )
         config["_connect_duration_minutes"] = connect_duration_minutes
         print("ICSI replay mode enabled.")
@@ -60,6 +108,7 @@ def run_controller():
     executor.shutdown(wait=False)
 
     if icsi_policy:
+        wait_for_clients_before_replay(vtc_clients)
         run_icsi_replay_controller(vtc_clients, icsi_policy)
         return
 
@@ -113,6 +162,57 @@ def get_duration_minutes(controller_config):
         return 0
 
 
+def configured_icsi_replay_duration_sec(icsi_policy):
+    behavior = config.get("behavior", {})
+    icsi_config = behavior.get("icsi", {}) if isinstance(behavior, dict) else {}
+    configured_max_duration_sec = icsi_config.get("max_duration_sec")
+    if configured_max_duration_sec is None:
+        return icsi_policy.end_sec
+    return min(float(configured_max_duration_sec), icsi_policy.end_sec)
+
+
+def wait_for_clients_before_replay(vtc_clients):
+    behavior = config.get("behavior", {})
+    icsi_config = behavior.get("icsi", {}) if isinstance(behavior, dict) else {}
+    timeout_sec = float(icsi_config.get("connect_timeout_sec", 180))
+    grace_sec = float(icsi_config.get("connect_grace_sec", 5))
+    deadline = time.time() + timeout_sec
+    last_statuses = {}
+
+    print(f"Waiting for {len(vtc_clients)} clients to join before ICSI replay.")
+    while time.time() < deadline:
+        connected_count = 0
+        statuses = {}
+        for index, client in enumerate(vtc_clients):
+            uri = 'http://' + client.ip + ':' + str(client.port)
+            try:
+                with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+                    status = proxy.get_connection_status()
+            except Exception as exc:
+                status = {"state": "rpc_error", "connected": False, "error": str(exc)}
+
+            statuses[index] = status
+            if status.get("connected"):
+                connected_count += 1
+
+        if statuses != last_statuses:
+            print("Client join status: " + json.dumps(statuses, sort_keys=True))
+            last_statuses = statuses
+
+        if connected_count == len(vtc_clients):
+            if grace_sec > 0:
+                print(f"All clients joined. Waiting {grace_sec} more seconds before ICSI replay.")
+                time.sleep(grace_sec)
+            return
+
+        time.sleep(1)
+
+    raise TimeoutError(
+        "Timed out waiting for all clients to join before ICSI replay: "
+        + json.dumps(last_statuses, sort_keys=True)
+    )
+
+
 def run_icsi_replay_controller(vtc_clients, icsi_policy):
     behavior = config.get("behavior", {})
     icsi_config = behavior.get("icsi", {}) if isinstance(behavior, dict) else {}
@@ -133,53 +233,84 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
             "max_duration_sec": max_duration_sec,
         },
     )
+    append_action_log(
+        config,
+        "meeting_start",
+        {
+            "role": "controller",
+            "meeting_id": icsi_policy.meeting_id,
+            "client_count": len(vtc_clients),
+        },
+    )
 
     start_time = time.time()
-    for event in icsi_policy.events:
-        if event.start_sec > max_duration_sec:
-            break
-
-        target_time = start_time + (event.start_sec * time_scale)
-        delay = target_time - time.time()
-        if delay > 0:
-            time.sleep(delay)
-
-        duration_sec = max(0.05, min(event.end_sec, max_duration_sec) - event.start_sec)
-        duration_sec *= time_scale
-        metadata = {
-            "meeting_id": event.meeting_id,
-            "speaker_id": event.speaker_id,
-            "channel": event.channel,
-            "file_channel": event.file_channel,
-            "dialogue_act_type": event.dialogue_act_type,
-            "icsi_start_sec": event.start_sec,
-            "icsi_end_sec": event.end_sec,
-            "duration_sec": duration_sec,
-            "audio_start_sec": event.start_sec,
-        }
-
-        emit_event(
-            config,
-            "policy_action_selected",
-            {
-                "bot_index": event.bot_index,
-                **metadata,
-            },
+    scenario_thread = None
+    scenario_stop = threading.Event()
+    scenario_runtime_sec = min(max_duration_sec, icsi_policy.end_sec) * time_scale
+    if is_random_scenario_enabled():
+        scenario_thread = threading.Thread(
+            target=random_scenario_worker,
+            args=(vtc_clients, scenario_runtime_sec, time_scale, scenario_stop),
+            daemon=True,
         )
+        scenario_thread.start()
 
-        client = vtc_clients[event.bot_index]
-        uri = 'http://' + client.ip + ':' + str(client.port)
-        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            proxy.start_speech(duration_sec, metadata)
+    try:
+        for event in icsi_policy.events:
+            if event.start_sec > max_duration_sec:
+                break
 
-    end_delay = (min(max_duration_sec, icsi_policy.end_sec) * time_scale) - (time.time() - start_time)
-    if end_delay > 0:
-        time.sleep(end_delay)
+            target_time = start_time + (event.start_sec * time_scale)
+            delay = target_time - time.time()
+            if delay > 0:
+                time.sleep(delay)
+
+            duration_sec = max(0.05, min(event.end_sec, max_duration_sec) - event.start_sec)
+            duration_sec *= time_scale
+            metadata = {
+                "meeting_id": event.meeting_id,
+                "speaker_id": event.speaker_id,
+                "channel": event.channel,
+                "file_channel": event.file_channel,
+                "dialogue_act_type": event.dialogue_act_type,
+                "icsi_start_sec": event.start_sec,
+                "icsi_end_sec": event.end_sec,
+                "duration_sec": duration_sec,
+                "audio_start_sec": event.start_sec,
+            }
+
+            emit_event(
+                config,
+                "policy_action_selected",
+                {
+                    "bot_index": event.bot_index,
+                    **metadata,
+                },
+            )
+
+            client = vtc_clients[event.bot_index]
+            ensure_client_microphone(client, event.bot_index, True)
+            uri = 'http://' + client.ip + ':' + str(client.port)
+            with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+                proxy.start_speech(duration_sec, metadata)
+
+        end_delay = (min(max_duration_sec, icsi_policy.end_sec) * time_scale) - (time.time() - start_time)
+        if end_delay > 0:
+            time.sleep(end_delay)
+    finally:
+        scenario_stop.set()
+        if scenario_thread:
+            scenario_thread.join(timeout=10)
 
     emit_event(
         config,
         "icsi_replay_done",
         {"meeting_id": icsi_policy.meeting_id},
+    )
+    append_action_log(
+        config,
+        "meeting_end",
+        {"role": "controller", "meeting_id": icsi_policy.meeting_id},
     )
 
     print("ICSI replay complete, closing session now.")
@@ -187,6 +318,119 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
         uri = 'http://' + client.ip + ':' + str(client.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(client.video_pid)
+
+
+def scenario_config():
+    behavior = config.get("behavior", {})
+    if not isinstance(behavior, dict):
+        return {}
+    scenario = behavior.get("scenario", {})
+    if isinstance(scenario, dict):
+        return scenario
+    return {}
+
+
+def is_random_scenario_enabled():
+    scenario = scenario_config()
+    return bool(scenario.get("enabled", True))
+
+
+def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
+    scenario = scenario_config()
+    rng = random.Random(scenario.get("seed"))
+    min_interval = float(scenario.get("min_interval_sec", 15)) * time_scale
+    max_interval = float(scenario.get("max_interval_sec", 45)) * time_scale
+    min_interval = max(1.0, min_interval)
+    max_interval = max(min_interval, max_interval)
+    screen_share_probability = float(scenario.get("screen_share_probability", 0.2))
+    camera_probability = float(scenario.get("camera_probability", 0.35))
+    mic_probability = max(0.0, 1.0 - screen_share_probability - camera_probability)
+    screen_owner = None
+    states = [
+        {
+            "mic": True,
+            "camera": True,
+        }
+        for _ in vtc_clients
+    ]
+    deadline = time.time() + max(0, runtime_sec)
+    append_action_log(
+        config,
+        "scenario_start",
+        {"runtime_sec": runtime_sec, "client_count": len(vtc_clients)},
+    )
+
+    try:
+        while time.time() < deadline and not stop_event.is_set():
+            interval = rng.uniform(min_interval, max_interval)
+            if stop_event.wait(min(interval, max(0, deadline - time.time()))):
+                break
+
+            roll = rng.random()
+            if roll < screen_share_probability:
+                if screen_owner is None:
+                    bot_index = rng.randrange(0, len(vtc_clients))
+                    success = call_client_action(vtc_clients[bot_index], bot_index, "set_screen_share", True)
+                    if success:
+                        screen_owner = bot_index
+                else:
+                    success = call_client_action(vtc_clients[screen_owner], screen_owner, "set_screen_share", False)
+                    if success:
+                        screen_owner = None
+            elif roll < screen_share_probability + camera_probability:
+                bot_index = rng.randrange(0, len(vtc_clients))
+                desired_state = not states[bot_index]["camera"]
+                success = call_client_action(vtc_clients[bot_index], bot_index, "set_camera", desired_state)
+                if success:
+                    states[bot_index]["camera"] = desired_state
+            elif mic_probability > 0:
+                bot_index = rng.randrange(0, len(vtc_clients))
+                desired_state = not states[bot_index]["mic"]
+                success = call_client_action(vtc_clients[bot_index], bot_index, "set_microphone", desired_state)
+                if success:
+                    states[bot_index]["mic"] = desired_state
+    finally:
+        if screen_owner is not None:
+            call_client_action(vtc_clients[screen_owner], screen_owner, "set_screen_share", False)
+        append_action_log(config, "scenario_end", {"runtime_sec": runtime_sec})
+
+
+def ensure_client_microphone(client, bot_index, enabled):
+    return call_client_action(client, bot_index, "set_microphone", enabled)
+
+
+def call_client_action(client, bot_index, method_name, enabled):
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    event_name = action_event_name(method_name, enabled)
+    details = {
+        "bot_index": bot_index,
+        "client": uri,
+        "method": method_name,
+        "enabled": bool(enabled),
+    }
+    try:
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            success = bool(getattr(proxy, method_name)(bool(enabled)))
+        details["success"] = success
+        emit_event(config, event_name, details)
+        append_action_log(config, event_name, details)
+        return success
+    except Exception as exc:
+        details["success"] = False
+        details["error"] = str(exc)
+        emit_event(config, "scenario_action_error", details)
+        append_action_log(config, event_name, details)
+        return False
+
+
+def action_event_name(method_name, enabled):
+    if method_name == "set_microphone":
+        return "mic_on" if enabled else "mic_off"
+    if method_name == "set_camera":
+        return "camera_on" if enabled else "camera_off"
+    if method_name == "set_screen_share":
+        return "screen_share_start" if enabled else "screen_share_end"
+    return method_name
 
 class AsyncXMLRPCServer(socketserver.ThreadingMixIn,SimpleXMLRPCServer): pass
 
@@ -222,7 +466,11 @@ def run_client(client_config):
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
     server.register_function(start_speech, "start_speech")
+    server.register_function(set_microphone, "set_microphone")
+    server.register_function(set_camera, "set_camera")
+    server.register_function(set_screen_share, "set_screen_share")
     server.register_function(get_name, "get_name")
+    server.register_function(get_connection_status, "get_connection_status")
     server.register_function(run_connect, "run_connect")
     server.register_function(stop_video, "stop_video")
 
@@ -309,6 +557,7 @@ def initialize_vtc_client():
 def dialog_cycle():
     print(config['bot_name'] + " speaking now.")
     emit_event(config, "speech_start", {"bot_name": config.get("bot_name")})
+    append_action_log(config, "speech_start", {"bot_name": config.get("bot_name"), "source": "dialog_cycle"})
 
     try:
         # Calculate the number of sentences a VTC client speaks in a single turn
@@ -342,6 +591,7 @@ def dialog_cycle():
         return True
     finally:
         emit_event(config, "speech_end", {"bot_name": config.get("bot_name")})
+        append_action_log(config, "speech_end", {"bot_name": config.get("bot_name"), "source": "dialog_cycle"})
 
 
 def start_speech(duration_sec, metadata=None):
@@ -363,6 +613,7 @@ def start_speech(duration_sec, metadata=None):
                 **metadata,
             },
         )
+        append_action_log(config, "speech_start", {"duration_sec": duration_sec, **metadata})
         thread = threading.Thread(
             target=speech_audio_segment_worker,
             args=(duration_sec, metadata,),
@@ -385,6 +636,7 @@ def start_speech(duration_sec, metadata=None):
             **metadata,
         },
     )
+    append_action_log(config, "speech_start", {"duration_sec": duration_sec, **metadata})
 
     if should_start_thread:
         thread = threading.Thread(
@@ -424,6 +676,7 @@ def speech_playback_worker(duration_sec, metadata):
             "speech_end",
             dict(metadata or {}),
         )
+        append_action_log(config, "speech_end", dict(metadata or {}))
 
 
 def speech_audio_segment_worker(duration_sec, metadata):
@@ -438,6 +691,7 @@ def speech_audio_segment_worker(duration_sec, metadata):
             "speech_end",
             dict(metadata or {}),
         )
+        append_action_log(config, "speech_end", dict(metadata or {}))
 
 
 def choose_icsi_audio_file(metadata):
@@ -712,11 +966,72 @@ def play_video():
         return False
 
 
+def set_microphone(enabled):
+    return run_adapter_action(
+        "unmute" if enabled else "mute",
+        "mic_on" if enabled else "mic_off",
+        {"enabled": bool(enabled)},
+    )
+
+
+def set_camera(enabled):
+    return run_adapter_action(
+        "camera_on" if enabled else "camera_off",
+        "camera_on" if enabled else "camera_off",
+        {"enabled": bool(enabled)},
+    )
+
+
+def set_screen_share(enabled):
+    return run_adapter_action(
+        "start_screen_share" if enabled else "stop_screen_share",
+        "screen_share_start" if enabled else "screen_share_end",
+        {"enabled": bool(enabled)},
+    )
+
+
+def run_adapter_action(method_name, event_name, details=None):
+    details = dict(details or {})
+    with active_adapter_lock:
+        adapter = active_adapter
+        loop = active_loop
+
+    if adapter is None or loop is None or loop.is_closed():
+        details.update({"success": False, "error": "active adapter is not available"})
+        emit_event(config, event_name, details)
+        append_action_log(config, event_name, details)
+        return False
+
+    try:
+        coroutine = getattr(adapter, method_name)
+        future = asyncio.run_coroutine_threadsafe(coroutine(), loop)
+        success = bool(future.result(timeout=float(config.get("adapter_action_timeout_sec", 20))))
+        details["success"] = success
+        emit_event(config, event_name, details)
+        append_action_log(config, event_name, details)
+        return success
+    except Exception as exc:
+        details.update({"success": False, "error": str(exc)})
+        emit_event(config, event_name, details)
+        append_action_log(config, event_name, details)
+        return False
+
+
 # XMLRPC
 async def connect_vtc_session(duration):
+    global active_adapter
+    global active_loop
+
     service = get_service_name(config)
     packet_capture = PacketCaptureSession.from_config(config)
+    adapter = None
     try:
+        set_connection_status(
+            "connecting",
+            connected=False,
+            error=None,
+            vtc_url=config.get("vtc_url"),
+        )
         emit_event(
             config,
             "connect_vtc_session_start",
@@ -724,16 +1039,37 @@ async def connect_vtc_session(duration):
             service,
         )
         packet_capture.start()
+        config["_meeting_joined_callback"] = mark_meeting_joined
         adapter = get_adapter(config)
+        with active_adapter_lock:
+            active_adapter = adapter
+            active_loop = asyncio.get_running_loop()
         result = await adapter.connect(duration)
+        set_connection_status(
+            "done",
+            connected=False,
+            error=None,
+            vtc_url=config.get("vtc_url"),
+        )
         emit_event(
             config,
             "connect_vtc_session_done",
             {"vtc_url": config.get("vtc_url")},
             service,
         )
+        append_action_log(
+            config,
+            "meeting_end",
+            {"vtc_url": config.get("vtc_url"), "service": service, "success": True},
+        )
         return result
     except Exception as exc:
+        set_connection_status(
+            "error",
+            connected=False,
+            error=str(exc),
+            vtc_url=config.get("vtc_url"),
+        )
         emit_event(
             config,
             "adapter_error",
@@ -743,6 +1079,10 @@ async def connect_vtc_session(duration):
         raise
     finally:
         packet_capture.stop_and_analyze()
+        with active_adapter_lock:
+            if active_adapter is adapter:
+                active_adapter = None
+                active_loop = None
 
 def run_connect(duration):
     thread = threading.Thread(
@@ -753,11 +1093,47 @@ def run_connect(duration):
     return True
 
 
+def set_connection_status(state, connected=False, error=None, vtc_url=None):
+    status = {
+        "state": state,
+        "connected": bool(connected),
+        "error": error,
+        "vtc_url": vtc_url,
+        "updated_at": time.time(),
+    }
+    with connection_status_lock:
+        connection_status.update(status)
+    config["_connection_status"] = dict(connection_status)
+    emit_event(config, "connection_status_updated", status)
+
+
+def mark_meeting_joined(vtc_url=None):
+    set_connection_status(
+        "meeting_joined",
+        connected=True,
+        error=None,
+        vtc_url=vtc_url or config.get("vtc_url"),
+    )
+    append_action_log(
+        config,
+        "meeting_start",
+        {"vtc_url": vtc_url or config.get("vtc_url"), "service": get_service_name(config)},
+    )
+
+
+def get_connection_status():
+    with connection_status_lock:
+        return dict(connection_status)
+
+
 # XMLRPC
 def stop_video(video_pid):
     print("Stopping video")
-    os.kill(video_pid, signal.SIGTERM)
-    emit_event(config, "camera_off", {"video_pid": video_pid})
+    if video_pid:
+        os.kill(video_pid, signal.SIGTERM)
+    details = {"video_pid": video_pid, "success": bool(video_pid)}
+    emit_event(config, "camera_off", details)
+    append_action_log(config, "camera_off", details)
 
 
 # XMLRPC

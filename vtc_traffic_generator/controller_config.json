@@ -7,17 +7,26 @@
         "mode": "icsi",
         "icsi": {
             "corpus_root": "/Users/soyoung/media/icsi",
-            "meeting_id": null,
+            "meeting_id": "Bdb001",
             "min_speaker_duration_sec": 1.0,
             "min_utterance_duration_sec": 0.05,
-            "max_duration_sec": null,
-            "time_scale": 1.0
+            "max_duration_sec": 180,
+            "time_scale": 1.0,
+            "connect_timeout_sec": 180,
+            "connect_grace_sec": 5
+        },
+        "scenario": {
+            "enabled": true,
+            "min_interval_sec": 15,
+            "max_interval_sec": 45,
+            "screen_share_probability": 0.2,
+            "camera_probability": 0.35
         }
     },
     "vtc_clients":  [
-                    ["192.168.64.4", 8001],
-                    ["192.168.64.4", 8002],
-                    ["192.168.64.4", 8003]
+                    ["192.168.0.6", 8001],
+                    ["192.168.0.6", 8002],
+                    ["192.168.0.6", 8003]
                     ],
     "version": "VTC traffic generator X"
 }

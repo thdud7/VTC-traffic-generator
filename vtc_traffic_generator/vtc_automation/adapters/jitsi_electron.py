@@ -167,6 +167,9 @@ class JitsiElectronAdapter(ServiceAdapter):
 
         self.dump_accessibility_tree("meeting_joined")
         emit_event(self.config, "meeting_joined", {"vtc_url": vtc_url}, self.service_name)
+        joined_callback = self.config.get("_meeting_joined_callback")
+        if callable(joined_callback):
+            joined_callback(vtc_url)
         emit_event(self.config, "connect_vtc_session_done", {"vtc_url": vtc_url}, self.service_name)
 
     async def leave(self):
