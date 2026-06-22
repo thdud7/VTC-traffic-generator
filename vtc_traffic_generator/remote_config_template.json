@@ -13,6 +13,15 @@
     "voice_name": "voice_name",
     "video_path": "video_path",
     "video_name": "video_name",
+    "packet_capture": {
+        "enabled": false,
+        "interface": "any",
+        "output_dir": "/tmp/vtc-captures",
+        "capture_filter": null,
+        "display_filter": null,
+        "dumpcap_path": "dumpcap",
+        "tshark_path": "tshark"
+    },
     "adapter_config": {
         "display": ":99",
         "display_backend": "xvfb",

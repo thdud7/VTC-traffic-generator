@@ -232,6 +232,41 @@ To add the next native service adapter:
    `camera_off`, `select_devices`, `is_in_meeting`, and `close`.
 4. Register it in `vtc_automation/adapters/registry.py`.
 
+## Packet Capture
+
+Packet capture runs in the shared client path around `adapter.connect()`, so it
+works across service adapters. It uses `dumpcap` to write pcapng files and runs
+`tshark` after the meeting connection finishes to generate a text analysis.
+
+Example client config:
+
+```json
+{
+  "packet_capture": {
+    "enabled": true,
+    "interface": "any",
+    "output_dir": "/tmp/vtc-captures",
+    "capture_filter": null,
+    "display_filter": null,
+    "dumpcap_path": "dumpcap",
+    "tshark_path": "tshark"
+  }
+}
+```
+
+Outputs are written with a UTC timestamp, service, and bot id:
+
+```text
+/tmp/vtc-captures/<timestamp>-<service>-<bot>.pcapng
+/tmp/vtc-captures/<timestamp>-<service>-<bot>.analysis.txt
+/tmp/vtc-captures/<timestamp>-<service>-<bot>.metadata.json
+```
+
+The tshark analysis includes one-second I/O stats, IP endpoints, and IP
+conversations. If `dumpcap` or `tshark` is unavailable, the client logs a
+`packet_capture_error` or `packet_analysis_error` event and continues the VTC
+session.
+
 ## ICSI Speech Replay
 
 ICSI mode replaces the controller's random speaker selection loop with a replay

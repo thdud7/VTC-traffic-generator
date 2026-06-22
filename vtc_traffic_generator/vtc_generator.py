@@ -18,6 +18,7 @@ import threading
 from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
 from vtc_automation.event_log import emit_event, get_service_name
+from vtc_automation.packet_capture import PacketCaptureSession
 
 
 speech_lock = threading.Lock()
@@ -501,6 +502,7 @@ def play_video():
 # XMLRPC
 async def connect_vtc_session(duration):
     service = get_service_name(config)
+    packet_capture = PacketCaptureSession.from_config(config)
     try:
         emit_event(
             config,
@@ -508,6 +510,7 @@ async def connect_vtc_session(duration):
             {"vtc_url": config.get("vtc_url")},
             service,
         )
+        packet_capture.start()
         adapter = get_adapter(config)
         result = await adapter.connect(duration)
         emit_event(
@@ -525,6 +528,8 @@ async def connect_vtc_session(duration):
             service,
         )
         raise
+    finally:
+        packet_capture.stop_and_analyze()
 
 def run_connect(duration):
     thread = threading.Thread(
