@@ -2,7 +2,7 @@
     "role": "client",
     "vtc_platform": "jitsi_electron",
     "service": "jitsi_electron",
-    "vtc_url": "https://192.168.0.7:8443/testroom",
+    "vtc_url": "https://192.168.32.188:8443/icsi-test-001",
     "c2_port": "port_number",
     "bot_name": "bot_name",
     "bot": {

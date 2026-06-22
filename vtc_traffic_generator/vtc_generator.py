@@ -1,6 +1,4 @@
-import ffmpeg
 import subprocess
-import pulsectl
 import os
 import random
 import signal
@@ -19,6 +17,16 @@ from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
 from vtc_automation.event_log import emit_event, get_service_name
 from vtc_automation.packet_capture import PacketCaptureSession
+
+try:
+    import ffmpeg
+except ImportError:
+    ffmpeg = None
+
+try:
+    import pulsectl
+except ImportError:
+    pulsectl = None
 
 
 speech_lock = threading.Lock()
@@ -227,6 +235,8 @@ def run_client(client_config):
 # Check for v4l2 kernel mod
 def initialize_vtc_client():
     print("Initializing VTC client")
+    if pulsectl is None:
+        raise RuntimeError("Client mode requires the pulsectl Python package.")
 
     # Set up audio devices
     pulse = pulsectl.Pulse()
@@ -554,6 +564,9 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec):
 def play_video():
     # Setup streaming from file to v4l2 device
     if config['videoconference']:
+        if ffmpeg is None:
+            raise RuntimeError("Client video playback requires the ffmpeg-python package.")
+
         try:
             video_filepath = str(PurePath(config['video_path'], config['video_name']))
             virtual_video_config = config.get("virtual_video", {})

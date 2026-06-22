@@ -1,12 +1,12 @@
 {
     "role": "controller",
     "vtc_platform": "jitsi_electron",
-    "duration": "time (min)",
+    "duration": 1,
     "videoconference": true,
     "behavior": {
         "mode": "icsi",
         "icsi": {
-            "corpus_root": "media/icsi",
+            "corpus_root": "/Users/soyoung/media/icsi",
             "meeting_id": null,
             "min_speaker_duration_sec": 1.0,
             "min_utterance_duration_sec": 0.05,
@@ -15,8 +15,9 @@
         }
     },
     "vtc_clients":  [
-                    ["ip1", 11111],
-                    ["ip2", 22222]
+                    ["192.168.64.4", 8001],
+                    ["192.168.64.4", 8002],
+                    ["192.168.64.4", 8003]
                     ],
     "version": "VTC traffic generator X"
 }
