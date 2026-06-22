@@ -15,11 +15,29 @@ import asyncio
 import concurrent.futures
 import threading
 
+from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
+from vtc_automation.event_log import emit_event, get_service_name
+
+
+speech_lock = threading.Lock()
+speech_until = 0
+speech_thread_active = False
 
 def run_controller():
     num_clients = len(config['vtc_clients'])
     vtc_clients = []
+    icsi_policy = None
+
+    if is_icsi_mode():
+        icsi_policy = ICSIReplayPolicy.from_config(config, num_clients)
+        connect_duration_minutes = max(
+            get_duration_minutes(config),
+            (icsi_policy.end_sec / 60) + 1,
+        )
+        config["_connect_duration_minutes"] = connect_duration_minutes
+        print("ICSI replay mode enabled.")
+        print("ICSI policy: " + json.dumps(icsi_policy.summary(), sort_keys=True))
 
     # Instantiate clients
     for x in range(num_clients):
@@ -31,6 +49,10 @@ def run_controller():
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(vtc_clients))
     executor.map(VtcClient.initialize_client, vtc_clients)
     executor.shutdown(wait=False)
+
+    if icsi_policy:
+        run_icsi_replay_controller(vtc_clients, icsi_policy)
+        return
 
     # Begin client dialog
     # Randomly select VTC_client as long as it wasn't the last one picked.
@@ -67,6 +89,93 @@ def run_controller():
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(vtc_clients[x].video_pid)
 
+
+def is_icsi_mode():
+    behavior = config.get("behavior", {})
+    if isinstance(behavior, dict) and behavior.get("mode") == "icsi":
+        return True
+    return config.get("behavior_mode") == "icsi"
+
+
+def get_duration_minutes(controller_config):
+    try:
+        return float(controller_config.get("duration", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def run_icsi_replay_controller(vtc_clients, icsi_policy):
+    behavior = config.get("behavior", {})
+    icsi_config = behavior.get("icsi", {}) if isinstance(behavior, dict) else {}
+    time_scale = float(icsi_config.get("time_scale", 1.0))
+    configured_max_duration_sec = icsi_config.get("max_duration_sec")
+    max_duration_sec = (
+        float(configured_max_duration_sec)
+        if configured_max_duration_sec is not None
+        else icsi_policy.end_sec
+    )
+
+    emit_event(
+        config,
+        "icsi_replay_start",
+        {
+            **icsi_policy.summary(),
+            "time_scale": time_scale,
+            "max_duration_sec": max_duration_sec,
+        },
+    )
+
+    start_time = time.time()
+    for event in icsi_policy.events:
+        if event.start_sec > max_duration_sec:
+            break
+
+        target_time = start_time + (event.start_sec * time_scale)
+        delay = target_time - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+        duration_sec = max(0.05, min(event.end_sec, max_duration_sec) - event.start_sec)
+        duration_sec *= time_scale
+        metadata = {
+            "meeting_id": event.meeting_id,
+            "speaker_id": event.speaker_id,
+            "channel": event.channel,
+            "dialogue_act_type": event.dialogue_act_type,
+            "icsi_start_sec": event.start_sec,
+            "icsi_end_sec": event.end_sec,
+            "duration_sec": duration_sec,
+        }
+        emit_event(
+            config,
+            "policy_action_selected",
+            {
+                "bot_index": event.bot_index,
+                **metadata,
+            },
+        )
+
+        client = vtc_clients[event.bot_index]
+        uri = 'http://' + client.ip + ':' + str(client.port)
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            proxy.start_speech(duration_sec, metadata)
+
+    end_delay = (min(max_duration_sec, icsi_policy.end_sec) * time_scale) - (time.time() - start_time)
+    if end_delay > 0:
+        time.sleep(end_delay)
+
+    emit_event(
+        config,
+        "icsi_replay_done",
+        {"meeting_id": icsi_policy.meeting_id},
+    )
+
+    print("ICSI replay complete, closing session now.")
+    for client in vtc_clients:
+        uri = 'http://' + client.ip + ':' + str(client.port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.stop_video(client.video_pid)
+
 class AsyncXMLRPCServer(socketserver.ThreadingMixIn,SimpleXMLRPCServer): pass
 
 class VtcClient:
@@ -87,7 +196,7 @@ class VtcClient:
 
         # Connect to VTC session
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.run_connect(config['duration'])
+            proxy.run_connect(config.get("_connect_duration_minutes", config['duration']))
 
 
 def run_client(client_config):
@@ -100,6 +209,7 @@ def run_client(client_config):
     server.register_function(play_video, "play_video")
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
+    server.register_function(start_speech, "start_speech")
     server.register_function(get_name, "get_name")
     server.register_function(run_connect, "run_connect")
     server.register_function(stop_video, "stop_video")
@@ -150,41 +260,126 @@ def initialize_vtc_client():
 # XMLRPC
 def dialog_cycle():
     print(config['bot_name'] + " speaking now.")
+    emit_event(config, "speech_start", {"bot_name": config.get("bot_name")})
 
-    # Calculate the number of sentences a VTC client speaks in a single turn
-    # Left skewed, lower bound at 1, upper bound at number of sentences in a given conversation
-    num_sentences = round(abs(random.gauss(0, 2))) + 1
+    try:
+        # Calculate the number of sentences a VTC client speaks in a single turn
+        # Left skewed, lower bound at 1, upper bound at number of sentences in a given conversation
+        num_sentences = round(abs(random.gauss(0, 2))) + 1
 
-    # Select conversation
-    convo_root = str(PurePath(config['audio_path'], config['voice_name']))
-    convo_list = os.listdir(convo_root)
-    convo_index = random.randrange(0, len(convo_list))
-    convo_path = str(PurePath(convo_root, convo_list[convo_index]))
-    print("CONVOPATH:" + convo_path)
+        # Select conversation
+        convo_root = str(PurePath(config['audio_path'], config['voice_name']))
+        convo_list = os.listdir(convo_root)
+        convo_index = random.randrange(0, len(convo_list))
+        convo_path = str(PurePath(convo_root, convo_list[convo_index]))
+        print("CONVOPATH:" + convo_path)
 
-    # Select dialog lines and play them
-    audio_filenames = os.listdir(convo_path)
-    if num_sentences > len(audio_filenames):
-        num_sentences = len(audio_filenames)
+        # Select dialog lines and play them
+        audio_filenames = os.listdir(convo_path)
+        if num_sentences > len(audio_filenames):
+            num_sentences = len(audio_filenames)
 
-    print("Number of lines:" + str(num_sentences))
+        print("Number of lines:" + str(num_sentences))
 
-    index = 0
-    while index < num_sentences:
-        # Play file
-        filename = str(index) + ".flac"
-        audiofile_fullpath = str(PurePath(convo_path, filename))
+        index = 0
+        while index < num_sentences:
+            # Play file
+            filename = str(index) + ".flac"
+            audiofile_fullpath = str(PurePath(convo_path, filename))
 
-        # Play audio
-        play_audio(audiofile_fullpath)
-        index += 1
+            # Play audio
+            play_audio(audiofile_fullpath)
+            index += 1
+
+        return True
+    finally:
+        emit_event(config, "speech_end", {"bot_name": config.get("bot_name")})
+
+
+def start_speech(duration_sec, metadata=None):
+    global speech_thread_active
+    global speech_until
+
+    metadata = dict(metadata or {})
+    duration_sec = float(duration_sec)
+    now = time.time()
+
+    with speech_lock:
+        speech_until = max(speech_until, now + duration_sec)
+        should_start_thread = not speech_thread_active
+        if should_start_thread:
+            speech_thread_active = True
+
+    emit_event(
+        config,
+        "speech_start",
+        {
+            "duration_sec": duration_sec,
+            **metadata,
+        },
+    )
+
+    if should_start_thread:
+        thread = threading.Thread(
+            target=speech_playback_worker,
+            args=(metadata,),
+            daemon=True,
+        )
+        thread.start()
 
     return True
 
 
+def speech_playback_worker(metadata):
+    global speech_thread_active
+    global speech_until
+
+    try:
+        while True:
+            with speech_lock:
+                remaining_sec = speech_until - time.time()
+
+            if remaining_sec <= 0:
+                break
+
+            audio_file_path = choose_audio_file()
+            if audio_file_path:
+                play_audio(audio_file_path)
+            else:
+                time.sleep(min(remaining_sec, 0.25))
+    finally:
+        with speech_lock:
+            speech_thread_active = False
+            speech_until = 0
+
+        emit_event(
+            config,
+            "speech_end",
+            dict(metadata or {}),
+        )
+
+
+def choose_audio_file():
+    convo_root = str(PurePath(config['audio_path'], config['voice_name']))
+    convo_list = os.listdir(convo_root)
+    if not convo_list:
+        return None
+
+    convo_path = str(PurePath(convo_root, random.choice(convo_list)))
+    audio_filenames = [
+        filename
+        for filename in os.listdir(convo_path)
+        if filename.endswith(".flac")
+    ]
+    if not audio_filenames:
+        return None
+
+    return str(PurePath(convo_path, random.choice(audio_filenames)))
+
+
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
-    subprocess.run('paplay -d virtual_speaker ' + audio_file_path, capture_output=True, shell=True)
+    subprocess.run(['paplay', '-d', 'virtual_speaker', audio_file_path], capture_output=True)
 
 
 # XMLRPC
@@ -193,6 +388,8 @@ def play_video():
     if config['videoconference']:
         try:
             video_filepath = str(PurePath(config['video_path'], config['video_name']))
+            virtual_video_config = config.get("virtual_video", {})
+            video_device = config.get("video_device") or virtual_video_config.get("device") or "/dev/video5"
             print(video_filepath)
             # time.sleep(5)
 
@@ -202,7 +399,7 @@ def play_video():
                         .input(video_filepath, re=None, stream_loop=-1)
                         .filter('format', 'yuv420p')
                         .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
-                        .output('/dev/video5', format='v4l2')
+                        .output(video_device, format='v4l2')
                 )
             else:
                 process = (
@@ -210,13 +407,18 @@ def play_video():
                         .input(video_filepath, re=None, stream_loop=-1)
                         .filter('format', 'yuv420p')
                         .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-50', fontcolor='red', fontsize=200)
-                        .output('/dev/video5', format='v4l2')
+                        .output(video_device, format='v4l2')
                 )
 
             # Launch video playback
             print("Launching video playback")
             # process = process.run_async(pipe_stdin=True, quiet=True)
             process = process.run_async(pipe_stdin=True)
+            emit_event(
+                config,
+                "camera_on",
+                {"video_path": video_filepath, "video_device": video_device},
+            )
 
         except ffmpeg.Error as e:
             print('stdout:', e.stdout.decode('utf8'))
@@ -231,8 +433,31 @@ def play_video():
 
 # XMLRPC
 async def connect_vtc_session(duration):
-    adapter = get_adapter(config)
-    return await adapter.connect(duration)
+    service = get_service_name(config)
+    try:
+        emit_event(
+            config,
+            "connect_vtc_session_start",
+            {"vtc_url": config.get("vtc_url")},
+            service,
+        )
+        adapter = get_adapter(config)
+        result = await adapter.connect(duration)
+        emit_event(
+            config,
+            "connect_vtc_session_done",
+            {"vtc_url": config.get("vtc_url")},
+            service,
+        )
+        return result
+    except Exception as exc:
+        emit_event(
+            config,
+            "adapter_error",
+            {"error": str(exc), "vtc_url": config.get("vtc_url")},
+            service,
+        )
+        raise
 
 def run_connect(duration):
     thread = threading.Thread(
@@ -247,6 +472,7 @@ def run_connect(duration):
 def stop_video(video_pid):
     print("Stopping video")
     os.kill(video_pid, signal.SIGTERM)
+    emit_event(config, "camera_off", {"video_pid": video_pid})
 
 
 # XMLRPC
@@ -268,7 +494,7 @@ if __name__ == '__main__':
 
     print(config['version'])
     print("Role: " + config['role'])
-    print("VTC Platform: " + config['vtc_platform'])
+    print("VTC Platform: " + get_service_name(config))
 
     if config['role'] == 'controller':
         print("Duration: " + str(config['duration']) + " minutes")

@@ -1,14 +1,48 @@
 {
     "role": "client",
-    "vtc_platform": "jitsi",
-    "vtc_url": "URL",
+    "vtc_platform": "jitsi_electron",
+    "service": "jitsi_electron",
+    "vtc_url": "https://192.168.0.7:8443/testroom",
     "c2_port": "port_number",
     "bot_name": "bot_name",
+    "bot": {
+        "display_name": "bot_name"
+    },
     "videoconference": true,
     "audio_path": "audio_path",
     "voice_name": "voice_name",
     "video_path": "video_path",
     "video_name": "video_name",
-    "adapter_config": {},
+    "adapter_config": {
+        "display": ":99",
+        "display_backend": "xvfb",
+        "executable_path": "/home/soyoung/service/jitsi-electron/run-jitsi.sh",
+        "ignore_certificate_errors": true,
+        "camera_name": "VTC Bot Camera",
+        "microphone_name": "VTC_Microphone",
+        "screen_share_target": null,
+        "window_title_regex": "Jitsi Meet|testroom|jitsi",
+        "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
+        "launch_timeout_sec": 20,
+        "action_timeout_sec": 10,
+        "event_log_path": "/tmp/vtc-events.jsonl",
+        "app_log_path": "/tmp/jitsi-electron.log",
+        "adapter_log_path": "/tmp/vtc-jitsi-adapter.log",
+        "accessibility_dump_path": "/tmp/jitsi-{stage}-tree.json",
+        "skip_device_selection": false,
+        "accessibility_names": {},
+        "accessibility_roles": {},
+        "coordinates": {
+            "name_input": null,
+            "join_button": null,
+            "mic_button": null,
+            "camera_button": null,
+            "hangup_button": null,
+            "device_settings_button": null,
+            "screen_share_button": null,
+            "screen_share_target": null,
+            "screen_share_confirm": null
+        }
+    },
     "version": "VTC traffic generator X"
 }

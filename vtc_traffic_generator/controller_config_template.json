@@ -1,8 +1,19 @@
 {
     "role": "controller",
-    "vtc_platform": "jitsi",
+    "vtc_platform": "jitsi_electron",
     "duration": "time (min)",
     "videoconference": true,
+    "behavior": {
+        "mode": "icsi",
+        "icsi": {
+            "corpus_root": "/Users/soyoung/Desktop/ICSI/ICSI",
+            "meeting_id": null,
+            "min_speaker_duration_sec": 1.0,
+            "min_utterance_duration_sec": 0.05,
+            "max_duration_sec": null,
+            "time_scale": 1.0
+        }
+    },
     "vtc_clients":  [
                     ["ip1", 11111],
                     ["ip2", 22222]

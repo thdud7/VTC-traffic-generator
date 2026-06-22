@@ -2,6 +2,7 @@ from .bigbluebutton import BigBlueButtonAdapter
 from .discord import DiscordAdapter
 from .google_meet import GoogleMeetAdapter
 from .jitsi import JitsiAdapter
+from .jitsi_electron import JitsiElectronAdapter
 from .messenger import MessengerAdapter
 from .teams import TeamsAdapter
 from .webex import WebexAdapter
@@ -16,6 +17,8 @@ ADAPTERS = {
     "google-meet": GoogleMeetAdapter,
     "googlemeet": GoogleMeetAdapter,
     "jitsi": JitsiAdapter,
+    "jitsi_electron": JitsiElectronAdapter,
+    "jitsi-electron": JitsiElectronAdapter,
     "messenger": MessengerAdapter,
     "teams": TeamsAdapter,
     "webex": WebexAdapter,
@@ -39,6 +42,12 @@ def get_adapter(config):
         raise ValueError(f"Unsupported VTC service '{service_name}'. Supported: {supported}")
 
     return adapter_class(config)
+
+
+def create_vtc_adapter(service, config):
+    adapter_config = dict(config)
+    adapter_config["service"] = service
+    return get_adapter(adapter_config)
 
 
 def list_supported_services():
