@@ -146,6 +146,10 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
             "icsi_end_sec": event.end_sec,
             "duration_sec": duration_sec,
         }
+        if event.audio_file_path:
+            metadata["audio_file_path"] = event.audio_file_path
+            metadata["audio_start_sec"] = event.start_sec
+
         emit_event(
             config,
             "policy_action_selected",
@@ -304,6 +308,23 @@ def start_speech(duration_sec, metadata=None):
     duration_sec = float(duration_sec)
     now = time.time()
 
+    if metadata.get("audio_file_path"):
+        emit_event(
+            config,
+            "speech_start",
+            {
+                "duration_sec": duration_sec,
+                **metadata,
+            },
+        )
+        thread = threading.Thread(
+            target=speech_audio_segment_worker,
+            args=(duration_sec, metadata,),
+            daemon=True,
+        )
+        thread.start()
+        return True
+
     with speech_lock:
         speech_until = max(speech_until, now + duration_sec)
         should_start_thread = not speech_thread_active
@@ -322,7 +343,7 @@ def start_speech(duration_sec, metadata=None):
     if should_start_thread:
         thread = threading.Thread(
             target=speech_playback_worker,
-            args=(metadata,),
+            args=(duration_sec, metadata,),
             daemon=True,
         )
         thread.start()
@@ -330,7 +351,7 @@ def start_speech(duration_sec, metadata=None):
     return True
 
 
-def speech_playback_worker(metadata):
+def speech_playback_worker(duration_sec, metadata):
     global speech_thread_active
     global speech_until
 
@@ -359,6 +380,20 @@ def speech_playback_worker(metadata):
         )
 
 
+def speech_audio_segment_worker(duration_sec, metadata):
+    try:
+        audio_file_path = metadata.get("audio_file_path")
+        audio_start_sec = float(metadata.get("audio_start_sec", 0))
+        if audio_file_path:
+            play_audio_segment(audio_file_path, audio_start_sec, duration_sec)
+    finally:
+        emit_event(
+            config,
+            "speech_end",
+            dict(metadata or {}),
+        )
+
+
 def choose_audio_file():
     convo_root = str(PurePath(config['audio_path'], config['voice_name']))
     convo_list = os.listdir(convo_root)
@@ -380,6 +415,38 @@ def choose_audio_file():
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
     subprocess.run(['paplay', '-d', 'virtual_speaker', audio_file_path], capture_output=True)
+
+
+def play_audio_segment(audio_file_path, start_sec, duration_sec):
+    ffmpeg_process = subprocess.Popen(
+        [
+            'ffmpeg',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-ss',
+            str(max(0, start_sec)),
+            '-t',
+            str(max(0.05, duration_sec)),
+            '-i',
+            audio_file_path,
+            '-f',
+            'wav',
+            'pipe:1',
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        subprocess.run(
+            ['paplay', '-d', 'virtual_speaker'],
+            stdin=ffmpeg_process.stdout,
+            capture_output=True,
+        )
+    finally:
+        if ffmpeg_process.stdout:
+            ffmpeg_process.stdout.close()
+        ffmpeg_process.wait()
 
 
 # XMLRPC

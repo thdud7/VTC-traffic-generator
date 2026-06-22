@@ -260,7 +260,7 @@ Controller config example:
   "behavior": {
     "mode": "icsi",
     "icsi": {
-      "corpus_root": "/Users/soyoung/Desktop/ICSI/ICSI",
+      "corpus_root": "media/icsi",
       "meeting_id": null,
       "min_speaker_duration_sec": 1.0,
       "min_utterance_duration_sec": 0.05,
@@ -275,6 +275,25 @@ Controller config example:
   ]
 }
 ```
+
+When `corpus_root` is omitted, it defaults to `media/icsi` under the project
+root. The expected server layout is:
+
+```text
+media/icsi/
+  ICSI/DialogueActs/
+    <meeting-id>.<speaker-or-channel>.dialogue-acts.xml
+  signals/
+    <meeting-id>/
+      <speaker-id>.wav
+      <channel>.wav
+```
+
+For compatibility with older local data, `corpus_root/DialogueActs` is also
+accepted. If a matching wav file exists under `signals/<meeting-id>`, ICSI
+speech replay plays the corresponding time segment from that wav. If no wav is
+found, the client falls back to its configured `audio_path` and `voice_name`
+audio clips.
 
 When `meeting_id` is `null`, the policy selects the first meeting whose active
 speaker count exactly equals the number of configured clients. When
