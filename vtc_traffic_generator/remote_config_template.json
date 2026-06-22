@@ -11,6 +11,7 @@
     "videoconference": true,
     "audio_path": "audio_path",
     "voice_name": "voice_name",
+    "icsi_audio_root": "media/icsi/Signals",
     "video_path": "video_path",
     "video_name": "video_name",
     "packet_capture": {

@@ -10,7 +10,7 @@ import json
 import socketserver
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
-from pathlib import PurePath
+from pathlib import Path, PurePath
 import asyncio
 import concurrent.futures
 import threading
@@ -142,14 +142,13 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
             "meeting_id": event.meeting_id,
             "speaker_id": event.speaker_id,
             "channel": event.channel,
+            "file_channel": event.file_channel,
             "dialogue_act_type": event.dialogue_act_type,
             "icsi_start_sec": event.start_sec,
             "icsi_end_sec": event.end_sec,
             "duration_sec": duration_sec,
+            "audio_start_sec": event.start_sec,
         }
-        if event.audio_file_path:
-            metadata["audio_file_path"] = event.audio_file_path
-            metadata["audio_start_sec"] = event.start_sec
 
         emit_event(
             config,
@@ -309,7 +308,9 @@ def start_speech(duration_sec, metadata=None):
     duration_sec = float(duration_sec)
     now = time.time()
 
-    if metadata.get("audio_file_path"):
+    audio_file_path = metadata.get("audio_file_path") or choose_icsi_audio_file(metadata)
+    if audio_file_path:
+        metadata["audio_file_path"] = audio_file_path
         emit_event(
             config,
             "speech_start",
@@ -393,6 +394,105 @@ def speech_audio_segment_worker(duration_sec, metadata):
             "speech_end",
             dict(metadata or {}),
         )
+
+
+def choose_icsi_audio_file(metadata):
+    meeting_id = metadata.get("meeting_id")
+    if not meeting_id:
+        return None
+
+    speaker_id = str(metadata.get("speaker_id") or "")
+    channel = str(metadata.get("channel") or "")
+    file_channel = str(metadata.get("file_channel") or "")
+    candidate_names = [
+        f"{speaker_id}.wav",
+        f"{channel}.wav",
+        f"{file_channel}.wav",
+        f"{meeting_id}.{speaker_id}.wav",
+        f"{meeting_id}.{channel}.wav",
+        f"{meeting_id}.{file_channel}.wav",
+    ]
+
+    for root in icsi_audio_roots():
+        meeting_dir = root / str(meeting_id)
+        if not meeting_dir.exists():
+            continue
+
+        for filename in candidate_names:
+            if filename == ".wav":
+                continue
+            path = meeting_dir / filename
+            if path.exists():
+                return str(path)
+
+        wav_files = sorted(meeting_dir.glob("*.wav"))
+        matching_wav_files = [
+            path
+            for path in wav_files
+            if (speaker_id and speaker_id.lower() in path.stem.lower())
+            or (channel and channel.lower() in path.stem.lower())
+            or (file_channel and file_channel.lower() in path.stem.lower())
+        ]
+        if len(matching_wav_files) == 1:
+            return str(matching_wav_files[0])
+
+    emit_event(
+        config,
+        "icsi_audio_not_found",
+        {
+            "meeting_id": meeting_id,
+            "speaker_id": speaker_id,
+            "channel": channel,
+            "file_channel": file_channel,
+            "searched_roots": [str(root) for root in icsi_audio_roots()],
+        },
+    )
+    return None
+
+
+def icsi_audio_roots():
+    roots = []
+    icsi_config = config.get("icsi", {})
+    if not isinstance(icsi_config, dict):
+        icsi_config = {}
+
+    for value in (
+        config.get("icsi_audio_root"),
+        config.get("icsi_signals_dir"),
+        icsi_config.get("audio_root"),
+        icsi_config.get("signals_dir"),
+    ):
+        if value:
+            roots.append(resolve_project_path(str(value)))
+
+    roots.extend(
+        [
+            project_root() / "media" / "icsi" / "Signals",
+            project_root() / "media" / "icsi" / "signals",
+            project_root() / "media" / "icsi" / "Signal",
+            project_root() / "media" / "icsi" / "signal",
+        ]
+    )
+
+    unique_roots = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            unique_roots.append(root)
+            seen.add(key)
+    return unique_roots
+
+
+def resolve_project_path(value):
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return project_root() / path
+
+
+def project_root():
+    return Path(__file__).resolve().parents[1]
 
 
 def choose_audio_file():

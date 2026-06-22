@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -18,7 +17,7 @@ class ICSITimelineEvent:
     start_sec: float
     end_sec: float
     dialogue_act_type: str
-    audio_file_path: str | None = None
+    file_channel: str
 
     @property
     def duration_sec(self) -> float:
@@ -34,7 +33,6 @@ class ICSIReplayPolicy:
         bot_count: int,
         meeting_id: str | None = None,
         dialogue_acts_dir: str | None = None,
-        signals_dir: str | None = None,
         min_speaker_duration_sec: float = 1.0,
         min_utterance_duration_sec: float = 0.05,
     ):
@@ -44,7 +42,6 @@ class ICSIReplayPolicy:
         self.project_root = Path(__file__).resolve().parents[2]
         self.corpus_root = self._resolve_path(corpus_root) if corpus_root else self._default_corpus_root()
         self.dialogue_acts_dir = self._resolve_dialogue_acts_dir(dialogue_acts_dir)
-        self.signals_dir = self._resolve_path(signals_dir) if signals_dir else self.corpus_root / "signals"
         self.bot_count = bot_count
         self.requested_meeting_id = meeting_id
         self.min_speaker_duration_sec = min_speaker_duration_sec
@@ -86,7 +83,6 @@ class ICSIReplayPolicy:
             bot_count=bot_count,
             meeting_id=icsi.get("meeting_id"),
             dialogue_acts_dir=icsi.get("dialogue_acts_dir"),
-            signals_dir=icsi.get("signals_dir"),
             min_speaker_duration_sec=float(icsi.get("min_speaker_duration_sec", 1.0)),
             min_utterance_duration_sec=float(icsi.get("min_utterance_duration_sec", 0.05)),
         )
@@ -94,7 +90,7 @@ class ICSIReplayPolicy:
     def _default_corpus_root(self) -> Path:
         return self.project_root / "media" / "icsi"
 
-    def _resolve_path(self, value: str | os.PathLike[str]) -> Path:
+    def _resolve_path(self, value: str) -> Path:
         path = Path(value).expanduser()
         if path.is_absolute():
             return path
@@ -214,12 +210,7 @@ class ICSIReplayPolicy:
                         start_sec=dialogue_act["start_sec"],
                         end_sec=dialogue_act["end_sec"],
                         dialogue_act_type=dialogue_act["dialogue_act_type"],
-                        audio_file_path=self._audio_file_path(
-                            self.meeting_id,
-                            speaker_id,
-                            dialogue_act["channel"],
-                            dialogue_act["file_channel"],
-                        ),
+                        file_channel=dialogue_act["file_channel"],
                     )
                 )
 
@@ -257,43 +248,3 @@ class ICSIReplayPolicy:
         if not match:
             return None
         return match.group(1), match.group(2)
-
-    def _audio_file_path(
-        self,
-        meeting_id: str,
-        speaker_id: str,
-        channel: str,
-        file_channel: str,
-    ) -> str | None:
-        meeting_signals_dir = self.signals_dir / meeting_id
-        if not meeting_signals_dir.exists():
-            return None
-
-        candidate_names = [
-            f"{speaker_id}.wav",
-            f"{channel}.wav",
-            f"{file_channel}.wav",
-            f"{meeting_id}.{speaker_id}.wav",
-            f"{meeting_id}.{channel}.wav",
-            f"{meeting_id}.{file_channel}.wav",
-        ]
-        for filename in candidate_names:
-            path = meeting_signals_dir / filename
-            if path.exists():
-                return str(path)
-
-        wav_files = sorted(meeting_signals_dir.glob("*.wav"))
-        matching_wav_files = [
-            path
-            for path in wav_files
-            if speaker_id.lower() in path.stem.lower()
-            or channel.lower() in path.stem.lower()
-            or file_channel.lower() in path.stem.lower()
-        ]
-        if len(matching_wav_files) == 1:
-            return str(matching_wav_files[0])
-
-        if len(wav_files) == 1:
-            return str(wav_files[0])
-
-        return None

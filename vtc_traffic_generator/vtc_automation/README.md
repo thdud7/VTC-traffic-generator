@@ -311,24 +311,43 @@ Controller config example:
 }
 ```
 
-When `corpus_root` is omitted, it defaults to `media/icsi` under the project
-root. The expected server layout is:
+When controller `corpus_root` is omitted, it defaults to `media/icsi` under the
+controller project root. The controller only needs dialogue-act XML:
 
 ```text
 media/icsi/
   ICSI/DialogueActs/
     <meeting-id>.<speaker-or-channel>.dialogue-acts.xml
-  signals/
-    <meeting-id>/
-      <speaker-id>.wav
-      <channel>.wav
 ```
 
 For compatibility with older local data, `corpus_root/DialogueActs` is also
-accepted. If a matching wav file exists under `signals/<meeting-id>`, ICSI
-speech replay plays the corresponding time segment from that wav. If no wav is
-found, the client falls back to its configured `audio_path` and `voice_name`
-audio clips.
+accepted.
+
+Each client resolves ICSI wav files locally, so controller and client absolute
+paths do not need to match. By default, clients look under
+`media/icsi/Signals` relative to their own project root, with lowercase
+`signals`, singular `Signal`, and lowercase `signal` accepted as fallbacks.
+Override the client root with `icsi_audio_root` if needed:
+
+```json
+{
+  "icsi_audio_root": "media/icsi/Signals"
+}
+```
+
+Client wav files should be organized by meeting:
+
+```text
+media/icsi/Signals/
+  <meeting-id>/
+    <speaker-id>.wav
+    <channel>.wav
+    <meeting-id>.<speaker-or-channel>.wav
+```
+
+If a matching wav file exists, ICSI speech replay plays the corresponding time
+segment from that wav. If no wav is found, the client falls back to its
+configured `audio_path` and `voice_name` audio clips.
 
 When `meeting_id` is `null`, the policy selects the first meeting whose active
 speaker count exactly equals the number of configured clients. When
