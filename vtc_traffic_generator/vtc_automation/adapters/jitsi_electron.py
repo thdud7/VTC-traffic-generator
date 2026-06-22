@@ -96,7 +96,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             self.service_name,
         )
 
-        if self.adapter_config.get("restart_existing", True):
+        if self.adapter_config.get("restart_existing", False):
             self._run_command(
                 ["pkill", "-f", self.adapter_config.get("process_match", "jitsi-meet")],
                 timeout=5,

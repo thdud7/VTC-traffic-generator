@@ -11,9 +11,18 @@
     "videoconference": true,
     "audio_path": "audio_path",
     "voice_name": "voice_name",
+    "virtual_audio": {
+        "sink_name": "bot1_sink",
+        "source_name": "bot1_sink.monitor",
+        "sink_description": "bot1_sink",
+        "source_description": "bot1_sink.monitor"
+    },
     "icsi_audio_root": "media/icsi/Signals",
     "video_path": "video_path",
     "video_name": "video_name",
+    "virtual_video": {
+        "device": "/dev/video5"
+    },
     "packet_capture": {
         "enabled": false,
         "interface": "any",
@@ -27,9 +36,10 @@
         "display": ":99",
         "display_backend": "xvfb",
         "executable_path": "/home/soyoung/service/jitsi-electron/run-jitsi.sh",
+        "restart_existing": false,
         "ignore_certificate_errors": true,
         "camera_name": "VTC Bot Camera",
-        "microphone_name": "VTC_Microphone",
+        "microphone_name": "bot1_sink.monitor",
         "screen_share_target": null,
         "window_title_regex": "Jitsi Meet|testroom|jitsi",
         "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",

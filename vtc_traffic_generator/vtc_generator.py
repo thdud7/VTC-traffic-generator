@@ -56,7 +56,7 @@ def run_controller():
 
     # Threaded VTC client initialization
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(vtc_clients))
-    executor.map(VtcClient.initialize_client, vtc_clients)
+    list(executor.map(VtcClient.initialize_client, vtc_clients))
     executor.shutdown(wait=False)
 
     if icsi_policy:
@@ -242,17 +242,51 @@ def initialize_vtc_client():
     pulse = pulsectl.Pulse()
     sinks = pulse.sink_list()
     sources = pulse.source_list()
+    audio_devices = virtual_audio_config()
+    sink_name = audio_devices["sink_name"]
+    source_name = audio_devices["source_name"]
+    sink_description = audio_devices["sink_description"]
+    source_description = audio_devices["source_description"]
+    use_monitor_source = audio_devices["use_monitor_source"]
 
-    if "name='virtual_speaker'" not in str(sinks) or "name='virtual_mic'" not in str(sources):
+    if not pulse_has_device(sinks, sink_name) or not pulse_has_device(sources, source_name):
         print("Creating PulseAudio virtual devices")
-        subprocess.run(
-            'pactl load-module module-null-sink sink_name="virtual_speaker" '
-            'sink_properties=device.description="virtual_speaker"',
-            capture_output=True, shell=True)
-        subprocess.run(
-            'pactl load-module module-remap-source master="virtual_speaker.monitor" source_name="virtual_mic" '
-            'source_properties=device.description="virtual_mic"',
-            capture_output=True, shell=True)
+        if not pulse_has_device(sinks, sink_name):
+            subprocess.run(
+                [
+                    "pactl",
+                    "load-module",
+                    "module-null-sink",
+                    f"sink_name={sink_name}",
+                    f"sink_properties=device.description={sink_description}",
+                ],
+                capture_output=True,
+            )
+        if not use_monitor_source and not pulse_has_device(sources, source_name):
+            subprocess.run(
+                [
+                    "pactl",
+                    "load-module",
+                    "module-remap-source",
+                    f"master={sink_name}.monitor",
+                    f"source_name={source_name}",
+                    f"source_properties=device.description={source_description}",
+                ],
+                capture_output=True,
+            )
+        sinks = pulse.sink_list()
+        sources = pulse.source_list()
+        emit_event(
+            config,
+            "virtual_audio_configured",
+            {
+                "sink_name": sink_name,
+                "source_name": source_name,
+                "sink_found": pulse_has_device(sinks, sink_name),
+                "source_found": pulse_has_device(sources, source_name),
+                "use_monitor_source": use_monitor_source,
+            },
+        )
 
     # Set volume levels and unmute devices
     for sink in sinks:
@@ -424,7 +458,7 @@ def choose_icsi_audio_file(metadata):
     ]
 
     for root in icsi_audio_roots():
-        meeting_dir = root / str(meeting_id)
+        meeting_dir = icsi_meeting_audio_dir(root, str(meeting_id))
         if not meeting_dir.exists():
             continue
 
@@ -458,6 +492,35 @@ def choose_icsi_audio_file(metadata):
         },
     )
     return None
+
+
+def icsi_meeting_audio_dir(root, meeting_id):
+    meeting_dir = root / meeting_id
+    if meeting_dir.exists():
+        return meeting_dir
+
+    configured_meeting_dir = config.get("icsi_audio_meeting_dir")
+    if configured_meeting_dir:
+        configured_path = Path(str(configured_meeting_dir)).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = root / configured_path
+        if configured_path.exists():
+            return configured_path
+
+    if root.exists():
+        child_dirs = [path for path in root.iterdir() if path.is_dir()]
+        if len(child_dirs) == 1:
+            emit_event(
+                config,
+                "icsi_audio_meeting_fallback",
+                {
+                    "requested_meeting_id": meeting_id,
+                    "fallback_dir": str(child_dirs[0]),
+                },
+            )
+            return child_dirs[0]
+
+    return meeting_dir
 
 
 def icsi_audio_roots():
@@ -505,6 +568,43 @@ def project_root():
     return Path(__file__).resolve().parents[1]
 
 
+def virtual_audio_config():
+    virtual_audio = config.get("virtual_audio", {})
+    if not isinstance(virtual_audio, dict):
+        virtual_audio = {}
+
+    adapter_config = config.get("adapter_config", {})
+    if not isinstance(adapter_config, dict):
+        adapter_config = {}
+
+    configured_microphone = adapter_config.get("microphone_name")
+    source_name = str(
+        virtual_audio.get("source_name")
+        or config.get("audio_source_name")
+        or configured_microphone
+        or "VTC_Microphone"
+    )
+    inferred_sink_name = source_name[:-len(".monitor")] if source_name.endswith(".monitor") else None
+    sink_name = str(
+        virtual_audio.get("sink_name")
+        or config.get("audio_sink_name")
+        or inferred_sink_name
+        or "VTC_Speaker"
+    )
+    use_monitor_source = source_name == f"{sink_name}.monitor"
+    return {
+        "sink_name": sink_name,
+        "source_name": source_name,
+        "sink_description": str(virtual_audio.get("sink_description") or sink_name),
+        "source_description": str(virtual_audio.get("source_description") or source_name),
+        "use_monitor_source": use_monitor_source,
+    }
+
+
+def pulse_has_device(devices, name):
+    return any(getattr(device, "name", None) == name for device in devices)
+
+
 def choose_audio_file():
     convo_root = str(PurePath(config['audio_path'], config['voice_name']))
     convo_list = os.listdir(convo_root)
@@ -525,7 +625,7 @@ def choose_audio_file():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
-    subprocess.run(['paplay', '-d', 'virtual_speaker', audio_file_path], capture_output=True)
+    subprocess.run(['paplay', '-d', virtual_audio_config()["sink_name"], audio_file_path], capture_output=True)
 
 
 def play_audio_segment(audio_file_path, start_sec, duration_sec):
@@ -550,7 +650,7 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec):
     )
     try:
         subprocess.run(
-            ['paplay', '-d', 'virtual_speaker'],
+            ['paplay', '-d', virtual_audio_config()["sink_name"]],
             stdin=ffmpeg_process.stdout,
             capture_output=True,
         )

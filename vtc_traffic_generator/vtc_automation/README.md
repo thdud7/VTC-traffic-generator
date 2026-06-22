@@ -138,13 +138,23 @@ Example client config:
   "bot": {
     "display_name": "bot1"
   },
+  "virtual_audio": {
+    "sink_name": "bot1_sink",
+    "source_name": "bot1_sink.monitor",
+    "sink_description": "bot1_sink",
+    "source_description": "bot1_sink.monitor"
+  },
+  "virtual_video": {
+    "device": "/dev/video5"
+  },
   "adapter_config": {
     "display": ":99",
     "display_backend": "xvfb",
     "executable_path": "/home/soyoung/service/jitsi-electron/run-jitsi.sh",
+    "restart_existing": false,
     "ignore_certificate_errors": true,
     "camera_name": "VTC Bot Camera",
-    "microphone_name": "VTC_Microphone",
+    "microphone_name": "bot1_sink.monitor",
     "screen_share_target": null,
     "window_title_regex": "Jitsi Meet|testroom|jitsi",
     "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
@@ -171,6 +181,16 @@ Example client config:
   }
 }
 ```
+
+When multiple bots run on the same Ubuntu host, each bot needs distinct
+resources. Use separate `c2_port`, `bot_name`, `adapter_config.display`, log
+paths, `virtual_audio.sink_name`, `virtual_audio.source_name`, and
+`virtual_video.device` values. Keep `adapter_config.restart_existing` set to
+`false`; otherwise one bot can terminate another bot's Jitsi Electron process.
+The configured `microphone_name` must match the PulseAudio source name or
+description created by `virtual_audio.source_name` /
+`virtual_audio.source_description`. The configured `camera_name` must match the
+v4l2loopback card label shown to Jitsi.
 
 Smoke-test the adapter without the controller:
 
