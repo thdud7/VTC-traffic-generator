@@ -107,6 +107,60 @@ Use `vtc_platform` to select the adapter. Current adapter keys include `jitsi`,
 1. Admit the VTC bots (if necessary) into the VTC conversation.
 1. To shut down, kill the process (ctrl-C) on the controller and clients and close the VTC application.
 
+## EC2 experiment automation
+
+For EC2-based experiments, use the Python harness to generate controller/client
+configs and the Ansible playbooks to update and start remote clients.
+
+1. Copy the example experiment file and edit it for your EC2 environment:
+
+   ```bash
+   cp vtc_traffic_generator/experiment.example.json experiment.json
+   ```
+
+1. Fill in:
+
+   - `vtc_url` with the Jitsi room URL.
+   - `repo.url` with the Git repository URL the EC2 clients can pull.
+   - `repo.dir` with the repository path on each client EC2.
+   - `ansible.user` and `ansible.ssh_private_key_file`.
+   - `clients[].host` with each client EC2 private or public IP.
+   - media paths and names under `defaults` or per client.
+
+1. Generate configs and inventory locally:
+
+   ```bash
+   python3 vtc_traffic_generator/run_experiment.py experiment.json
+   ```
+
+   This writes files under `generated/experiment/`, including:
+
+   - `controller_config.json`
+   - `remote_config_bot1.json`, `remote_config_bot2.json`, etc.
+   - `inventory.ini`
+
+1. Deploy the latest Git code, copy each bot config, and start the clients:
+
+   ```bash
+   python3 vtc_traffic_generator/run_experiment.py experiment.json --deploy
+   ```
+
+1. Run the controller locally after deployment:
+
+   ```bash
+   python3 vtc_traffic_generator/run_experiment.py experiment.json --deploy --run-controller
+   ```
+
+1. Stop remote clients:
+
+   ```bash
+   ansible-playbook -i generated/experiment/inventory.ini ansible/stop_clients.yml
+   ```
+
+The harness owns experiment logic such as bot names, ports, display values,
+media selection, and generated configs. Ansible owns remote EC2 work such as
+`git pull`, file copy, process start, and process stop.
+
 ## Generating a Content Library
 Audio and visual content is pregenerated and can be found at [TBD]. If you want to create new content, the process is roughly:
 1. Find appropriate video files that are free to use for the intended purpose. The existing library was created with video content sourced from [Videezy](https://www.videezy.com/).

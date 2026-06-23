@@ -1,0 +1,78 @@
+{
+  "service": "jitsi_electron",
+  "vtc_url": "https://YOUR_JITSI_SERVER_OR_DOMAIN/testroom",
+  "duration": 3,
+  "videoconference": true,
+  "branch": "main",
+  "repo": {
+    "dir": "/home/ubuntu/video-teleconference",
+    "url": "git@github.com:YOUR_ORG/video-teleconference.git",
+    "version": "main",
+    "python": "python3"
+  },
+  "ansible": {
+    "user": "ubuntu",
+    "ssh_private_key_file": "~/.ssh/YOUR_EC2_KEY.pem"
+  },
+  "defaults": {
+    "audio_path": "/home/ubuntu/video-teleconference/VTC_AV/VTC_audio_tracks",
+    "voice_name": "male_1-en-US-Wavenet-I",
+    "video_path": "/home/ubuntu/video-teleconference/VTC_AV/270_resized",
+    "video_name": "man_1_270.mp4",
+    "executable_path": "/home/ubuntu/service/jitsi-electron/run-jitsi.sh",
+    "icsi_audio_root": "media/icsi/Signals",
+    "packet_capture": {
+      "enabled": false
+    },
+    "adapter_config": {
+      "display_backend": "xvfb",
+      "ignore_certificate_errors": true,
+      "camera_name": "VTC Bot Camera",
+      "window_title_regex": "Jitsi Meet|testroom|jitsi",
+      "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
+      "launch_timeout_sec": 20,
+      "action_timeout_sec": 10,
+      "skip_device_selection": false,
+      "accessibility_names": {},
+      "accessibility_roles": {},
+      "coordinates": {
+        "name_input": null,
+        "join_button": null,
+        "mic_button": null,
+        "camera_button": null,
+        "hangup_button": null,
+        "device_settings_button": null,
+        "screen_share_button": null,
+        "screen_share_target": null,
+        "screen_share_confirm": null
+      }
+    }
+  },
+  "clients": [
+    {
+      "name": "bot1",
+      "host": "10.0.1.21",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5"
+    },
+    {
+      "name": "bot2",
+      "host": "10.0.1.22",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "female_2-en-US-Wavenet-E",
+      "video_name": "woman_1_270.mp4"
+    },
+    {
+      "name": "bot3",
+      "host": "10.0.1.23",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "male_3-en-GB-Wavenet-D",
+      "video_name": "man_2_270.mp4"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+---
+- name: Stop VTC clients
+  hosts: vtc_clients
+  gather_facts: false
+
+  tasks:
+    - name: Stop VTC client process
+      ansible.builtin.shell: pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
+      args:
+        executable: /bin/bash
+      changed_when: false
