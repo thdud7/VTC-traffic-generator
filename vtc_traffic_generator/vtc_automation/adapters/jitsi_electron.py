@@ -382,6 +382,8 @@ class JitsiElectronAdapter(ServiceAdapter):
             method = self._press_shortcut(shortcut)
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
             after_state = self._infer_control_state(control)
+            if self._trust_shortcut_state() and after_state == before_state:
+                after_state = desired_state
             if after_state == desired_state or after_state is None:
                 self._set_cached_state(control, desired_state)
                 self._emit_action_event(
@@ -437,6 +439,8 @@ class JitsiElectronAdapter(ServiceAdapter):
                     self._emit_screen_share_error("screen share target could not be selected", before_state, method)
                     return False
             after_state = self._infer_control_state("screen_share")
+            if self._trust_shortcut_state() and after_state == before_state:
+                after_state = desired_state
             success = after_state == desired_state or after_state is None
             if success:
                 self.screen_sharing = desired_state
@@ -624,6 +628,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         if isinstance(value, str):
             return value.lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    def _trust_shortcut_state(self) -> bool:
+        return self._optional_bool("trust_shortcut_state", True) is True
 
     def _click_coordinate(self, coords: tuple[int, int]):
         x, y = coords
