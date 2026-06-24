@@ -770,7 +770,10 @@ class JitsiElectronAdapter(ServiceAdapter):
         )
 
     def _run_dogtail_tree(self, args: list[str], check: bool = True):
-        return self._run_command(["python3", "-m", "vtc_automation.dogtail_tree", *args], check=check)
+        return self._run_command(
+            ["python3", "-m", "vtc_traffic_generator.vtc_automation.dogtail_tree", *args],
+            check=check,
+        )
 
     def _run_xdotool(self, args: list[str], check: bool = True, timeout: int | None = None):
         return self._run_command(["xdotool", *args], timeout=timeout, check=check)
