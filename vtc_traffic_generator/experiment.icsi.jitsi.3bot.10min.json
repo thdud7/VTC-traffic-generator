@@ -1,6 +1,6 @@
 {
   "service": "jitsi_electron",
-  "vtc_url": "https://ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com:8443/testroom",
+  "vtc_url": "https://ec2-3-35-27-196.ap-northeast-2.compute.amazonaws.com:8443/testroom",
   "duration": 10,
   "videoconference": true,
   "branch": "jitsi",
@@ -17,7 +17,7 @@
   },
   "jitsi_server": {
     "name": "jitsi-server",
-    "host": "ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com",
+    "host": "ec2-3-35-27-196.ap-northeast-2.compute.amazonaws.com",
     "dir": "/home/ubuntu/vtc-lab/jitsi-docker-jitsi-meet-aa76415",
     "start_command": "docker compose up -d",
     "update_repo": false,
@@ -108,7 +108,7 @@
   "clients": [
     {
       "name": "bot1",
-      "host": "ec2-13-209-74-179.ap-northeast-2.compute.amazonaws.com",
+      "host": "ec2-15-164-166-76.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
@@ -116,7 +116,7 @@
     },
     {
       "name": "bot2",
-      "host": "ec2-13-209-77-77.ap-northeast-2.compute.amazonaws.com",
+      "host": "ec2-54-180-124-233.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
@@ -124,7 +124,7 @@
     },
     {
       "name": "bot3",
-      "host": "ec2-52-78-52-194.ap-northeast-2.compute.amazonaws.com",
+      "host": "ec2-54-180-104-35.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
