@@ -84,9 +84,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         self.accessibility_dump_path = self.adapter_config.get("accessibility_dump_path")
         self.window_id = None
         self.process = None
-        self.mic_enabled = None
-        self.camera_enabled = None
-        self.screen_sharing = None
+        self.mic_enabled = self._optional_bool("initial_mic_enabled")
+        self.camera_enabled = self._optional_bool("initial_camera_enabled")
+        self.screen_sharing = self._optional_bool("initial_screen_sharing", False)
 
     async def launch(self):
         emit_event(
@@ -382,9 +382,16 @@ class JitsiElectronAdapter(ServiceAdapter):
             method = self._press_shortcut(shortcut)
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
             after_state = self._infer_control_state(control)
-            if after_state == desired_state:
+            if after_state == desired_state or after_state is None:
                 self._set_cached_state(control, desired_state)
-                self._emit_action_event(event_name, control, method, before_state, after_state, True)
+                self._emit_action_event(
+                    event_name,
+                    control,
+                    method,
+                    before_state,
+                    desired_state if after_state is None else after_state,
+                    True,
+                )
                 return True
 
         method = self._click_accessible_names(self._desired_action_names(control, desired_state), self._roles(f"{control}_button"))
@@ -607,6 +614,16 @@ class JitsiElectronAdapter(ServiceAdapter):
         if isinstance(value, Sequence) and not isinstance(value, str) and len(value) == 2:
             return int(value[0]), int(value[1])
         raise ValueError(f"Invalid coordinate for {key}: {value}")
+
+    def _optional_bool(self, key: str, default: bool | None = None) -> bool | None:
+        value = self.adapter_config.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes", "on")
+        return bool(value)
 
     def _click_coordinate(self, coords: tuple[int, int]):
         x, y = coords
