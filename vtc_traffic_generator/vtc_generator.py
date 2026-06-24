@@ -1192,11 +1192,20 @@ def get_connection_status():
 # XMLRPC
 def stop_video(video_pid):
     print("Stopping video")
-    if video_pid:
-        os.kill(video_pid, signal.SIGTERM)
     details = {"video_pid": video_pid, "success": bool(video_pid)}
+    if video_pid:
+        try:
+            os.kill(video_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            details["already_stopped"] = True
+        except Exception as exc:
+            details.update({"success": False, "error": str(exc)})
+            emit_event(config, "camera_off", details)
+            append_action_log(config, "camera_off", details)
+            return False
     emit_event(config, "camera_off", details)
     append_action_log(config, "camera_off", details)
+    return details["success"]
 
 
 # XMLRPC
