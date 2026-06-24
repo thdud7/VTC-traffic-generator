@@ -152,6 +152,13 @@
         executable: /bin/bash
       changed_when: false
 
+    - name: Enable desktop accessibility for UI automation
+      ansible.builtin.shell: |
+        dbus-run-session -- gsettings set org.gnome.desktop.interface toolkit-accessibility true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Ensure screen share window directory exists
       ansible.builtin.file:
         path: "{{ screen_share_window_html_path | default('/home/ubuntu/vtc_data/screen_share/share.html') | dirname }}"
@@ -215,7 +222,7 @@
           exit 0
         fi
 
-        browser="$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || command -v xterm || true)"
+        browser="$(command -v xterm || command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || true)"
         if [ -z "$browser" ]; then
           echo "No supported browser or xterm found for screen share window" >&2
           exit 1
