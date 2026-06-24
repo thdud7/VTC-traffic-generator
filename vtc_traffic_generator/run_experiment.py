@@ -49,6 +49,7 @@ def normalize_clients(experiment):
         bot_number = index + 1
         name = str(client.get("name") or client.get("bot_name") or f"bot{bot_number}")
         host = require(client.get("host") or client.get("ansible_host"), f"clients[{index}].host")
+        c2_host = str(client.get("c2_host") or client.get("private_ip") or host)
         c2_port = int(client.get("c2_port", base_port))
         display = str(client.get("display", f":{base_display + index}"))
         video_device = str(client.get("video_device", f"/dev/video{base_video_device}"))
@@ -60,6 +61,7 @@ def normalize_clients(experiment):
                 **client,
                 "name": name,
                 "host": str(host),
+                "c2_host": c2_host,
                 "c2_port": c2_port,
                 "display": display,
                 "video_device": video_device,
@@ -78,7 +80,7 @@ def build_controller_config(experiment, clients):
         "vtc_platform": service,
         "duration": experiment.get("duration", 1),
         "videoconference": bool(experiment.get("videoconference", True)),
-        "vtc_clients": [[client["host"], client["c2_port"]] for client in clients],
+        "vtc_clients": [[client["c2_host"], client["c2_port"]] for client in clients],
         "version": experiment.get("version", "VTC traffic generator X"),
     }
 
@@ -253,6 +255,7 @@ def render_inventory(experiment, clients, output_dir):
         x11vnc = merge_mapping(defaults.get("x11vnc"), client.get("x11vnc"))
         x11vnc_enabled = bool(x11vnc.get("enabled", True))
         x11vnc_port = int(x11vnc.get("port", 5900))
+        x11vnc_password = str(x11vnc.get("password", "123456"))
         parts = [
             client["name"],
             f"ansible_host={quote_inventory_value(client['host'])}",
@@ -274,6 +277,7 @@ def render_inventory(experiment, clients, output_dir):
             f"screen_share_window_url={quote_inventory_value(screen_share_window_url)}",
             f"x11vnc_enabled={quote_inventory_value(str(x11vnc_enabled).lower())}",
             f"x11vnc_port={quote_inventory_value(x11vnc_port)}",
+            f"x11vnc_password={quote_inventory_value(x11vnc_password)}",
         ]
         if launcher_path:
             parts.append(f"jitsi_electron_launcher={quote_inventory_value(launcher_path)}")

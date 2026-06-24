@@ -109,6 +109,7 @@
     {
       "name": "bot1",
       "host": "ec2-15-164-166-76.ap-northeast-2.compute.amazonaws.com",
+      "c2_host": "172.31.40.44",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
@@ -117,6 +118,7 @@
     {
       "name": "bot2",
       "host": "ec2-54-180-124-233.ap-northeast-2.compute.amazonaws.com",
+      "c2_host": "172.31.36.50",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
@@ -125,6 +127,7 @@
     {
       "name": "bot3",
       "host": "ec2-54-180-104-35.ap-northeast-2.compute.amazonaws.com",
+      "c2_host": "172.31.36.99",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
