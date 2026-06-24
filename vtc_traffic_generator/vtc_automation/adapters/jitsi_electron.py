@@ -536,7 +536,16 @@ class JitsiElectronAdapter(ServiceAdapter):
                 method = "coordinate"
 
         if not method:
-            return False
+            if self._target_window_exists(str(target_title)) and self._optional_bool("trust_screen_share_target_window", True):
+                self._emit_fallback(
+                    "screen_share_target",
+                    "keyboard",
+                    "target X window exists; accepting picker default with keyboard",
+                )
+                self._run_xdotool(["key", "Return"], check=False)
+                method = "keyboard"
+            else:
+                return False
 
         confirm = self._click_accessible_names(self._names("screen_share_confirm"), self._roles("screen_share_confirm"))
         if not confirm:
@@ -599,6 +608,10 @@ class JitsiElectronAdapter(ServiceAdapter):
         self._activate_window()
         self._run_xdotool(["key", shortcut])
         return "shortcut"
+
+    def _target_window_exists(self, title: str) -> bool:
+        result = self._run_xdotool(["search", "--name", title], check=False)
+        return result.returncode == 0 and bool(result.stdout.strip())
 
     def _activate_window(self):
         if self.window_id:
