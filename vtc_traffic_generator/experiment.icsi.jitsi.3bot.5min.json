@@ -68,10 +68,6 @@
       "title": "VTC Share Window",
       "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
     },
-    "x11vnc": {
-      "enabled": true,
-      "port": 5900
-    },
     "packet_capture": {
       "enabled": true,
       "interface": "any",

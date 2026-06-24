@@ -47,7 +47,6 @@
           - wmctrl
           - xdotool
           - x11-utils
-          - x11vnc
           - xvfb
           - openbox
           - xterm
@@ -159,42 +158,6 @@
       args:
         executable: /bin/bash
       changed_when: false
-
-    - name: Start x11vnc for visual debugging
-      ansible.builtin.shell: |
-        set -euo pipefail
-        display={{ vtc_display | default(":99") | quote }}
-        port={{ x11vnc_port | default(5900) | int }}
-        password={{ x11vnc_password | default('123456') | quote }}
-        passwd_file="$HOME/.vnc/passwd"
-
-        mkdir -p "$HOME/.vnc"
-        x11vnc -storepasswd "$password" "$passwd_file" >/dev/null
-        chmod 600 "$passwd_file"
-
-        desired_pattern="x11vnc.*-display ${display}.*-rfbauth ${passwd_file}.*-listen 0.0.0.0.*-rfbport ${port}.*-forever.*-shared.*-noxdamage"
-        if pgrep -af "$desired_pattern" >/dev/null 2>&1; then
-          exit 0
-        fi
-
-        pkill -f "x11vnc.*-display ${display}.*-rfbport ${port}" >/dev/null 2>&1 || true
-        DISPLAY="$display" x11vnc \
-          -display "$display" \
-          -rfbauth "$passwd_file" \
-          -listen 0.0.0.0 \
-          -rfbport "$port" \
-          -forever \
-          -shared \
-          -noxdamage \
-          -o /tmp/vtc-x11vnc.log \
-          -bg
-
-        sleep 1
-        pgrep -af "x11vnc.*-display ${display}" >/dev/null
-      args:
-        executable: /bin/bash
-      changed_when: false
-      when: x11vnc_enabled | default(true) | bool
 
     - name: Ensure screen share window directory exists
       ansible.builtin.file:
