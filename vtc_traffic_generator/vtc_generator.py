@@ -269,11 +269,12 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
     start_time = time.time()
     scenario_thread = None
     scenario_stop = threading.Event()
+    scenario_state = make_scenario_state(vtc_clients)
     scenario_runtime_sec = min(max_duration_sec, icsi_policy.end_sec) * time_scale
     if is_random_scenario_enabled():
         scenario_thread = threading.Thread(
             target=random_scenario_worker,
-            args=(vtc_clients, scenario_runtime_sec, time_scale, scenario_stop),
+            args=(vtc_clients, scenario_runtime_sec, time_scale, scenario_stop, scenario_state),
             daemon=True,
         )
         scenario_thread.start()
@@ -312,7 +313,9 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
             )
 
             client = vtc_clients[event.bot_index]
-            ensure_client_microphone(client, event.bot_index, True)
+            mark_speech_active(scenario_state, event.bot_index, duration_sec)
+            if ensure_client_microphone(client, event.bot_index, True):
+                set_scenario_state(scenario_state, event.bot_index, "mic", True)
             uri = 'http://' + client.ip + ':' + str(client.port)
             with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
                 proxy.start_speech(duration_sec, metadata)
@@ -358,7 +361,7 @@ def is_random_scenario_enabled():
     return bool(scenario.get("enabled", True))
 
 
-def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
+def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event, scenario_state=None):
     scenario = scenario_config()
     rng = random.Random(scenario.get("seed"))
     min_interval = float(scenario.get("min_interval_sec", 15)) * time_scale
@@ -371,29 +374,33 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
         mic_probability = max(0.0, float(scenario.get("mic_probability", 0)))
     else:
         mic_probability = max(0.0, 1.0 - screen_share_probability - camera_probability)
-    screen_owner = None
-    states = [
-        {
-            "mic": True,
-            "camera": True,
-        }
-        for _ in vtc_clients
+    action_weights = [
+        ("screen_share", max(0.0, screen_share_probability)),
+        ("camera", max(0.0, camera_probability)),
+        ("mic", max(0.0, mic_probability)),
     ]
+    action_weights = [(name, weight) for name, weight in action_weights if weight > 0]
+    screen_owner = None
+    scenario_state = scenario_state or make_scenario_state(vtc_clients)
     deadline = time.time() + max(0, runtime_sec)
     append_action_log(
         config,
         "scenario_start",
-        {"runtime_sec": runtime_sec, "client_count": len(vtc_clients)},
+        {
+            "runtime_sec": runtime_sec,
+            "client_count": len(vtc_clients),
+            "action_weights": dict(action_weights),
+        },
     )
 
     try:
-        while time.time() < deadline and not stop_event.is_set():
+        while action_weights and time.time() < deadline and not stop_event.is_set():
             interval = rng.uniform(min_interval, max_interval)
             if stop_event.wait(min(interval, max(0, deadline - time.time()))):
                 break
 
-            roll = rng.random()
-            if roll < screen_share_probability:
+            action_name = choose_weighted_action(rng, action_weights)
+            if action_name == "screen_share":
                 if screen_owner is None:
                     bot_index = rng.randrange(0, len(vtc_clients))
                     success = call_client_action(vtc_clients[bot_index], bot_index, "set_screen_share", True)
@@ -403,22 +410,85 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
                     success = call_client_action(vtc_clients[screen_owner], screen_owner, "set_screen_share", False)
                     if success:
                         screen_owner = None
-            elif roll < screen_share_probability + camera_probability:
+            elif action_name == "camera":
                 bot_index = rng.randrange(0, len(vtc_clients))
-                desired_state = not states[bot_index]["camera"]
+                desired_state = not get_scenario_state(scenario_state, bot_index, "camera")
                 success = call_client_action(vtc_clients[bot_index], bot_index, "set_camera", desired_state)
                 if success:
-                    states[bot_index]["camera"] = desired_state
-            elif mic_probability > 0:
-                bot_index = rng.randrange(0, len(vtc_clients))
-                desired_state = not states[bot_index]["mic"]
+                    set_scenario_state(scenario_state, bot_index, "camera", desired_state)
+            elif action_name == "mic":
+                choice = choose_mic_action(rng, scenario_state, len(vtc_clients))
+                if choice is None:
+                    append_action_log(config, "mic_action_skipped", {"reason": "all candidate bots are speaking"})
+                    continue
+                bot_index, desired_state = choice
                 success = call_client_action(vtc_clients[bot_index], bot_index, "set_microphone", desired_state)
                 if success:
-                    states[bot_index]["mic"] = desired_state
+                    set_scenario_state(scenario_state, bot_index, "mic", desired_state)
     finally:
         if screen_owner is not None:
             call_client_action(vtc_clients[screen_owner], screen_owner, "set_screen_share", False)
         append_action_log(config, "scenario_end", {"runtime_sec": runtime_sec})
+
+
+def make_scenario_state(vtc_clients):
+    return {
+        "lock": threading.Lock(),
+        "states": [
+            {
+                "mic": True,
+                "camera": True,
+            }
+            for _ in vtc_clients
+        ],
+        "speaking": [0 for _ in vtc_clients],
+    }
+
+
+def choose_weighted_action(rng, action_weights):
+    total = sum(weight for _, weight in action_weights)
+    roll = rng.uniform(0, total)
+    upto = 0.0
+    for name, weight in action_weights:
+        upto += weight
+        if roll <= upto:
+            return name
+    return action_weights[-1][0]
+
+
+def mark_speech_active(scenario_state, bot_index, duration_sec):
+    with scenario_state["lock"]:
+        scenario_state["speaking"][bot_index] += 1
+
+    timer = threading.Timer(duration_sec, mark_speech_inactive, args=(scenario_state, bot_index))
+    timer.daemon = True
+    timer.start()
+
+
+def mark_speech_inactive(scenario_state, bot_index):
+    with scenario_state["lock"]:
+        scenario_state["speaking"][bot_index] = max(0, scenario_state["speaking"][bot_index] - 1)
+
+
+def get_scenario_state(scenario_state, bot_index, key):
+    with scenario_state["lock"]:
+        return bool(scenario_state["states"][bot_index][key])
+
+
+def set_scenario_state(scenario_state, bot_index, key, value):
+    with scenario_state["lock"]:
+        scenario_state["states"][bot_index][key] = bool(value)
+
+
+def choose_mic_action(rng, scenario_state, client_count):
+    candidates = list(range(client_count))
+    rng.shuffle(candidates)
+    with scenario_state["lock"]:
+        for bot_index in candidates:
+            desired_state = not bool(scenario_state["states"][bot_index]["mic"])
+            if desired_state or scenario_state["speaking"][bot_index] == 0:
+                return bot_index, desired_state
+    return None
 
 
 def ensure_client_microphone(client, bot_index, enabled):

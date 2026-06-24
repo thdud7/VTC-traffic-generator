@@ -47,6 +47,7 @@
           - wmctrl
           - xdotool
           - x11-utils
+          - x11vnc
           - xvfb
           - openbox
           - xterm
@@ -158,6 +159,34 @@
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: Start x11vnc for visual debugging
+      ansible.builtin.shell: |
+        set -euo pipefail
+        display={{ vtc_display | default(":99") | quote }}
+        port={{ x11vnc_port | default(5900) | int }}
+
+        if pgrep -af "x11vnc.*-display ${display}.*-rfbport ${port}" >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        pkill -f "x11vnc.*-display ${display}" >/dev/null 2>&1 || true
+        nohup x11vnc \
+          -display "$display" \
+          -localhost \
+          -nopw \
+          -forever \
+          -shared \
+          -rfbport "$port" \
+          -o /tmp/vtc-x11vnc.log \
+          > /tmp/vtc-x11vnc.nohup 2>&1 &
+
+        sleep 1
+        pgrep -af "x11vnc.*-display ${display}" >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: x11vnc_enabled | default(true) | bool
 
     - name: Ensure screen share window directory exists
       ansible.builtin.file:

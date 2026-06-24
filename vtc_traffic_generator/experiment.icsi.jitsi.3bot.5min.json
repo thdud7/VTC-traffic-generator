@@ -53,7 +53,7 @@
       "max_interval_sec": 45,
       "screen_share_probability": 0.6,
       "camera_probability": 1.0,
-      "mic_probability": 0.0
+      "mic_probability": 0.8
     }
   },
   "defaults": {
@@ -67,6 +67,10 @@
       "enabled": true,
       "title": "VTC Share Window",
       "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
+    },
+    "x11vnc": {
+      "enabled": true,
+      "port": 5900
     },
     "packet_capture": {
       "enabled": true,
