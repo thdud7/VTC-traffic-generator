@@ -49,11 +49,13 @@
 
     - name: Sync ICSI audio data from S3
       ansible.builtin.command: >
-        aws s3 sync {{ icsi_audio_s3_uri }} {{ icsi_local_root }}
+        aws s3 sync {{ icsi_audio_s3_uri | regex_replace('/$', '') }}/ICSI/Signals/{{ icsi_meeting_id }}
+        {{ icsi_local_root }}/ICSI/Signals/{{ icsi_meeting_id }}
         --only-show-errors
       changed_when: false
       when:
         - icsi_audio_s3_uri is defined
+        - icsi_meeting_id is defined
         - inventory_hostname != 'localhost'
 
     - name: Verify ICSI DialogueActs directory exists

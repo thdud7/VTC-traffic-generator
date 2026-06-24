@@ -753,14 +753,26 @@ def choose_icsi_audio_file(metadata):
     speaker_id = str(metadata.get("speaker_id") or "")
     channel = str(metadata.get("channel") or "")
     file_channel = str(metadata.get("file_channel") or "")
-    candidate_names = [
-        f"{speaker_id}.wav",
-        f"{channel}.wav",
-        f"{file_channel}.wav",
-        f"{meeting_id}.{speaker_id}.wav",
-        f"{meeting_id}.{channel}.wav",
-        f"{meeting_id}.{file_channel}.wav",
-    ]
+    candidate_names = []
+    for value in (speaker_id, channel, file_channel):
+        if not value:
+            continue
+        candidate_names.extend(
+            [
+                f"{value}.wav",
+                f"{meeting_id}.{value}.wav",
+                f"chan{value}.wav",
+                f"{meeting_id}.chan{value}.wav",
+            ]
+        )
+        if value.lower().startswith("c") and value[1:].isdigit():
+            candidate_names.extend(
+                [
+                    f"chan{value[1:]}.wav",
+                    f"{meeting_id}.chan{value[1:]}.wav",
+                ]
+            )
+    candidate_names = list(dict.fromkeys(candidate_names))
 
     for root in icsi_audio_roots():
         meeting_dir = icsi_meeting_audio_dir(root, str(meeting_id))

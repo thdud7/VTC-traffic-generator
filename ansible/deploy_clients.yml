@@ -80,6 +80,7 @@
       ansible.builtin.shell: |
         dumpcap_path="$(command -v dumpcap)"
         setcap cap_net_raw,cap_net_admin=eip "$dumpcap_path"
+        chmod 0755 "$dumpcap_path"
       args:
         executable: /bin/bash
       changed_when: false
@@ -122,19 +123,31 @@
     - name: Start Xvfb and openbox
       ansible.builtin.shell: |
         set -euo pipefail
-        if ! pgrep -fa 'Xvfb {{ vtc_display | default(":99") }}' >/dev/null; then
-          nohup Xvfb {{ vtc_display | default(":99") }} -screen 0 1280x720x24 -ac > /tmp/vtc-xvfb.log 2>&1 &
+        display={{ vtc_display | default(":99") | quote }}
+        display_num="${display#:}"
+
+        if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
+          pkill -x Xvfb >/dev/null 2>&1 || true
+          rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
+          nohup Xvfb "$display" -screen 0 1280x720x24 -ac > /tmp/vtc-xvfb.log 2>&1 &
+
+          for _ in $(seq 1 10); do
+            if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+        fi
+
+        DISPLAY="$display" xdpyinfo >/dev/null
+
+        if ! DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
+          pkill -x openbox >/dev/null 2>&1 || true
+          nohup env DISPLAY="$display" openbox > /tmp/vtc-openbox.log 2>&1 &
           sleep 1
         fi
 
-        DISPLAY={{ vtc_display | default(":99") }} xdpyinfo >/dev/null
-
-        if ! DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null 2>&1; then
-          nohup env DISPLAY={{ vtc_display | default(":99") }} openbox > /tmp/vtc-openbox.log 2>&1 &
-          sleep 1
-        fi
-
-        DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null
+        DISPLAY="$display" wmctrl -m >/dev/null
       args:
         executable: /bin/bash
       changed_when: false
