@@ -14,6 +14,29 @@
         state: directory
         mode: "0755"
 
+    - name: Install remote ICSI sync tools
+      become: true
+      ansible.builtin.apt:
+        name:
+          - ffmpeg
+          - snapd
+        state: present
+        update_cache: true
+      when: inventory_hostname != 'localhost'
+
+    - name: Install remote AWS CLI when missing
+      become: true
+      ansible.builtin.shell: |
+        if command -v aws >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        snap install aws-cli --classic
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: inventory_hostname != 'localhost'
+
     - name: Verify AWS CLI is available
       ansible.builtin.command: aws --version
       changed_when: false
@@ -23,6 +46,15 @@
         aws s3 sync {{ icsi_s3_uri }} {{ icsi_local_root }}
         --only-show-errors
       changed_when: false
+
+    - name: Sync ICSI audio data from S3
+      ansible.builtin.command: >
+        aws s3 sync {{ icsi_audio_s3_uri }} {{ icsi_local_root }}
+        --only-show-errors
+      changed_when: false
+      when:
+        - icsi_audio_s3_uri is defined
+        - inventory_hostname != 'localhost'
 
     - name: Verify ICSI DialogueActs directory exists
       ansible.builtin.stat:
@@ -34,12 +66,44 @@
         msg: "Missing {{ icsi_local_root }}/ICSI/DialogueActs after S3 sync"
       when: not (icsi_dialogue_acts_dir.stat.isdir | default(false))
 
-    - name: Verify ICSI Signals directory exists
+    - name: Verify ICSI Signals directory exists under corpus root
       ansible.builtin.stat:
         path: "{{ icsi_local_root }}/Signals"
       register: icsi_signals_dir
+      when: inventory_hostname != 'localhost'
+
+    - name: Verify ICSI Signals directory exists under ICSI root
+      ansible.builtin.stat:
+        path: "{{ icsi_local_root }}/ICSI/Signals"
+      register: icsi_nested_signals_dir
+      when: inventory_hostname != 'localhost'
 
     - name: Fail if ICSI Signals directory is missing
       ansible.builtin.fail:
-        msg: "Missing {{ icsi_local_root }}/Signals after S3 sync"
-      when: not (icsi_signals_dir.stat.isdir | default(false))
+        msg: "Missing {{ icsi_local_root }}/Signals or {{ icsi_local_root }}/ICSI/Signals after S3 sync"
+      when:
+        - inventory_hostname != 'localhost'
+        - not (icsi_signals_dir.stat.isdir | default(false))
+        - not (icsi_nested_signals_dir.stat.isdir | default(false))
+
+    - name: Convert configured ICSI meeting audio to wav
+      ansible.builtin.shell: |
+        set -euo pipefail
+        meeting_dir="{{ icsi_local_root }}/ICSI/Signals/{{ icsi_meeting_id }}"
+        if [ ! -d "$meeting_dir" ]; then
+          meeting_dir="{{ icsi_local_root }}/Signals/{{ icsi_meeting_id }}"
+        fi
+        test -d "$meeting_dir"
+
+        while IFS= read -r -d '' sph_file; do
+          wav_file="${sph_file%.sph}.wav"
+          if [ ! -s "$wav_file" ]; then
+            ffmpeg -nostdin -hide_banner -loglevel error -y -i "$sph_file" -ac 1 -ar 16000 "$wav_file"
+          fi
+        done < <(find "$meeting_dir" -maxdepth 1 -type f -name '*.sph' -print0)
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when:
+        - icsi_meeting_id is defined
+        - inventory_hostname != 'localhost'

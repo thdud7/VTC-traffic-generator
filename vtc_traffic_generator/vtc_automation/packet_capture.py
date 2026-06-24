@@ -14,6 +14,7 @@ from .event_log import emit_event, get_bot_id, get_service_name
 
 
 DEFAULT_OUTPUT_DIR = "/tmp/vtc-captures"
+DEFAULT_BINARY_DIRS = ("/usr/local/bin", "/usr/bin", "/usr/sbin", "/snap/bin")
 
 
 class PacketCaptureSession:
@@ -63,12 +64,16 @@ class PacketCaptureSession:
             return
 
         try:
-            dumpcap_binary = shutil.which(self.dumpcap_path)
+            dumpcap_binary = self._resolve_binary(self.dumpcap_path)
             if not dumpcap_binary:
                 emit_event(
                     self.config,
                     "packet_capture_error",
-                    {"error": "dumpcap not found", "dumpcap_path": self.dumpcap_path},
+                    {
+                        "error": "dumpcap not found",
+                        "dumpcap_path": self.dumpcap_path,
+                        "path": os.environ.get("PATH"),
+                    },
                 )
                 return
 
@@ -146,12 +151,16 @@ class PacketCaptureSession:
         if not self.pcapng_path or not self.pcapng_path.exists():
             return
 
-        tshark_binary = shutil.which(self.tshark_path)
+        tshark_binary = self._resolve_binary(self.tshark_path)
         if not tshark_binary:
             emit_event(
                 self.config,
                 "packet_analysis_error",
-                {"error": "tshark not found", "tshark_path": self.tshark_path},
+                {
+                    "error": "tshark not found",
+                    "tshark_path": self.tshark_path,
+                    "path": os.environ.get("PATH"),
+                },
             )
             return
 
@@ -210,6 +219,23 @@ class PacketCaptureSession:
         service = self._sanitize(get_service_name(self.config))
         bot_id = self._sanitize(get_bot_id(self.config))
         return f"{timestamp}-{service}-{bot_id}"
+
+    def _resolve_binary(self, configured_path: str) -> str | None:
+        resolved_path = shutil.which(configured_path)
+        if resolved_path:
+            return resolved_path
+
+        configured = Path(configured_path)
+        if configured.is_absolute() and configured.exists() and os.access(configured, os.X_OK):
+            return str(configured)
+
+        if configured.parent == Path("."):
+            for binary_dir in DEFAULT_BINARY_DIRS:
+                candidate = Path(binary_dir) / configured.name
+                if candidate.exists() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+
+        return None
 
     def _sanitize(self, value: str) -> str:
         sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")

@@ -46,6 +46,9 @@
           - tshark
           - wmctrl
           - xdotool
+          - x11-utils
+          - xvfb
+          - openbox
           - xterm
         state: present
         update_cache: true
@@ -118,15 +121,20 @@
 
     - name: Start Xvfb and openbox
       ansible.builtin.shell: |
+        set -euo pipefail
         if ! pgrep -fa 'Xvfb {{ vtc_display | default(":99") }}' >/dev/null; then
           nohup Xvfb {{ vtc_display | default(":99") }} -screen 0 1280x720x24 -ac > /tmp/vtc-xvfb.log 2>&1 &
           sleep 1
         fi
 
+        DISPLAY={{ vtc_display | default(":99") }} xdpyinfo >/dev/null
+
         if ! DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null 2>&1; then
           nohup env DISPLAY={{ vtc_display | default(":99") }} openbox > /tmp/vtc-openbox.log 2>&1 &
           sleep 1
         fi
+
+        DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null
       args:
         executable: /bin/bash
       changed_when: false

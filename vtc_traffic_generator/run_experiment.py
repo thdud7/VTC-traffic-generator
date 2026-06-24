@@ -332,11 +332,17 @@ def render_jitsi_server_inventory(jitsi_server, ansible_config):
 
 def append_icsi_inventory_vars(lines, icsi_data):
     s3_uri = icsi_data.get("s3_uri")
+    audio_s3_uri = icsi_data.get("audio_s3_uri")
     local_root = icsi_data.get("local_root")
+    meeting_id = icsi_data.get("meeting_id")
     if s3_uri:
         lines.append(f"icsi_s3_uri={quote_inventory_value(s3_uri)}")
+    if audio_s3_uri:
+        lines.append(f"icsi_audio_s3_uri={quote_inventory_value(audio_s3_uri)}")
     if local_root:
         lines.append(f"icsi_local_root={quote_inventory_value(local_root)}")
+    if meeting_id:
+        lines.append(f"icsi_meeting_id={quote_inventory_value(meeting_id)}")
 
 
 def append_capture_upload_inventory_vars(lines, experiment, capture_upload):
