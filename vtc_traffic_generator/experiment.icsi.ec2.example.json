@@ -1,0 +1,157 @@
+{
+  "service": "jitsi_electron",
+  "vtc_url": "https://ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com:8443/testroom",
+  "duration": 3,
+  "videoconference": true,
+  "branch": "jitsi",
+  "run_id": "icsi-jitsi-001",
+  "repo": {
+    "dir": "/home/ubuntu/project/VTC-traffic-generator",
+    "url": "https://github.com/thdud7/VTC-traffic-generator.git",
+    "version": "jitsi",
+    "python": "python3"
+  },
+  "ansible": {
+    "user": "ubuntu",
+    "ssh_private_key_file": "/home/ubuntu/.ssh/vtc_controller"
+  },
+  "jitsi_server": {
+    "name": "jitsi-server",
+    "host": "ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com",
+    "dir": "/home/ubuntu/vtc-lab/jitsi-docker-jitsi-meet-aa76415",
+    "start_command": "docker compose up -d",
+    "update_repo": false,
+    "wait_host": "127.0.0.1",
+    "wait_port": 8443
+  },
+  "icsi_data": {
+    "s3_uri": "s3://YOUR_ICSI_BUCKET/icsi",
+    "local_root": "/home/ubuntu/vtc-data/icsi"
+  },
+  "capture_upload": {
+    "s3_uri": "s3://vtc-traffic-data/captures",
+    "run_id": "icsi-jitsi-001",
+    "include_logs": true
+  },
+  "behavior": {
+    "mode": "icsi",
+    "icsi": {
+      "corpus_root": "/home/ubuntu/vtc-data/icsi",
+      "meeting_id": "Bdb001",
+      "min_speaker_duration_sec": 1.0,
+      "min_utterance_duration_sec": 0.05,
+      "max_duration_sec": 180,
+      "time_scale": 1.0,
+      "connect_timeout_sec": 180,
+      "connect_grace_sec": 5
+    },
+    "scenario": {
+      "enabled": true,
+      "min_interval_sec": 15,
+      "max_interval_sec": 45,
+      "screen_share_probability": 0.2,
+      "camera_probability": 0.35
+    }
+  },
+  "defaults": {
+    "audio_path": "/home/ubuntu/project/VTC-traffic-generator/VTC_AV/VTC_audio_tracks",
+    "voice_name": "male_1-en-US-Wavenet-I",
+    "video_path": "/home/ubuntu/project/VTC-traffic-generator/VTC_AV/270_resized",
+    "video_name": "man_1_270.mp4",
+    "executable_path": "/home/ubuntu/service/jitsi-electron/run-jitsi.sh",
+    "icsi_audio_root": "/home/ubuntu/vtc-data/icsi/Signals",
+    "screen_share_window": {
+      "enabled": true,
+      "title": "VTC Share Window",
+      "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
+    },
+    "packet_capture": {
+      "enabled": true,
+      "interface": "any",
+      "output_dir": "/home/ubuntu/vtc_data/captures/local",
+      "capture_filter": null,
+      "display_filter": null,
+      "dumpcap_path": "dumpcap",
+      "tshark_path": "tshark"
+    },
+    "adapter_config": {
+      "display_backend": "xvfb",
+      "ignore_certificate_errors": true,
+      "camera_name": "VTC Bot Camera",
+      "window_title_regex": "Jitsi Meet|testroom|jitsi",
+      "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
+      "launch_timeout_sec": 20,
+      "action_timeout_sec": 10,
+      "skip_device_selection": false,
+      "accessibility_names": {},
+      "accessibility_roles": {},
+      "coordinates": {
+        "name_input": null,
+        "join_button": null,
+        "mic_button": null,
+        "camera_button": null,
+        "hangup_button": null,
+        "device_settings_button": null,
+        "screen_share_button": null,
+        "screen_share_target": null,
+        "screen_share_confirm": null
+      }
+    }
+  },
+  "clients": [
+    {
+      "name": "bot1",
+      "host": "ec2-13-209-74-179.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "male_1-en-US-Wavenet-I",
+      "video_name": "man_1_270.mp4"
+    },
+    {
+      "name": "bot2",
+      "host": "ec2-13-209-77-77.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "female_2-en-US-Wavenet-E",
+      "video_name": "woman_1_270.mp4"
+    },
+    {
+      "name": "bot3",
+      "host": "ec2-52-78-52-194.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "male_3-en-GB-Wavenet-D",
+      "video_name": "man_2_270.mp4"
+    },
+    {
+      "name": "bot4",
+      "host": "ec2-15-164-94-122.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "female_3-en-GB-Wavenet-F",
+      "video_name": "woman_2_270.mp4"
+    },
+    {
+      "name": "bot5",
+      "host": "ec2-15-164-231-68.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "male_4-en-IN-Wavenet-B",
+      "video_name": "man_3_270.mp4"
+    },
+    {
+      "name": "bot6",
+      "host": "ec2-13-125-255-131.ap-northeast-2.compute.amazonaws.com",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5",
+      "voice_name": "female_1-en-US-Wavenet-H",
+      "video_name": "woman_3_270.mp4"
+    }
+  ]
+}

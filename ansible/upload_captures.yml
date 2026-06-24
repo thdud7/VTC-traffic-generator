@@ -1,0 +1,81 @@
+---
+- name: Upload VTC packet captures to S3
+  hosts: vtc_clients
+  gather_facts: false
+
+  tasks:
+    - name: Fail if capture upload S3 URI is not configured
+      ansible.builtin.fail:
+        msg: "Set experiment.capture_upload.s3_uri, for example s3://vtc-traffic-data/captures"
+      when: capture_upload_s3_uri is not defined
+
+    - name: Fail if capture upload run id is not configured
+      ansible.builtin.fail:
+        msg: "Set experiment.capture_upload.run_id or experiment.run_id before uploading captures"
+      when: capture_upload_run_id is not defined
+
+    - name: Verify AWS CLI exists
+      ansible.builtin.command: aws --version
+      changed_when: false
+
+    - name: Ensure capture output directory exists
+      ansible.builtin.file:
+        path: "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+        state: directory
+        mode: "0755"
+
+    - name: Upload raw pcapng captures
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - sync
+          - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+          - "{{ capture_upload_s3_uri }}/raw/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          - "--exclude"
+          - "*"
+          - "--include"
+          - "*.pcapng"
+      changed_when: true
+
+    - name: Upload capture analysis and metadata
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - sync
+          - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+          - "{{ capture_upload_s3_uri }}/analysis/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          - "--exclude"
+          - "*"
+          - "--include"
+          - "*.analysis.txt"
+          - "--include"
+          - "*.metadata.json"
+      changed_when: true
+
+    - name: Upload client logs
+      ansible.builtin.shell: |
+        set -euo pipefail
+        staging_dir="$(mktemp -d)"
+        trap 'rm -rf "$staging_dir"' EXIT
+
+        for source_path in \
+          "{{ client_log_path | default('') }}" \
+          "{{ action_log_path | default('') }}" \
+          "{{ event_log_path | default('') }}" \
+          "{{ app_log_path | default('') }}" \
+          "{{ adapter_log_path | default('') }}"
+        do
+          if [ -n "$source_path" ] && [ -f "$source_path" ]; then
+            cp "$source_path" "$staging_dir/$(basename "$source_path")"
+          fi
+        done
+
+        if [ -n "$(find "$staging_dir" -maxdepth 1 -type f -print -quit)" ]; then
+          aws s3 sync "$staging_dir" "{{ capture_upload_s3_uri }}/logs/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: capture_upload_include_logs | default(true) | bool

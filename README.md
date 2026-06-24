@@ -121,9 +121,19 @@ configs and the Ansible playbooks to update and start remote clients.
 1. Fill in:
 
    - `vtc_url` with the Jitsi room URL.
+   - `jitsi_server` with the Jitsi server EC2 host and start command, if the
+     harness should start or restart that server before clients run.
+   - `icsi_data.s3_uri` with the S3 prefix that stores ICSI data, if running
+     ICSI replay collection.
+   - `icsi_data.local_root` with the local path where each EC2 should sync
+     ICSI data.
    - `repo.url` with the Git repository URL the EC2 clients can pull.
    - `repo.dir` with the repository path on each client EC2.
    - `ansible.user` and `ansible.ssh_private_key_file`.
+   - `capture_upload.s3_uri` with the S3 prefix where client capture artifacts
+     should be uploaded after the run, if packet capture upload is needed.
+   - `capture_upload.run_id` with a stable experiment identifier for grouping
+     one run's capture artifacts.
    - `clients[].host` with each client EC2 private or public IP.
    - media paths and names under `defaults` or per client.
 
@@ -145,10 +155,120 @@ configs and the Ansible playbooks to update and start remote clients.
    python3 vtc_traffic_generator/run_experiment.py experiment.json --deploy
    ```
 
+   By default, `--deploy` runs `ansible/deploy_experiment.yml`, which starts
+   S3 ICSI data sync first, then the optional `jitsi_server`, and finally client
+   deployment. The Jitsi server playbook assumes a preconfigured server
+   directory and runs
+   `jitsi_server.start_command`, defaulting to `docker compose up -d`.
+
+   For ICSI replay collection, the S3 prefix should sync to this local shape on
+   the controller and every client:
+
+   ```text
+   <icsi_data.local_root>/
+     ICSI/DialogueActs/
+       <meeting-id>.<speaker-or-channel>.dialogue-acts.xml
+     Signals/
+       <meeting-id>/
+         <speaker-id>.wav
+   ```
+
+   The EC2 instances need AWS credentials or an instance profile that can read
+   `icsi_data.s3_uri`.
+
+   Client deployment currently:
+
+   - Ensures the repository parent, generated config, and log directories exist.
+   - Clones or updates the client repository.
+   - Loads `v4l2loopback` for the configured video device.
+   - Starts PulseAudio.
+   - Starts Xvfb and openbox for the configured display.
+   - Optionally creates and opens a browser window for screen sharing when
+     `screen_share_window.enabled` is true.
+   - Verifies the Jitsi Electron launcher exists.
+   - Copies the generated bot config.
+   - Restarts the VTC client process and waits for its control port.
+
+   To enable screen-share scenarios, configure a stable share target window:
+
+   ```json
+   {
+     "defaults": {
+       "screen_share_window": {
+         "enabled": true,
+         "title": "VTC Share Window",
+         "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
+       },
+       "adapter_config": {
+         "screen_share_target": "VTC Share Window"
+       }
+     }
+   }
+   ```
+
+   When `screen_share_window.enabled` is true, the generated client config sets
+   `adapter_config.screen_share_target` to the same title if it was not already
+   configured. Deployment writes the HTML page and opens it on the configured
+   Xvfb display before launching Jitsi Electron.
+
 1. Run the controller locally after deployment:
 
    ```bash
    python3 vtc_traffic_generator/run_experiment.py experiment.json --deploy --run-controller
+   ```
+
+1. Upload packet captures from each client to S3 after the controller exits:
+
+   ```bash
+   python3 vtc_traffic_generator/run_experiment.py experiment.json --upload-captures
+   ```
+
+   You can also run deployment, controller execution, and post-run upload in one
+   command:
+
+   ```bash
+   python3 vtc_traffic_generator/run_experiment.py experiment.json --deploy --run-controller --upload-captures
+   ```
+
+   `--upload-captures` runs `ansible/upload_captures.yml`. It expects
+   `capture_upload.s3_uri` and `capture_upload.run_id` in the experiment JSON.
+   S3 prefixes do not need to be created ahead of time; S3 has object keys, not
+   real directories, so `aws s3 sync` creates the needed prefixes when it uploads
+   objects. The bucket itself must already exist, and each client EC2 needs AWS
+   credentials or an instance profile that can write to that bucket.
+
+   Recommended capture upload configuration:
+
+   ```json
+   {
+     "run_id": "hcrc-2p-jitsi-20260624-001",
+     "capture_upload": {
+       "s3_uri": "s3://vtc-traffic-data/captures",
+       "run_id": "hcrc-2p-jitsi-20260624-001",
+       "include_logs": true
+     },
+     "defaults": {
+       "packet_capture": {
+         "enabled": true,
+         "interface": "any",
+         "output_dir": "/home/ubuntu/vtc_data/captures/local",
+         "capture_filter": null,
+         "display_filter": null,
+         "dumpcap_path": "dumpcap",
+         "tshark_path": "tshark"
+       }
+     }
+   }
+   ```
+
+   The upload playbook writes this S3 layout:
+
+   ```text
+   s3://vtc-traffic-data/captures/
+     raw/<run_id>/<bot>/*.pcapng
+     analysis/<run_id>/<bot>/*.analysis.txt
+     analysis/<run_id>/<bot>/*.metadata.json
+     logs/<run_id>/<bot>/
    ```
 
 1. Stop remote clients:

@@ -4,6 +4,12 @@
   gather_facts: false
 
   tasks:
+    - name: Ensure repository parent directory exists
+      ansible.builtin.file:
+        path: "{{ repo_dir | dirname }}"
+        state: directory
+        mode: "0755"
+
     - name: Clone or update repository
       ansible.builtin.git:
         repo: "{{ repo_url }}"
@@ -19,6 +25,62 @@
         chdir: "{{ repo_dir }}"
       when: repo_url is not defined
 
+    - name: Allow non-root packet capture package setup
+      become: true
+      ansible.builtin.shell: |
+        echo "wireshark-common wireshark-common/install-setuid boolean true" | debconf-set-selections
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Install client runtime tools
+      become: true
+      ansible.builtin.apt:
+        name:
+          - ffmpeg
+          - libcap2-bin
+          - python3-pip
+          - python3-pulsectl
+          - python3-venv
+          - snapd
+          - tshark
+          - wmctrl
+          - xdotool
+          - xterm
+        state: present
+        update_cache: true
+
+    - name: Install AWS CLI when missing
+      become: true
+      ansible.builtin.shell: |
+        if command -v aws >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        snap install aws-cli --classic
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Install Python media dependencies when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if ! {{ python_bin | default('python3') }} -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("ffmpeg") else 1)'; then
+          {{ python_bin | default('python3') }} -m pip install --user --break-system-packages ffmpeg-python
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Allow dumpcap to capture without sudo
+      become: true
+      ansible.builtin.shell: |
+        dumpcap_path="$(command -v dumpcap)"
+        setcap cap_net_raw,cap_net_admin=eip "$dumpcap_path"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Ensure generated config directory exists
       ansible.builtin.file:
         path: "{{ remote_config_path | dirname }}"
@@ -30,6 +92,151 @@
         path: "{{ client_log_path | dirname }}"
         state: directory
         mode: "0755"
+
+    - name: Ensure v4l2loopback is loaded
+      become: true
+      ansible.builtin.shell: |
+        if ! lsmod | grep -q '^v4l2loopback'; then
+          modprobe v4l2loopback video_nr={{ video_nr | default(5) }} exclusive_caps=1
+        fi
+        test -e {{ video_device | default('/dev/video5') }}
+      args:
+        executable: /bin/bash
+
+    - name: Start PulseAudio
+      ansible.builtin.shell: |
+        if ! pactl info >/dev/null 2>&1; then
+          pulseaudio --kill >/dev/null 2>&1 || true
+          rm -rf "/run/user/$(id -u)/pulse" "$HOME/.config/pulse"
+          pulseaudio --start
+          sleep 1
+        fi
+        pactl info >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Start Xvfb and openbox
+      ansible.builtin.shell: |
+        if ! pgrep -fa 'Xvfb {{ vtc_display | default(":99") }}' >/dev/null; then
+          nohup Xvfb {{ vtc_display | default(":99") }} -screen 0 1280x720x24 -ac > /tmp/vtc-xvfb.log 2>&1 &
+          sleep 1
+        fi
+
+        if ! DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null 2>&1; then
+          nohup env DISPLAY={{ vtc_display | default(":99") }} openbox > /tmp/vtc-openbox.log 2>&1 &
+          sleep 1
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure screen share window directory exists
+      ansible.builtin.file:
+        path: "{{ screen_share_window_html_path | default('/home/ubuntu/vtc_data/screen_share/share.html') | dirname }}"
+        state: directory
+        mode: "0755"
+      when: screen_share_window_enabled | default(false) | bool
+
+    - name: Create screen share HTML page
+      ansible.builtin.copy:
+        dest: "{{ screen_share_window_html_path | default('/home/ubuntu/vtc_data/screen_share/share.html') }}"
+        mode: "0644"
+        content: |
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>{{ screen_share_window_title | default('VTC Share Window') }}</title>
+            <style>
+              html, body {
+                height: 100%;
+                margin: 0;
+                background: #f4f6f8;
+                color: #17202a;
+                font-family: Arial, sans-serif;
+              }
+              body {
+                display: grid;
+                place-items: center;
+              }
+              main {
+                width: 82vw;
+                max-width: 960px;
+              }
+              h1 {
+                font-size: 56px;
+                margin: 0 0 24px;
+              }
+              p {
+                font-size: 28px;
+                line-height: 1.4;
+                margin: 0;
+              }
+            </style>
+          </head>
+          <body>
+            <main>
+              <h1>{{ inventory_hostname }}</h1>
+              <p>Screen sharing content for VTC traffic collection.</p>
+            </main>
+          </body>
+          </html>
+      when: screen_share_window_enabled | default(false) | bool
+
+    - name: Start screen share window
+      ansible.builtin.shell: |
+        set -euo pipefail
+        title={{ screen_share_window_title | default('VTC Share Window') | quote }}
+        target_url={{ screen_share_window_url | default('file:///home/ubuntu/vtc_data/screen_share/share.html') | quote }}
+
+        if DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | grep -F "$title" >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        browser="$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || command -v xterm || true)"
+        if [ -z "$browser" ]; then
+          echo "No supported browser or xterm found for screen share window" >&2
+          exit 1
+        fi
+
+        case "$(basename "$browser")" in
+          chromium|chromium-browser|google-chrome)
+            nohup env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
+              --new-window \
+              --no-first-run \
+              --disable-session-crashed-bubble \
+              --disable-infobars \
+              "$target_url" > /tmp/vtc-screen-share-window.log 2>&1 &
+            ;;
+          firefox)
+            nohup env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
+              --new-window "$target_url" > /tmp/vtc-screen-share-window.log 2>&1 &
+            ;;
+          xterm)
+            nohup env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
+              -T "$title" \
+              -e bash -lc 'while true; do clear; printf "%s\n\n%s\n" "$0" "Screen sharing content for VTC traffic collection."; sleep 60; done' "$title" \
+              > /tmp/vtc-screen-share-window.log 2>&1 &
+            ;;
+        esac
+
+        sleep 2
+        DISPLAY={{ vtc_display | default(":99") }} wmctrl -r "$title" -b add,above || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: screen_share_window_enabled | default(false) | bool
+
+    - name: Verify Jitsi Electron launcher exists
+      ansible.builtin.stat:
+        path: "{{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }}"
+      register: jitsi_launcher
+
+    - name: Fail if Jitsi Electron launcher is missing
+      ansible.builtin.fail:
+        msg: "Missing {{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }} on {{ inventory_hostname }}"
+      when: not jitsi_launcher.stat.exists
 
     - name: Copy generated client config
       ansible.builtin.copy:

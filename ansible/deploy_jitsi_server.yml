@@ -1,0 +1,33 @@
+---
+- name: Start Jitsi server
+  hosts: jitsi_servers
+  gather_facts: false
+
+  tasks:
+    - name: Check Jitsi server directory
+      ansible.builtin.stat:
+        path: "{{ jitsi_server_dir }}"
+      register: jitsi_server_dir_stat
+
+    - name: Fail if Jitsi server directory is missing
+      ansible.builtin.fail:
+        msg: "Missing Jitsi server directory {{ jitsi_server_dir }} on {{ inventory_hostname }}"
+      when: not (jitsi_server_dir_stat.stat.isdir | default(false))
+
+    - name: Update Jitsi server repository
+      ansible.builtin.command: git pull --ff-only
+      args:
+        chdir: "{{ jitsi_server_dir }}"
+      when: jitsi_server_update_repo | default(false) | bool
+
+    - name: Start Jitsi server
+      ansible.builtin.shell: "{{ jitsi_server_start_command | default('docker compose up -d') }}"
+      args:
+        chdir: "{{ jitsi_server_dir }}"
+        executable: /bin/bash
+
+    - name: Wait for Jitsi server port
+      ansible.builtin.wait_for:
+        host: "{{ jitsi_server_wait_host | default('127.0.0.1') }}"
+        port: "{{ jitsi_server_wait_port | default(443) }}"
+        timeout: 60

@@ -1,0 +1,4 @@
+---
+- import_playbook: sync_icsi_data.yml
+- import_playbook: deploy_jitsi_server.yml
+- import_playbook: deploy_clients.yml

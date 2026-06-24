@@ -112,40 +112,63 @@ def run_controller():
         run_icsi_replay_controller(vtc_clients, icsi_policy)
         return
 
-    # Begin client dialog
-    # Randomly select VTC_client as long as it wasn't the last one picked.
+    run_random_dialog_controller(vtc_clients)
+
+
+def run_random_dialog_controller(vtc_clients):
     chosen_client = None
     candidate_client = random.choice(vtc_clients)
-
-    # VTC conversation loop
     start_time = time.time()
-    elapsed_time = 0
+    duration_sec = get_duration_minutes(config) * 60
+    scenario_thread = None
+    scenario_stop = threading.Event()
 
-    # Converse for VTC duration
-    while elapsed_time < config['duration'] * 60:
-        while candidate_client is chosen_client:
-            candidate_client = random.choice(vtc_clients)
+    append_action_log(
+        config,
+        "meeting_start",
+        {"role": "controller", "client_count": len(vtc_clients), "duration_sec": duration_sec},
+    )
 
-        chosen_client = candidate_client
-        uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
+    if is_random_scenario_enabled():
+        scenario_thread = threading.Thread(
+            target=random_scenario_worker,
+            args=(vtc_clients, duration_sec, 1.0, scenario_stop),
+            daemon=True,
+        )
+        scenario_thread.start()
 
-        # Print bot name on controller STDOUT for debugging / manual bot admittance
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            print(proxy.get_name() + " speaking now.")
+    try:
+        while time.time() - start_time < duration_sec:
+            while candidate_client is chosen_client:
+                candidate_client = random.choice(vtc_clients)
 
-        # Command selected VTC client to take a dialog cycle
-        with xmlrpc.client.ServerProxy(uri) as proxy:
-            dialog_complete = False
-            dialog_complete = proxy.dialog_cycle()
+            chosen_client = candidate_client
+            bot_index = vtc_clients.index(chosen_client)
+            uri = 'http://' + chosen_client.ip + ':' + str(chosen_client.port)
 
-        elapsed_time = time.time() - start_time
+            with xmlrpc.client.ServerProxy(uri) as proxy:
+                print(proxy.get_name() + " speaking now.")
 
-    # Tear down VTC
+            ensure_client_microphone(chosen_client, bot_index, True)
+            with xmlrpc.client.ServerProxy(uri) as proxy:
+                proxy.dialog_cycle()
+            maybe_update_microphone_after_speech(chosen_client, bot_index)
+    finally:
+        scenario_stop.set()
+        if scenario_thread:
+            scenario_thread.join(timeout=10)
+
+        append_action_log(
+            config,
+            "meeting_end",
+            {"role": "controller", "client_count": len(vtc_clients)},
+        )
+
     print("VTC complete, closing session now.")
-    for x in range(num_clients):
-        uri = 'http://' + vtc_clients[x].ip + ':' + str(vtc_clients[x].port)
+    for client in vtc_clients:
+        uri = 'http://' + client.ip + ':' + str(client.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.stop_video(vtc_clients[x].video_pid)
+            proxy.stop_video(client.video_pid)
 
 
 def is_icsi_mode():
@@ -344,7 +367,10 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
     max_interval = max(min_interval, max_interval)
     screen_share_probability = float(scenario.get("screen_share_probability", 0.2))
     camera_probability = float(scenario.get("camera_probability", 0.35))
-    mic_probability = max(0.0, 1.0 - screen_share_probability - camera_probability)
+    if "mic_probability" in scenario:
+        mic_probability = max(0.0, float(scenario.get("mic_probability", 0)))
+    else:
+        mic_probability = max(0.0, 1.0 - screen_share_probability - camera_probability)
     screen_owner = None
     states = [
         {
@@ -397,6 +423,31 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event):
 
 def ensure_client_microphone(client, bot_index, enabled):
     return call_client_action(client, bot_index, "set_microphone", enabled)
+
+
+def maybe_update_microphone_after_speech(client, bot_index):
+    speech = speech_behavior_config()
+    keep_on_probability = float(speech.get("post_speech_mic_on_probability", 0.65))
+    silence_min_sec = float(speech.get("post_speech_silence_min_sec", 2))
+    silence_max_sec = float(speech.get("post_speech_silence_max_sec", 12))
+    rng = random.Random()
+
+    if rng.random() < keep_on_probability:
+        silence_max_sec = max(silence_min_sec, silence_max_sec)
+        time.sleep(rng.uniform(silence_min_sec, silence_max_sec))
+        return True
+
+    return ensure_client_microphone(client, bot_index, False)
+
+
+def speech_behavior_config():
+    behavior = config.get("behavior", {})
+    if not isinstance(behavior, dict):
+        return {}
+    speech = behavior.get("speech", {})
+    if isinstance(speech, dict):
+        return speech
+    return {}
 
 
 def call_client_action(client, bot_index, method_name, enabled):

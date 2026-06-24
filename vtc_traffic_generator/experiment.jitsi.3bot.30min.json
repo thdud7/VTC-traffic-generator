@@ -1,48 +1,62 @@
 {
   "service": "jitsi_electron",
-  "vtc_url": "https://YOUR_JITSI_SERVER_OR_DOMAIN/testroom",
-  "duration": 3,
+  "vtc_url": "https://ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com:8443/testroom",
+  "duration": 30,
   "videoconference": true,
-  "branch": "main",
-  "run_id": "example-jitsi-001",
+  "branch": "jitsi",
+  "run_id": "jitsi-3bot-30min",
   "repo": {
-    "dir": "/home/ubuntu/video-teleconference",
-    "url": "git@github.com:YOUR_ORG/video-teleconference.git",
-    "version": "main",
+    "dir": "/home/ubuntu/project/VTC-traffic-generator",
+    "url": "https://github.com/thdud7/VTC-traffic-generator.git",
+    "version": "jitsi",
     "python": "python3"
   },
   "ansible": {
     "user": "ubuntu",
-    "ssh_private_key_file": "~/.ssh/YOUR_EC2_KEY.pem"
-  },
-  "capture_upload": {
-    "s3_uri": "s3://vtc-traffic-data/captures",
-    "run_id": "example-jitsi-001",
-    "include_logs": true
+    "ssh_private_key_file": "~/.ssh/bootstrap.pem"
   },
   "jitsi_server": {
     "name": "jitsi-server",
-    "host": "10.0.1.10",
-    "dir": "/home/ubuntu/docker-jitsi-meet",
+    "host": "ec2-52-78-198-92.ap-northeast-2.compute.amazonaws.com",
+    "dir": "/home/ubuntu/vtc-lab/jitsi-docker-jitsi-meet-aa76415",
     "start_command": "docker compose up -d",
     "update_repo": false,
     "wait_host": "127.0.0.1",
-    "wait_port": 443
+    "wait_port": 8443
+  },
+  "capture_upload": {
+    "s3_uri": "s3://vtc-traffic-data/captures",
+    "run_id": "jitsi-3bot-30min",
+    "include_logs": true
+  },
+  "behavior": {
+    "scenario": {
+      "enabled": true,
+      "min_interval_sec": 45,
+      "max_interval_sec": 180,
+      "screen_share_probability": 0.3,
+      "camera_probability": 0.7,
+      "mic_probability": 0.0
+    },
+    "speech": {
+      "post_speech_mic_on_probability": 0.65,
+      "post_speech_silence_min_sec": 3,
+      "post_speech_silence_max_sec": 15
+    }
   },
   "defaults": {
-    "audio_path": "/home/ubuntu/video-teleconference/VTC_AV/VTC_audio_tracks",
+    "audio_path": "/home/ubuntu/project/VTC-traffic-generator/VTC_AV/VTC_audio_tracks",
     "voice_name": "male_1-en-US-Wavenet-I",
-    "video_path": "/home/ubuntu/video-teleconference/VTC_AV/270_resized",
-    "video_name": "man_1_270.mp4",
+    "video_path": "/home/ubuntu/vtc_data/video/camera",
+    "video_name": "class_5_6.mov",
     "executable_path": "/home/ubuntu/service/jitsi-electron/run-jitsi.sh",
-    "icsi_audio_root": "media/icsi/Signals",
     "screen_share_window": {
-      "enabled": false,
+      "enabled": true,
       "title": "VTC Share Window",
       "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
     },
     "packet_capture": {
-      "enabled": false,
+      "enabled": true,
       "interface": "any",
       "output_dir": "/home/ubuntu/vtc_data/captures/local",
       "capture_filter": null,
@@ -77,28 +91,27 @@
   "clients": [
     {
       "name": "bot1",
-      "host": "10.0.1.21",
+      "host": "ec2-13-209-74-179.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
-      "video_device": "/dev/video5"
+      "video_device": "/dev/video5",
+      "voice_name": "male_1-en-US-Wavenet-I"
     },
     {
       "name": "bot2",
-      "host": "10.0.1.22",
+      "host": "ec2-13-209-77-77.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
-      "voice_name": "female_2-en-US-Wavenet-E",
-      "video_name": "woman_1_270.mp4"
+      "voice_name": "female_2-en-US-Wavenet-E"
     },
     {
       "name": "bot3",
-      "host": "10.0.1.23",
+      "host": "ec2-52-78-52-194.ap-northeast-2.compute.amazonaws.com",
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
-      "voice_name": "male_3-en-GB-Wavenet-D",
-      "video_name": "man_2_270.mp4"
+      "voice_name": "male_3-en-GB-Wavenet-D"
     }
   ]
 }

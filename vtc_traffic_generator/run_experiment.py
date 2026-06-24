@@ -10,7 +10,8 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "generated" / "experiment"
-DEFAULT_PLAYBOOK = PROJECT_ROOT / "ansible" / "deploy_clients.yml"
+DEFAULT_PLAYBOOK = PROJECT_ROOT / "ansible" / "deploy_experiment.yml"
+DEFAULT_UPLOAD_PLAYBOOK = PROJECT_ROOT / "ansible" / "upload_captures.yml"
 
 
 def load_json(path):
@@ -123,6 +124,12 @@ def build_remote_config(experiment, client):
         "adapter_log_path": str(client.get("adapter_log_path", f"/tmp/vtc-{bot_name}/adapter.log")),
         "restart_existing": bool(client.get("restart_existing", False)),
     }
+    screen_share_window = merge_mapping(defaults.get("screen_share_window"), client.get("screen_share_window"))
+    if screen_share_window.get("enabled"):
+        adapter_config.setdefault(
+            "screen_share_target",
+            str(screen_share_window.get("title") or f"VTC Share Window - {bot_name}"),
+        )
 
     executable_path = client.get("executable_path") or defaults.get("executable_path")
     if executable_path:
@@ -185,6 +192,14 @@ def render_inventory(experiment, clients, output_dir):
     repo_url = repo.get("url")
     repo_version = repo.get("version", experiment.get("branch", "main"))
     python_bin = repo.get("python", "python3")
+    defaults = experiment.get("defaults", {})
+    if not isinstance(defaults, dict):
+        raise ValueError("experiment.defaults must be an object when provided")
+    capture_upload = experiment.get("capture_upload", {})
+    if capture_upload is None:
+        capture_upload = {}
+    if not isinstance(capture_upload, dict):
+        raise ValueError("experiment.capture_upload must be an object when provided")
 
     group_vars = [
         "[vtc_clients:vars]",
@@ -194,27 +209,156 @@ def render_inventory(experiment, clients, output_dir):
     ]
     if repo_url:
         group_vars.append(f"repo_url={quote_inventory_value(repo_url)}")
+    append_capture_upload_inventory_vars(group_vars, experiment, capture_upload)
+
+    inventory_sections = []
+    icsi_data = experiment.get("icsi_data")
+    if icsi_data is not None:
+        if not isinstance(icsi_data, dict):
+            raise ValueError("experiment.icsi_data must be an object when provided")
+        inventory_sections.append(render_controller_inventory(icsi_data))
+
+    jitsi_server = experiment.get("jitsi_server")
+    if jitsi_server is not None:
+        if not isinstance(jitsi_server, dict):
+            raise ValueError("experiment.jitsi_server must be an object when provided")
+        inventory_sections.append(render_jitsi_server_inventory(jitsi_server, ansible_config))
 
     host_lines = ["[vtc_clients]"]
     for client in clients:
         config_path = output_dir / f"remote_config_{client['name']}.json"
         remote_config_path = f"{repo_dir}/generated/{client['name']}_remote_config.json"
         client_log_path = f"/tmp/vtc-{client['name']}/client.log"
+        video_nr = str(client["video_device"]).removeprefix("/dev/video")
+        launcher_path = client.get("executable_path") or defaults.get("executable_path")
+        packet_capture = client.get("packet_capture", defaults.get("packet_capture", {}))
+        if not isinstance(packet_capture, dict):
+            packet_capture = {}
+        capture_output_dir = str(packet_capture.get("output_dir") or "/tmp/vtc-captures")
+        action_log_path = str(client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions.txt"))
+        event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events.jsonl"))
+        app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron.log"))
+        adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter.log"))
+        screen_share_window = merge_mapping(defaults.get("screen_share_window"), client.get("screen_share_window"))
+        screen_share_window_enabled = bool(screen_share_window.get("enabled", False))
+        screen_share_window_title = str(screen_share_window.get("title") or f"VTC Share Window - {client['name']}")
+        screen_share_window_html_path = str(
+            screen_share_window.get("html_path")
+            or f"/home/ubuntu/vtc_data/screen_share/{client['name']}.html"
+        )
+        screen_share_window_url = str(
+            screen_share_window.get("url")
+            or f"file://{screen_share_window_html_path}"
+        )
         parts = [
             client["name"],
             f"ansible_host={quote_inventory_value(client['host'])}",
             f"c2_port={quote_inventory_value(client['c2_port'])}",
+            f"vtc_display={quote_inventory_value(client['display'])}",
+            f"video_device={quote_inventory_value(client['video_device'])}",
+            f"video_nr={quote_inventory_value(video_nr)}",
             f"bot_config_src={quote_inventory_value(str(config_path))}",
             f"remote_config_path={quote_inventory_value(remote_config_path)}",
             f"client_log_path={quote_inventory_value(client_log_path)}",
+            f"capture_output_dir={quote_inventory_value(capture_output_dir)}",
+            f"action_log_path={quote_inventory_value(action_log_path)}",
+            f"event_log_path={quote_inventory_value(event_log_path)}",
+            f"app_log_path={quote_inventory_value(app_log_path)}",
+            f"adapter_log_path={quote_inventory_value(adapter_log_path)}",
+            f"screen_share_window_enabled={quote_inventory_value(str(screen_share_window_enabled).lower())}",
+            f"screen_share_window_title={quote_inventory_value(screen_share_window_title)}",
+            f"screen_share_window_html_path={quote_inventory_value(screen_share_window_html_path)}",
+            f"screen_share_window_url={quote_inventory_value(screen_share_window_url)}",
         ]
+        if launcher_path:
+            parts.append(f"jitsi_electron_launcher={quote_inventory_value(launcher_path)}")
         if user:
             parts.append(f"ansible_user={quote_inventory_value(user)}")
         if ssh_key:
             parts.append(f"ansible_ssh_private_key_file={quote_inventory_value(str(Path(ssh_key).expanduser()))}")
         host_lines.append(" ".join(parts))
 
-    return "\n".join(host_lines + [""] + group_vars + [""])
+    if icsi_data is not None:
+        append_icsi_inventory_vars(group_vars, icsi_data)
+
+    inventory_sections.append("\n".join(host_lines + [""] + group_vars + [""]))
+    return "\n".join(section for section in inventory_sections if section.strip())
+
+
+def render_controller_inventory(icsi_data):
+    lines = [
+        "[localhost]",
+        "localhost ansible_connection=local",
+        "",
+        "[localhost:vars]",
+    ]
+    append_icsi_inventory_vars(lines, icsi_data)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_jitsi_server_inventory(jitsi_server, ansible_config):
+    user = jitsi_server.get("user") or ansible_config.get("user")
+    ssh_key = jitsi_server.get("ssh_private_key_file") or ansible_config.get("ssh_private_key_file")
+    host = require(jitsi_server.get("host") or jitsi_server.get("ansible_host"), "jitsi_server.host")
+    name = str(jitsi_server.get("name") or "jitsi-server")
+
+    parts = [
+        name,
+        f"ansible_host={quote_inventory_value(host)}",
+    ]
+    if user:
+        parts.append(f"ansible_user={quote_inventory_value(user)}")
+    if ssh_key:
+        parts.append(f"ansible_ssh_private_key_file={quote_inventory_value(str(Path(ssh_key).expanduser()))}")
+
+    server_dir = jitsi_server.get("dir", "/home/ubuntu/docker-jitsi-meet")
+    start_command = jitsi_server.get("start_command", "docker compose up -d")
+    wait_host = jitsi_server.get("wait_host", "127.0.0.1")
+    wait_port = int(jitsi_server.get("wait_port", 443))
+    update_repo = bool(jitsi_server.get("update_repo", False))
+
+    vars_lines = [
+        "[jitsi_servers:vars]",
+        f"jitsi_server_dir={quote_inventory_value(server_dir)}",
+        f"jitsi_server_start_command={quote_inventory_value(start_command)}",
+        f"jitsi_server_wait_host={quote_inventory_value(wait_host)}",
+        f"jitsi_server_wait_port={quote_inventory_value(wait_port)}",
+        f"jitsi_server_update_repo={quote_inventory_value(str(update_repo).lower())}",
+    ]
+
+    return "\n".join(["[jitsi_servers]", " ".join(parts), "", *vars_lines, ""])
+
+
+def append_icsi_inventory_vars(lines, icsi_data):
+    s3_uri = icsi_data.get("s3_uri")
+    local_root = icsi_data.get("local_root")
+    if s3_uri:
+        lines.append(f"icsi_s3_uri={quote_inventory_value(s3_uri)}")
+    if local_root:
+        lines.append(f"icsi_local_root={quote_inventory_value(local_root)}")
+
+
+def append_capture_upload_inventory_vars(lines, experiment, capture_upload):
+    s3_uri = capture_upload.get("s3_uri")
+    if s3_uri:
+        lines.append(f"capture_upload_s3_uri={quote_inventory_value(str(s3_uri).rstrip('/'))}")
+
+    run_id = capture_upload.get("run_id") or experiment.get("run_id")
+    if run_id:
+        lines.append(f"capture_upload_run_id={quote_inventory_value(run_id)}")
+
+    include_logs = bool(capture_upload.get("include_logs", True))
+    lines.append(f"capture_upload_include_logs={quote_inventory_value(str(include_logs).lower())}")
+
+
+def merge_mapping(base, override):
+    merged = {}
+    if isinstance(base, dict):
+        merged.update(base)
+    if isinstance(override, dict):
+        merged.update(override)
+    return merged
 
 
 def quote_inventory_value(value):
@@ -296,6 +440,16 @@ def main():
         action="store_true",
         help="Run the controller locally after optional Ansible deployment.",
     )
+    parser.add_argument(
+        "--upload-captures",
+        action="store_true",
+        help="Upload client packet captures to S3 after optional controller run.",
+    )
+    parser.add_argument(
+        "--upload-playbook",
+        default=str(DEFAULT_UPLOAD_PLAYBOOK),
+        help=f"Ansible playbook to run with --upload-captures. Default: {DEFAULT_UPLOAD_PLAYBOOK}",
+    )
     args = parser.parse_args()
 
     try:
@@ -317,7 +471,13 @@ def main():
 
     if args.run_controller:
         controller_result = run_local_controller(generated["controller_config"])
-        return controller_result.returncode
+        if controller_result.returncode != 0:
+            return controller_result.returncode
+
+    if args.upload_captures:
+        upload_playbook_path = Path(args.upload_playbook).expanduser().resolve()
+        upload_result = run_ansible(generated["inventory"], upload_playbook_path)
+        return upload_result.returncode
 
     return 0
 
