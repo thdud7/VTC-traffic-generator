@@ -67,6 +67,53 @@
         executable: /bin/bash
       changed_when: false
 
+    - name: Disable desktop services not needed for VTC capture
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for unit in \
+          cups.service \
+          cups-browsed.service \
+          snap.cups.cupsd.service \
+          snap.cups.cups-browsed.service \
+          ModemManager.service \
+          packagekit.service \
+          fwupd.service
+        do
+          if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true
+          fi
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure swap is available for Electron clients
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        swap_file=/swapfile
+        swap_size_mb=2048
+
+        if ! swapon --show=NAME --noheadings | grep -Fx "$swap_file" >/dev/null 2>&1; then
+          if [ ! -f "$swap_file" ]; then
+            fallocate -l "${swap_size_mb}M" "$swap_file" || dd if=/dev/zero of="$swap_file" bs=1M count="$swap_size_mb"
+            chmod 0600 "$swap_file"
+            mkswap "$swap_file" >/dev/null
+          fi
+          swapon "$swap_file"
+        fi
+
+        if ! grep -Eq "^${swap_file}[[:space:]]+none[[:space:]]+swap[[:space:]]" /etc/fstab; then
+          printf '%s none swap sw 0 0\n' "$swap_file" >> /etc/fstab
+        fi
+
+        printf 'vm.swappiness=10\n' > /etc/sysctl.d/99-vtc-swap.conf
+        sysctl -q -p /etc/sysctl.d/99-vtc-swap.conf
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Install Python media dependencies when missing
       ansible.builtin.shell: |
         set -euo pipefail
