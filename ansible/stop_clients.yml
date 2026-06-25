@@ -43,10 +43,10 @@
         pkill -x openbox
         pkill -f "[X]vfb \${display}"
 
-        export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        export XDG_RUNTIME_DIR="/run/user/\$(id -u)"
         systemctl --user stop pulseaudio.service pulseaudio.socket >/dev/null 2>&1 || true
         pulseaudio --kill >/dev/null 2>&1 || true
-        for _ in $(seq 1 5); do
+        for _ in 1 2 3 4 5; do
           pkill -x pulseaudio >/dev/null 2>&1 || true
           if ! pgrep -x pulseaudio >/dev/null 2>&1; then
             break
