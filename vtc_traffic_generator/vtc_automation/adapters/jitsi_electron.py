@@ -178,6 +178,11 @@ class JitsiElectronAdapter(ServiceAdapter):
             raise RuntimeError("Jitsi Electron did not appear to join the meeting")
 
         self.dump_accessibility_tree("meeting_joined")
+        if microphone_name and self._optional_bool("verify_audio_capture_attached", False):
+            attached = self._verify_jitsi_audio_capture_attached(str(microphone_name))
+            if not attached and self._optional_bool("require_audio_capture_attached", False):
+                raise RuntimeError(f"Jitsi Electron did not attach audio capture to {microphone_name!r}")
+
         emit_event(self.config, "meeting_joined", {"vtc_url": vtc_url}, self.service_name)
         joined_callback = self.config.get("_meeting_joined_callback")
         if callable(joined_callback):
@@ -230,6 +235,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         opened = self._open_device_settings()
         self.dump_accessibility_tree("settings_opened")
         if not opened:
+            if self._optional_bool("allow_pulse_default_device_selection_fallback", False):
+                return self._accept_default_media_devices(camera_name, microphone_name)
+
             self._write_device_diagnostics("device_settings_open_failed")
             emit_event(
                 self.config,
@@ -251,6 +259,189 @@ class JitsiElectronAdapter(ServiceAdapter):
         if not success:
             self._write_device_diagnostics("device_selection_incomplete")
         return success
+
+    def _accept_default_media_devices(self, camera_name: str, microphone_name: str) -> bool:
+        audio_status = self._pulse_source_status(microphone_name) if microphone_name else {"success": True}
+        video_status = self._virtual_video_status(camera_name) if camera_name else {"success": True}
+        audio_success = bool(audio_status.get("success"))
+        video_success = bool(video_status.get("success"))
+
+        if microphone_name:
+            audio_event = {
+                "action": "select_audio_device",
+                "method": "pulse-default-fallback",
+                "target": microphone_name,
+                "match_type": audio_status.get("match_type", "none"),
+                "default_source": audio_status.get("default_source"),
+                "source_index": audio_status.get("source_index"),
+                "source_name": audio_status.get("source_name"),
+                "mute": audio_status.get("mute"),
+                "success": audio_success,
+            }
+            emit_event(self.config, "audio_device_selected", audio_event, self.service_name)
+            emit_event(self.config, "microphone_device_selected", audio_event, self.service_name)
+
+        if camera_name:
+            emit_event(
+                self.config,
+                "video_device_selected",
+                {
+                    "action": "select_video_device",
+                    "method": "virtual-video-fallback",
+                    "target": camera_name,
+                    "device": video_status.get("device"),
+                    "success": video_success,
+                },
+                self.service_name,
+            )
+
+        success = audio_success and video_success
+        emit_event(
+            self.config,
+            "device_selection_fallback_used",
+            {
+                "method": "pulse-default-and-virtual-video",
+                "audio": audio_status,
+                "video": video_status,
+                "success": success,
+            },
+            self.service_name,
+        )
+        if not success:
+            self._write_device_diagnostics("device_selection_fallback_failed")
+        return success
+
+    def _pulse_source_status(self, microphone_name: str) -> dict[str, Any]:
+        info = self._run_command(["pactl", "info"], check=False)
+        sources = self._run_command(["pactl", "list", "short", "sources"], check=False)
+        mute = self._run_command(["pactl", "get-source-mute", microphone_name], check=False)
+        return self._parse_pulse_source_status(
+            microphone_name=microphone_name,
+            info_stdout=info.stdout,
+            sources_stdout=sources.stdout,
+            mute_stdout=mute.stdout,
+            info_returncode=info.returncode,
+            sources_returncode=sources.returncode,
+            mute_returncode=mute.returncode,
+        )
+
+    def _parse_pulse_source_status(
+        self,
+        microphone_name: str,
+        info_stdout: str,
+        sources_stdout: str,
+        mute_stdout: str,
+        info_returncode: int = 0,
+        sources_returncode: int = 0,
+        mute_returncode: int = 0,
+    ) -> dict[str, Any]:
+        default_source = None
+        for line in info_stdout.splitlines():
+            if line.startswith("Default Source:"):
+                default_source = line.split(":", 1)[1].strip()
+                break
+
+        rows = self._parse_pactl_short_rows(sources_stdout)
+        matching_row = None
+        for row in rows:
+            if len(row) >= 2 and self._device_name_matches(row[1], microphone_name):
+                matching_row = row
+                break
+
+        mute_value = None
+        if mute_returncode == 0 and mute_stdout.strip():
+            lowered = mute_stdout.lower()
+            if "yes" in lowered:
+                mute_value = "yes"
+            elif "no" in lowered:
+                mute_value = "no"
+
+        match_type = "none"
+        if matching_row:
+            match_type = "exact" if matching_row[1] == microphone_name else "partial"
+
+        success = (
+            info_returncode == 0
+            and sources_returncode == 0
+            and bool(matching_row)
+            and self._device_name_matches(default_source or "", microphone_name)
+            and mute_value != "yes"
+        )
+        return {
+            "success": success,
+            "target": microphone_name,
+            "default_source": default_source,
+            "source_index": matching_row[0] if matching_row and matching_row else None,
+            "source_name": matching_row[1] if matching_row and len(matching_row) >= 2 else None,
+            "source_names": [row[1] for row in rows if len(row) >= 2],
+            "mute": mute_value,
+            "match_type": match_type,
+            "info_returncode": info_returncode,
+            "sources_returncode": sources_returncode,
+            "mute_returncode": mute_returncode,
+        }
+
+    def _virtual_video_status(self, camera_name: str) -> dict[str, Any]:
+        virtual_video = self.config.get("virtual_video")
+        device = None
+        if isinstance(virtual_video, Mapping):
+            device = virtual_video.get("device")
+        device = str(device or self.adapter_config.get("video_device") or "/dev/video5")
+        return {
+            "success": Path(device).exists(),
+            "target": camera_name,
+            "device": device,
+        }
+
+    def _verify_jitsi_audio_capture_attached(self, microphone_name: str) -> bool:
+        timeout = float(self.adapter_config.get("audio_capture_verify_timeout_sec", 8))
+        interval = float(self.adapter_config.get("audio_capture_verify_interval_sec", 0.5))
+        deadline = time.time() + timeout
+        status: dict[str, Any] = {"success": False, "target": microphone_name}
+
+        while time.time() < deadline:
+            status = self._jitsi_audio_capture_status(microphone_name)
+            if status.get("success"):
+                break
+            time.sleep(interval)
+
+        emit_event(
+            self.config,
+            "jitsi_audio_capture_attached" if status.get("success") else "jitsi_audio_capture_failed",
+            status,
+            self.service_name,
+        )
+        if not status.get("success"):
+            self._write_device_diagnostics("jitsi_audio_capture_failed")
+        return bool(status.get("success"))
+
+    def _jitsi_audio_capture_status(self, microphone_name: str) -> dict[str, Any]:
+        source_status = self._pulse_source_status(microphone_name)
+        outputs = self._run_command(["pactl", "list", "short", "source-outputs"], check=False)
+        rows = self._parse_pactl_short_rows(outputs.stdout)
+        source_index = str(source_status.get("source_index") or "")
+        matching_outputs = [row for row in rows if len(row) >= 5 and row[4] == source_index]
+        return {
+            "success": bool(source_status.get("success")) and bool(matching_outputs),
+            "target": microphone_name,
+            "source": source_status,
+            "source_output_returncode": outputs.returncode,
+            "source_outputs": rows,
+            "matching_source_outputs": matching_outputs,
+        }
+
+    def _parse_pactl_short_rows(self, stdout: str) -> list[list[str]]:
+        rows = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line:
+                rows.append(line.split("\t"))
+        return rows
+
+    def _device_name_matches(self, actual: str, expected: str) -> bool:
+        if not actual or not expected:
+            return False
+        return actual == expected or expected in actual or actual in expected
 
     async def is_in_meeting(self):
         await asyncio.sleep(float(self.adapter_config.get("joined_wait_sec", 3)))

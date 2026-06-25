@@ -1,4 +1,6 @@
 import json
+import asyncio
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,6 +29,8 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["adapter_config"]["microphone_name"], "VTC_Microphone")
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])
+        self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
+        self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
@@ -35,6 +39,53 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
     def test_inventory_values_quote_ini_comments(self):
         self.assertEqual(quote_inventory_value("#aabbcc"), '"#aabbcc"')
+
+    def test_pulse_default_device_selection_fallback_requires_matching_unmuted_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = JitsiElectronAdapter(
+                {
+                    "adapter_config": {
+                        "allow_pulse_default_device_selection_fallback": True,
+                        "event_log_path": str(Path(tmpdir) / "events.jsonl"),
+                    },
+                    "virtual_video": {"device": "/dev/null"},
+                }
+            )
+
+            adapter._open_device_settings = lambda: False
+            adapter.dump_accessibility_tree = lambda *args, **kwargs: True
+
+            def fake_run_command(command, timeout=None, check=True):
+                if command == ["pactl", "info"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="Default Source: VTC_Microphone\n", stderr="")
+                if command == ["pactl", "list", "short", "sources"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="1\talsa_output.pci.monitor\n2\tVTC_Microphone\tmodule-remap-source.c\n",
+                        stderr="",
+                    )
+                if command == ["pactl", "get-source-mute", "VTC_Microphone"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="Mute: no\n", stderr="")
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected")
+
+            adapter._run_command = fake_run_command
+
+            self.assertTrue(asyncio.run(adapter.select_devices("VTC Bot Camera", "VTC_Microphone")))
+
+            events = Path(tmpdir, "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("microphone_device_selected", events)
+            self.assertIn("pulse-default-fallback", events)
+
+    def test_pulse_default_device_selection_fallback_rejects_muted_source(self):
+        adapter = JitsiElectronAdapter({"adapter_config": {}})
+        status = adapter._parse_pulse_source_status(
+            microphone_name="VTC_Microphone",
+            info_stdout="Default Source: VTC_Microphone\n",
+            sources_stdout="2\tVTC_Microphone\tmodule-remap-source.c\n",
+            mute_stdout="Mute: yes\n",
+        )
+        self.assertFalse(status["success"])
 
     def test_parse_rtp_header_ignores_stun_and_extracts_ssrc_payload_type(self):
         stun = bytes.fromhex("000100002112a442000000000000000000000000")
