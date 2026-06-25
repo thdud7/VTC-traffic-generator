@@ -171,6 +171,39 @@
         executable: /bin/bash
       changed_when: false
 
+    - name: Ensure VTC virtual audio devices exist before preflight
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sink_name={{ audio_sink_name | default('VTC_Speaker') | quote }}
+        source_name={{ audio_source_name | default('VTC_Microphone') | quote }}
+        sink_description={{ audio_sink_description | default('VTC_Speaker') | quote }}
+        source_description={{ audio_source_description | default('VTC_Microphone') | quote }}
+
+        if ! pactl list short sinks | awk '{print $2}' | grep -Fx "$sink_name" >/dev/null 2>&1; then
+          pactl load-module module-null-sink \
+            "sink_name=$sink_name" \
+            "sink_properties=device.description=$sink_description" >/dev/null
+        fi
+
+        if ! pactl list short sources | awk '{print $2}' | grep -Fx "$source_name" >/dev/null 2>&1; then
+          pactl load-module module-remap-source \
+            "master=$sink_name.monitor" \
+            "source_name=$source_name" \
+            "source_properties=device.description=$source_description" >/dev/null
+        fi
+
+        pactl set-default-sink "$sink_name"
+        pactl set-default-source "$source_name"
+        pactl set-sink-mute "$sink_name" 0
+        pactl set-source-mute "$source_name" 0
+        pactl set-sink-volume "$sink_name" 80%
+        pactl set-source-volume "$source_name" 80%
+        pactl list short sinks | awk '{print $2}' | grep -Fx "$sink_name" >/dev/null
+        pactl list short sources | awk '{print $2}' | grep -Fx "$source_name" >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Start Xvfb and openbox
       ansible.builtin.shell: |
         set -euo pipefail
