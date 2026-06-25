@@ -1,17 +1,60 @@
 ---
-- name: Stop VTC clients
+- name: Stop VTC client experiment processes
   hosts: vtc_clients
   gather_facts: false
 
   tasks:
-    - name: Stop VTC client process
-      ansible.builtin.shell: pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
+    - name: Stop VTC client and media processes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        video_device={{ video_device | default('/dev/video5') | quote }}
+
+        pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
+        pkill -f "[f]fmpeg.*${video_device}" || true
+        pkill -f '[r]un-jitsi.sh' || true
+        pkill -f '[e]lectron.*jitsi|[j]itsi.*electron' || true
       args:
         executable: /bin/bash
       changed_when: false
 
-    - name: Stop orphaned packet capture process
-      ansible.builtin.shell: pkill -x dumpcap || true
+    - name: Stop packet capture processes
+      ansible.builtin.shell: |
+        pkill -x dumpcap || true
+        pkill -x tshark || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Stop screen share and VNC processes
+      ansible.builtin.shell: |
+        set -euo pipefail
+        screen_share_title={{ screen_share_window_title | default('VTC Share Window') | quote }}
+        screen_share_url={{ screen_share_window_url | default('') | quote }}
+
+        pkill -x x11vnc || true
+        pkill -f "[x]term.*${screen_share_title}" || true
+
+        if [ -n "$screen_share_url" ]; then
+          pkill -f "[c]hromium.*${screen_share_url}" || true
+          pkill -f "[c]hromium-browser.*${screen_share_url}" || true
+          pkill -f "[g]oogle-chrome.*${screen_share_url}" || true
+          pkill -f "[f]irefox.*${screen_share_url}" || true
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Stop X display processes started for experiment
+      ansible.builtin.shell: |
+        set -euo pipefail
+        display={{ vtc_display | default(':99') | quote }}
+        display_num="${display#:}"
+
+        pkill -x openbox || true
+        pkill -f "[X]vfb ${display}" || true
+        pulseaudio --kill >/dev/null 2>&1 || true
+
+        rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
       args:
         executable: /bin/bash
       changed_when: false

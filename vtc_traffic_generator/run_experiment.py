@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "generated" / "experiment"
 DEFAULT_PLAYBOOK = PROJECT_ROOT / "ansible" / "deploy_experiment.yml"
+DEFAULT_STOP_PLAYBOOK = PROJECT_ROOT / "ansible" / "stop_clients.yml"
 DEFAULT_UPLOAD_PLAYBOOK = PROJECT_ROOT / "ansible" / "upload_captures.yml"
 
 
@@ -502,6 +503,16 @@ def main():
         default=str(DEFAULT_UPLOAD_PLAYBOOK),
         help=f"Ansible playbook to run with --upload-captures. Default: {DEFAULT_UPLOAD_PLAYBOOK}",
     )
+    parser.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        help="Do not stop client GUI, media, capture, and VNC processes after --run-controller.",
+    )
+    parser.add_argument(
+        "--stop-playbook",
+        default=str(DEFAULT_STOP_PLAYBOOK),
+        help=f"Ansible playbook to run for automatic cleanup. Default: {DEFAULT_STOP_PLAYBOOK}",
+    )
     args = parser.parse_args()
 
     try:
@@ -526,6 +537,12 @@ def main():
         controller_result = run_local_controller(generated["controller_config"])
         controller_returncode = controller_result.returncode
 
+    cleanup_returncode = 0
+    if args.run_controller and not args.no_cleanup:
+        stop_playbook_path = Path(args.stop_playbook).expanduser().resolve()
+        cleanup_result = run_ansible(generated["inventory"], stop_playbook_path)
+        cleanup_returncode = cleanup_result.returncode
+
     should_upload_captures = args.upload_captures or (
         args.run_controller
         and not args.no_upload_captures
@@ -536,6 +553,9 @@ def main():
         upload_result = run_ansible(generated["inventory"], upload_playbook_path)
         if upload_result.returncode != 0:
             return upload_result.returncode
+
+    if cleanup_returncode != 0:
+        return cleanup_returncode
 
     if controller_returncode != 0:
         return controller_returncode
