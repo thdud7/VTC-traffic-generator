@@ -704,15 +704,13 @@ class JitsiElectronAdapter(ServiceAdapter):
         return result.returncode == 0 and bool(result.stdout.strip())
 
     def _target_window_count_exact(self, title: str) -> int:
-        result = self._run_command(["wmctrl", "-l"], check=False)
+        result = self._run_xdotool(
+            ["search", "--onlyvisible", "--name", f"^{re.escape(title)}$"],
+            check=False,
+        )
         if result.returncode != 0:
             return 0
-        count = 0
-        for line in result.stdout.splitlines():
-            parts = line.split(None, 3)
-            if len(parts) == 4 and parts[3] == title:
-                count += 1
-        return count
+        return len([line for line in result.stdout.splitlines() if line.strip()])
 
     def _activate_window(self):
         if self.window_id:

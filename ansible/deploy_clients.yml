@@ -375,18 +375,22 @@
         run_id={{ screen_share_run_id | default('vtc-run') | quote }}
         nonce={{ screen_share_nonce | default('missing-nonce') | quote }}
         marker_color={{ screen_share_marker_color | default('#111111') | quote }}
+        escaped_title="$(printf '%s' "$title" | sed 's/[][(){}.^$*+?|\\]/\\&/g')"
+        title_regex="^${escaped_title}$"
 
         if pgrep -af xterm | grep -F -- "-T $title" >/dev/null 2>&1; then
-          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
           test "$existing_count" -eq 1
           exit 0
         fi
 
-        if DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | grep -F "$title" >/dev/null 2>&1; then
-          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+        if DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" >/dev/null 2>&1; then
+          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
           test "$existing_count" -eq 1
           exit 0
         fi
+
+        pkill -f '[x]term .*VTC Share Window' >/dev/null 2>&1 || true
 
         browser="$(command -v xterm || command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || true)"
         if [ -z "$browser" ]; then
@@ -417,10 +421,10 @@
 
         sleep 2
         DISPLAY={{ vtc_display | default(":99") }} wmctrl -r "$title" -b add,above || true
-        window_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+        window_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
         if [ "$window_count" -ne 1 ]; then
           echo "Expected exactly one screen share window titled '$title', found $window_count" >&2
-          DISPLAY={{ vtc_display | default(":99") }} wmctrl -l >&2 || true
+          DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name '.*' getwindowname %@ >&2 || true
           exit 1
         fi
       args:
