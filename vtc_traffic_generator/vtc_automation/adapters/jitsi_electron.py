@@ -184,6 +184,7 @@ class JitsiElectronAdapter(ServiceAdapter):
 
         if not self.adapter_config.get("skip_join_flow", False):
             await self._enter_display_name(display_name)
+            await self._ensure_prejoin_microphone_capture(str(microphone_name or ""))
             await self._click_join()
 
         if not await self.is_in_meeting():
@@ -426,6 +427,42 @@ class JitsiElectronAdapter(ServiceAdapter):
         if not status.get("success"):
             self._write_device_diagnostics("jitsi_audio_capture_failed")
         return bool(status.get("success"))
+
+    async def _ensure_prejoin_microphone_capture(self, microphone_name: str) -> bool:
+        if not microphone_name or not self._optional_bool("initial_mic_enabled", False):
+            return True
+        before = self._jitsi_audio_capture_status(microphone_name)
+        if before.get("success"):
+            emit_event(
+                self.config,
+                "prejoin_microphone_capture_verified",
+                {"method": "none", "before": before, "after": before, "success": True},
+                self.service_name,
+            )
+            return True
+
+        coords = self._coordinate("mic_button")
+        if not coords:
+            emit_event(
+                self.config,
+                "prejoin_microphone_capture_failed",
+                {"method": "none", "before": before, "reason": "mic_button coordinate is not configured", "success": False},
+                self.service_name,
+            )
+            return False
+
+        self._emit_fallback("mic_button", "coordinate", "prejoin microphone source-output was not attached")
+        self._click_coordinate(coords)
+        await asyncio.sleep(float(self.adapter_config.get("prejoin_mic_capture_wait_sec", 3)))
+        after = self._jitsi_audio_capture_status(microphone_name)
+        event_name = "prejoin_microphone_capture_verified" if after.get("success") else "prejoin_microphone_capture_failed"
+        emit_event(
+            self.config,
+            event_name,
+            {"method": "coordinate", "before": before, "after": after, "success": bool(after.get("success"))},
+            self.service_name,
+        )
+        return bool(after.get("success"))
 
     def _jitsi_audio_capture_status(self, microphone_name: str) -> dict[str, Any]:
         source_status = self._pulse_source_status(microphone_name)
