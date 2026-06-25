@@ -32,8 +32,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
         self.assertTrue(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
-        self.assertFalse(remote_config["adapter_config"]["launch_url_as_arg"])
-        self.assertFalse(remote_config["adapter_config"]["skip_url_entry"])
+        self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])
+        self.assertEqual(remote_config["adapter_config"]["launch_url_protocol"], "jitsi-meet")
+        self.assertTrue(remote_config["adapter_config"]["skip_url_entry"])
         self.assertFalse(remote_config["adapter_config"]["skip_join_flow"])
         self.assertGreaterEqual(remote_config["adapter_config"]["joined_wait_sec"], 20)
         self.assertFalse(remote_config["adapter_config"]["reset_user_data_dir"])
@@ -63,6 +64,26 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(
             adapter._build_launch_command(),
             ["/opt/jitsi/jitsi-meet.AppImage", "--no-sandbox", "https://jitsi.example/testroom"],
+        )
+
+    def test_launch_command_converts_https_url_to_jitsi_meet_protocol(self):
+        adapter = JitsiElectronAdapter(
+            {
+                "vtc_url": "https://172.31.32.200:8443/testroom#config.prejoinConfig.enabled=false",
+                "adapter_config": {
+                    "launch_command": "/opt/jitsi/jitsi-meet.AppImage --no-sandbox",
+                    "launch_url_as_arg": True,
+                    "launch_url_protocol": "jitsi-meet",
+                },
+            }
+        )
+        self.assertEqual(
+            adapter._build_launch_command(),
+            [
+                "/opt/jitsi/jitsi-meet.AppImage",
+                "--no-sandbox",
+                "jitsi-meet://172.31.32.200:8443/testroom#config.prejoinConfig.enabled=false",
+            ],
         )
 
     def test_coordinate_fallback_is_relative_to_jitsi_window(self):

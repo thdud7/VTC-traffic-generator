@@ -10,6 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from .base import ServiceAdapter
 from vtc_automation.event_log import emit_event
@@ -167,6 +168,8 @@ class JitsiElectronAdapter(ServiceAdapter):
         else:
             self._activate_window()
         await asyncio.sleep(float(self.adapter_config.get("page_load_wait_sec", 5)))
+        if self.adapter_config.get("skip_url_entry", False):
+            self._activate_meeting_window(vtc_url)
         self.dump_accessibility_tree("prejoin")
 
         camera_name = self.adapter_config.get("camera_name")
@@ -554,7 +557,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             else:
                 command = [str(part) for part in launch_command]
             if self.adapter_config.get("launch_url_as_arg", False):
-                command.append(str(self.config["vtc_url"]))
+                command.append(self._launch_url_argument())
             return command
 
         executable_path = self.adapter_config.get("executable_path")
@@ -562,11 +565,25 @@ class JitsiElectronAdapter(ServiceAdapter):
             raise ValueError("adapter_config.executable_path or adapter_config.launch_command is required")
 
         if self.adapter_config.get("launch_url_as_arg", False):
-            return [str(executable_path), str(self.config["vtc_url"])]
+            return [str(executable_path), self._launch_url_argument()]
 
         args = [str(executable_path)]
         args.extend(self.adapter_config.get("launch_args", self._default_launch_args()))
         return args
+
+    def _launch_url_argument(self) -> str:
+        vtc_url = str(self.config["vtc_url"])
+        protocol = self.adapter_config.get("launch_url_protocol")
+        if not protocol:
+            return vtc_url
+
+        parsed = urlsplit(vtc_url)
+        if protocol == "jitsi-meet":
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return vtc_url
+            return urlunsplit(("jitsi-meet", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+
+        return vtc_url
 
     def _default_launch_args(self) -> list[str]:
         args = [
