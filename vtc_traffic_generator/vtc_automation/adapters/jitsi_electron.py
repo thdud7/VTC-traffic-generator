@@ -15,6 +15,7 @@ from vtc_automation.event_log import emit_event
 
 DEFAULT_COORDINATES = {
     "room_url_input": [260, 137],
+    "room_url_go_button": [266, 193],
     "name_input": None,
     "join_button": None,
     "mic_button": None,
@@ -339,7 +340,11 @@ class JitsiElectronAdapter(ServiceAdapter):
                 self._click_coordinate(coords)
             self._run_xdotool(["key", "ctrl+a"], check=False)
             self._run_xdotool(["type", "--delay", "1", vtc_url])
-            self._run_xdotool(["key", "Return"])
+            go_coords = self._coordinate("room_url_go_button")
+            if go_coords:
+                self._click_coordinate(go_coords)
+            else:
+                self._run_xdotool(["key", "Return"])
             return
 
         self._run_xdotool(["key", "ctrl+l"])
