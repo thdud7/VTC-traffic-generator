@@ -38,6 +38,8 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertGreaterEqual(remote_config["adapter_config"]["joined_wait_sec"], 20)
         self.assertFalse(remote_config["adapter_config"]["reset_user_data_dir"])
         self.assertTrue(remote_config["adapter_config"]["coordinates_relative_to_window"])
+        self.assertNotIn("|jitsi", remote_config["adapter_config"]["window_title_regex"])
+        self.assertNotIn("|jitsi", remote_config["adapter_config"]["accessibility_window_regex"])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["join_button"], [239, 384])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["mic_button"], [100, 450])
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["left"], 480)

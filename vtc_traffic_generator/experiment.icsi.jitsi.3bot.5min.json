@@ -89,8 +89,8 @@
       "ignore_certificate_errors": true,
       "camera_name": "VTC Bot Camera",
       "microphone_name": "VTC_Microphone",
-      "window_title_regex": "Jitsi Meet|testroom|jitsi",
-      "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
+      "window_title_regex": "^Jitsi Meet$|^testroom",
+      "accessibility_window_regex": "^Jitsi Meet$|^testroom",
       "window_geometry": {
         "left": 480,
         "top": 40,
