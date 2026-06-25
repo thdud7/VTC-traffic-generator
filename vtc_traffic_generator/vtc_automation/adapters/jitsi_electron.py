@@ -168,8 +168,8 @@ class JitsiElectronAdapter(ServiceAdapter):
         else:
             self._activate_window()
         await asyncio.sleep(float(self.adapter_config.get("page_load_wait_sec", 5)))
-        if self.adapter_config.get("skip_url_entry", False):
-            self._activate_meeting_window(vtc_url)
+        if self._activate_meeting_window(vtc_url):
+            self._position_window_after_launch()
         self.dump_accessibility_tree("prejoin")
 
         camera_name = self.adapter_config.get("camera_name")

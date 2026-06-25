@@ -30,7 +30,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
-        self.assertTrue(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
+        self.assertFalse(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
         self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])
         self.assertEqual(remote_config["adapter_config"]["launch_url_protocol"], "jitsi-meet")
@@ -85,6 +85,32 @@ class JitsiMediaHardeningTests(unittest.TestCase):
                 "jitsi-meet://172.31.32.200:8443/testroom#config.prejoinConfig.enabled=false",
             ],
         )
+
+    def test_connect_to_meeting_repositions_activated_meeting_window(self):
+        adapter = JitsiElectronAdapter(
+            {
+                "vtc_url": "https://172.31.32.200:8443/testroom",
+                "adapter_config": {
+                    "skip_url_entry": True,
+                    "skip_device_selection": True,
+                    "skip_join_flow": True,
+                    "page_load_wait_sec": 0,
+                },
+            }
+        )
+        calls = []
+        adapter._activate_window = lambda: None
+        adapter.dump_accessibility_tree = lambda *args, **kwargs: True
+        adapter._activate_meeting_window = lambda vtc_url: calls.append(("activate", vtc_url)) or True
+        adapter._position_window_after_launch = lambda: calls.append(("position", None))
+
+        async def fake_is_in_meeting():
+            return True
+
+        adapter.is_in_meeting = fake_is_in_meeting
+        asyncio.run(adapter.connect_to_meeting("https://172.31.32.200:8443/testroom", "bot1"))
+
+        self.assertEqual(calls, [("activate", "https://172.31.32.200:8443/testroom"), ("position", None)])
 
     def test_coordinate_fallback_is_relative_to_jitsi_window(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
