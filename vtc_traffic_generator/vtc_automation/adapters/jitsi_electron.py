@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -345,11 +346,35 @@ class JitsiElectronAdapter(ServiceAdapter):
                 self._click_coordinate(go_coords)
             else:
                 self._run_xdotool(["key", "Return"])
+            self._activate_meeting_window(vtc_url)
             return
 
         self._run_xdotool(["key", "ctrl+l"])
         self._run_xdotool(["type", "--delay", "1", vtc_url])
         self._run_xdotool(["key", "Return"])
+
+    def _activate_meeting_window(self, vtc_url: str) -> bool:
+        base_url = vtc_url.split("#", 1)[0]
+        patterns = [
+            str(self.adapter_config.get("meeting_window_regex") or ""),
+            re.escape(base_url),
+        ]
+        patterns = [pattern for pattern in patterns if pattern]
+        deadline = time.time() + float(self.adapter_config.get("meeting_window_wait_sec", 10))
+
+        while time.time() < deadline:
+            for pattern in patterns:
+                result = self._run_xdotool(
+                    ["search", "--onlyvisible", "--name", pattern],
+                    check=False,
+                    timeout=2,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    self.window_id = result.stdout.strip().splitlines()[-1]
+                    self._activate_window()
+                    return True
+            time.sleep(0.5)
+        return False
 
     async def _enter_display_name(self, display_name: str):
         method = self._click_accessible_names(self._names("name_input"), self._roles("name_input"))

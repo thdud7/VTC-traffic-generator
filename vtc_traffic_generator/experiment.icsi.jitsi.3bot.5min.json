@@ -93,6 +93,7 @@
       "skip_device_selection": true,
       "page_load_wait_sec": 8,
       "joined_wait_sec": 8,
+      "meeting_window_wait_sec": 10,
       "initial_mic_enabled": true,
       "initial_camera_enabled": true,
       "initial_screen_sharing": false,
