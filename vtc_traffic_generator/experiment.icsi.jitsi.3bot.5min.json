@@ -1,6 +1,6 @@
 {
   "service": "jitsi_electron",
-  "vtc_url": "https://172.31.32.200:8443/testroom#config.startWithAudioMuted=false&config.startWithVideoMuted=false",
+  "vtc_url": "https://172.31.32.200:8443/testroom#config.prejoinConfig.enabled=false&config.startWithAudioMuted=false&config.startWithVideoMuted=false",
   "duration": 5,
   "videoconference": true,
   "branch": "jitsi",
@@ -85,6 +85,9 @@
       "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
       "launch_timeout_sec": 20,
       "action_timeout_sec": 10,
+      "launch_url_as_arg": true,
+      "skip_url_entry": true,
+      "skip_join_flow": true,
       "skip_device_selection": true,
       "initial_mic_enabled": true,
       "initial_camera_enabled": true,

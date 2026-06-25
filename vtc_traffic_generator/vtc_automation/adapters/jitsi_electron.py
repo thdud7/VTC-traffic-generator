@@ -147,7 +147,10 @@ class JitsiElectronAdapter(ServiceAdapter):
 
     async def connect_to_meeting(self, vtc_url: str, display_name: str):
         emit_event(self.config, "connect_vtc_session_start", {"vtc_url": vtc_url}, self.service_name)
-        await self._type_url(vtc_url)
+        if not self.adapter_config.get("skip_url_entry", False):
+            await self._type_url(vtc_url)
+        else:
+            self._activate_window()
         await asyncio.sleep(float(self.adapter_config.get("page_load_wait_sec", 5)))
         self.dump_accessibility_tree("prejoin")
 
@@ -159,8 +162,9 @@ class JitsiElectronAdapter(ServiceAdapter):
                 microphone_name=str(microphone_name or ""),
             )
 
-        await self._enter_display_name(display_name)
-        await self._click_join()
+        if not self.adapter_config.get("skip_join_flow", False):
+            await self._enter_display_name(display_name)
+            await self._click_join()
 
         if not await self.is_in_meeting():
             raise RuntimeError("Jitsi Electron did not appear to join the meeting")
@@ -275,6 +279,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         executable_path = self.adapter_config.get("executable_path")
         if not executable_path:
             raise ValueError("adapter_config.executable_path or adapter_config.launch_command is required")
+
+        if self.adapter_config.get("launch_url_as_arg", False):
+            return [str(executable_path), str(self.config["vtc_url"])]
 
         args = [str(executable_path)]
         args.extend(self.adapter_config.get("launch_args", self._default_launch_args()))
