@@ -1060,19 +1060,23 @@ def video_stream_config():
     if not isinstance(virtual_video_config, dict):
         virtual_video_config = {}
     video_device = config.get("video_device") or virtual_video_config.get("device") or "/dev/video5"
+    width = int(virtual_video_config.get("width", 640))
+    fps = int(virtual_video_config.get("fps", 15))
     font_size = 50 if "270" in str(config.get("video_name", "")) else 200
     y_position = "h-th-20" if "270" in str(config.get("video_name", "")) else "h-th-50"
-    return video_filepath, video_device, font_size, y_position
+    return video_filepath, video_device, width, fps, font_size, y_position
 
 
 def build_video_stream_process():
     if ffmpeg is None:
         raise RuntimeError("Client video playback requires the ffmpeg-python package.")
 
-    video_filepath, video_device, font_size, y_position = video_stream_config()
+    video_filepath, video_device, width, fps, font_size, y_position = video_stream_config()
     return (
         ffmpeg
         .input(video_filepath, re=None, stream_loop=-1)
+        .filter("fps", fps=fps)
+        .filter("scale", width, -2)
         .filter("format", "yuv420p")
         .drawtext(
             text=config["bot_name"],
@@ -1095,7 +1099,7 @@ def start_video_stream():
         if video_process is not None and video_process.poll() is None:
             return video_process.pid
 
-        video_filepath, video_device, _, _ = video_stream_config()
+        video_filepath, video_device, width, fps, _, _ = video_stream_config()
         print(f"Launching video playback: {video_filepath} -> {video_device}")
         process = build_video_stream_process().run_async(pipe_stdin=True)
         video_process = process
@@ -1103,12 +1107,24 @@ def start_video_stream():
     emit_event(
         config,
         "camera_stream_started",
-        {"video_path": video_filepath, "video_device": video_device, "video_pid": process.pid},
+        {
+            "video_path": video_filepath,
+            "video_device": video_device,
+            "video_pid": process.pid,
+            "width": width,
+            "fps": fps,
+        },
     )
     append_action_log(
         config,
         "camera_stream_started",
-        {"video_path": video_filepath, "video_device": video_device, "video_pid": process.pid},
+        {
+            "video_path": video_filepath,
+            "video_device": video_device,
+            "video_pid": process.pid,
+            "width": width,
+            "fps": fps,
+        },
     )
     return process.pid
 
