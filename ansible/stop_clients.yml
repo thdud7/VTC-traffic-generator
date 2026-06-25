@@ -13,6 +13,7 @@
         screen_share_title={{ screen_share_window_title | default('VTC Share Window') | quote }}
         screen_share_url={{ screen_share_window_url | default('') | quote }}
 
+        rm -f /tmp/vtc-stop-client.done
         cat > /tmp/vtc-stop-client.sh <<EOF
         #!/usr/bin/env bash
         set +e
@@ -43,6 +44,7 @@
         pkill -f "[X]vfb \${display}"
         pulseaudio --kill >/dev/null 2>&1
         rm -f "/tmp/.X\${display_num}-lock" "/tmp/.X11-unix/X\${display_num}"
+        touch /tmp/vtc-stop-client.done
         EOF
 
         chmod 0755 /tmp/vtc-stop-client.sh
@@ -51,6 +53,7 @@
         executable: /bin/bash
       changed_when: false
 
-    - name: Wait briefly for cleanup to settle
-      ansible.builtin.pause:
-        seconds: 3
+    - name: Wait for VTC client cleanup to finish
+      ansible.builtin.wait_for:
+        path: /tmp/vtc-stop-client.done
+        timeout: 20
