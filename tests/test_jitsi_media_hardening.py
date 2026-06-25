@@ -41,10 +41,13 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["adapter_config"]["coordinates_relative_to_window"])
         self.assertNotIn("|jitsi", remote_config["adapter_config"]["window_title_regex"])
         self.assertNotIn("|jitsi", remote_config["adapter_config"]["accessibility_window_regex"])
-        self.assertEqual(remote_config["adapter_config"]["coordinates"]["join_button"], [239, 384])
-        self.assertEqual(remote_config["adapter_config"]["coordinates"]["mic_button"], [100, 450])
+        self.assertEqual(remote_config["adapter_config"]["coordinates"]["name_input"], [200, 286])
+        self.assertEqual(remote_config["adapter_config"]["coordinates"]["join_button"], [200, 342])
+        self.assertEqual(remote_config["adapter_config"]["coordinates"]["mic_button"], [60, 408])
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["left"], 480)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["top"], 40)
+        self.assertEqual(remote_config["adapter_config"]["window_geometry"]["width"], 800)
+        self.assertEqual(remote_config["adapter_config"]["window_geometry"]["height"], 720)
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})

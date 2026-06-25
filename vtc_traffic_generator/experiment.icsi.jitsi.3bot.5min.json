@@ -94,7 +94,7 @@
       "window_geometry": {
         "left": 480,
         "top": 40,
-        "width": 480,
+        "width": 800,
         "height": 720
       },
       "launch_timeout_sec": 20,
@@ -129,9 +129,9 @@
       "coordinates": {
         "room_url_input": [260, 137],
         "room_url_go_button": [266, 193],
-        "name_input": [239, 314],
-        "join_button": [239, 384],
-        "mic_button": [100, 450],
+        "name_input": [200, 286],
+        "join_button": [200, 342],
+        "mic_button": [60, 408],
         "camera_button": null,
         "hangup_button": null,
         "device_settings_button": null,
