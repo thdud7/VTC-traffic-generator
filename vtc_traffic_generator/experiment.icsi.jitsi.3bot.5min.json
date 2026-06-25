@@ -17,7 +17,7 @@
   },
   "jitsi_server": {
     "name": "jitsi-server",
-    "host": "ec2-54-180-113-35.ap-northeast-2.compute.amazonaws.com",
+    "host": "ec2-3-37-36-230.ap-northeast-2.compute.amazonaws.com",
     "dir": "/home/ubuntu/vtc-lab/jitsi-docker-jitsi-meet-aa76415",
     "start_command": "docker compose up -d",
     "update_repo": false,
