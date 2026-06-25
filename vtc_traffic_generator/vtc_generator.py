@@ -673,12 +673,48 @@ def initialize_vtc_client():
         pulse.volume_set_all_chans(source, .8)
         pulse.mute(source, False)
 
+    set_default_pulse_devices(sink_name, source_name)
+
     # Check for v4l2 virtual webcam kernel module
     if 'v4l2loopback' not in str(subprocess.run(['lsmod'], capture_output=True)):
         print(
             "Error: v4l2loopback kernel module not loaded. Try: sudo modprobe v4l2loopback video_nr=5 exclusive_caps=1")
 
     print(config['bot_name'] + " configured.")
+
+
+def set_default_pulse_devices(sink_name, source_name):
+    results = {}
+    for device_type, command in (
+        ("sink", ["pactl", "set-default-sink", sink_name]),
+        ("source", ["pactl", "set-default-source", source_name]),
+    ):
+        result = subprocess.run(command, capture_output=True, text=True)
+        results[device_type] = {
+            "name": command[-1],
+            "returncode": result.returncode,
+            "stderr": result.stderr.strip(),
+        }
+
+    emit_event(
+        config,
+        "pulse_default_devices_configured",
+        {
+            "sink_name": sink_name,
+            "source_name": source_name,
+            "results": results,
+        },
+    )
+    append_action_log(
+        config,
+        "pulse_default_devices_configured",
+        {
+            "sink_name": sink_name,
+            "source_name": source_name,
+            "results": results,
+        },
+    )
+    return results
 
 
 # XMLRPC
