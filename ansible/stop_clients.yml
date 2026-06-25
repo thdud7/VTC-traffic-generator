@@ -4,58 +4,53 @@
   gather_facts: false
 
   tasks:
-    - name: Stop VTC client and media processes
+    - name: Schedule VTC client cleanup
       ansible.builtin.shell: |
-        set -euo pipefail
+        set -u
+        display={{ vtc_display | default(':99') | quote }}
+        display_num="${display#:}"
         video_device={{ video_device | default('/dev/video5') | quote }}
-
-        pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
-        pkill -f "[f]fmpeg.*${video_device}" || true
-        pkill -f '[r]un-jitsi.sh' || true
-        pkill -f '[e]lectron.*jitsi' || true
-        pkill -f '[j]itsi.*electron' || true
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-    - name: Stop packet capture processes
-      ansible.builtin.shell: |
-        pkill -x dumpcap || true
-        pkill -x tshark || true
-      args:
-        executable: /bin/bash
-      changed_when: false
-
-    - name: Stop screen share and VNC processes
-      ansible.builtin.shell: |
-        set -euo pipefail
         screen_share_title={{ screen_share_window_title | default('VTC Share Window') | quote }}
         screen_share_url={{ screen_share_window_url | default('') | quote }}
 
-        pkill -x x11vnc || true
-        pkill -f "[x]term.*${screen_share_title}" || true
+        cat > /tmp/vtc-stop-client.sh <<EOF
+        #!/usr/bin/env bash
+        set +e
+        video_device="${video_device}"
+        display="${display}"
+        display_num="${display_num}"
+        screen_share_title="${screen_share_title}"
+        screen_share_url="${screen_share_url}"
 
-        if [ -n "$screen_share_url" ]; then
-          pkill -f "[c]hromium.*${screen_share_url}" || true
-          pkill -f "[c]hromium-browser.*${screen_share_url}" || true
-          pkill -f "[g]oogle-chrome.*${screen_share_url}" || true
-          pkill -f "[f]irefox.*${screen_share_url}" || true
+        pkill -f '[v]tc_traffic_generator/vtc_generator.py'
+        pkill -f "[f]fmpeg.*\${video_device}"
+        pkill -f '[r]un-jitsi.sh'
+        pkill -f '[e]lectron.*jitsi'
+        pkill -f '[j]itsi.*electron'
+        pkill -x dumpcap
+        pkill -x tshark
+        pkill -x x11vnc
+        pkill -f "[x]term.*\${screen_share_title}"
+
+        if [ -n "\${screen_share_url}" ]; then
+          pkill -f "[c]hromium.*\${screen_share_url}"
+          pkill -f "[c]hromium-browser.*\${screen_share_url}"
+          pkill -f "[g]oogle-chrome.*\${screen_share_url}"
+          pkill -f "[f]irefox.*\${screen_share_url}"
         fi
+
+        pkill -x openbox
+        pkill -f "[X]vfb \${display}"
+        pulseaudio --kill >/dev/null 2>&1
+        rm -f "/tmp/.X\${display_num}-lock" "/tmp/.X11-unix/X\${display_num}"
+        EOF
+
+        chmod 0755 /tmp/vtc-stop-client.sh
+        nohup /tmp/vtc-stop-client.sh >/tmp/vtc-stop-client.log 2>&1 &
       args:
         executable: /bin/bash
       changed_when: false
 
-    - name: Stop X display processes started for experiment
-      ansible.builtin.shell: |
-        set -euo pipefail
-        display={{ vtc_display | default(':99') | quote }}
-        display_num="${display#:}"
-
-        pkill -x openbox || true
-        pkill -f "[X]vfb ${display}" || true
-        pulseaudio --kill >/dev/null 2>&1 || true
-
-        rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
-      args:
-        executable: /bin/bash
-      changed_when: false
+    - name: Wait briefly for cleanup to settle
+      ansible.builtin.pause:
+        seconds: 3
