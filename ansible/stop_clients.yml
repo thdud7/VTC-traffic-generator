@@ -12,7 +12,8 @@
         pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
         pkill -f "[f]fmpeg.*${video_device}" || true
         pkill -f '[r]un-jitsi.sh' || true
-        pkill -f '[e]lectron.*jitsi|[j]itsi.*electron' || true
+        pkill -f '[e]lectron.*jitsi' || true
+        pkill -f '[j]itsi.*electron' || true
       args:
         executable: /bin/bash
       changed_when: false

@@ -48,6 +48,7 @@
           - xdotool
           - x11-utils
           - x11vnc
+          - xdg-utils
           - xvfb
           - openbox
           - xterm
@@ -144,12 +145,18 @@
 
         DISPLAY="$display" xdpyinfo >/dev/null
 
-        if ! DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
+        if ! pgrep -x openbox >/dev/null 2>&1 || ! DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
           pkill -x openbox >/dev/null 2>&1 || true
           nohup env DISPLAY="$display" openbox > /tmp/vtc-openbox.log 2>&1 &
-          sleep 1
+          for _ in $(seq 1 10); do
+            if pgrep -x openbox >/dev/null 2>&1 && DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
         fi
 
+        pgrep -x openbox >/dev/null
         DISPLAY="$display" wmctrl -m >/dev/null
       args:
         executable: /bin/bash
@@ -257,6 +264,10 @@
         set -euo pipefail
         title={{ screen_share_window_title | default('VTC Share Window') | quote }}
         target_url={{ screen_share_window_url | default('file:///home/ubuntu/vtc_data/screen_share/share.html') | quote }}
+
+        if pgrep -af xterm | grep -F -- "-T $title" >/dev/null 2>&1; then
+          exit 0
+        fi
 
         if DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | grep -F "$title" >/dev/null 2>&1; then
           exit 0
