@@ -115,6 +115,7 @@
       "page_load_wait_sec": 8,
       "joined_wait_sec": 20,
       "meeting_window_wait_sec": 10,
+      "coordinates_relative_to_window": true,
       "trust_shortcut_state": false,
       "use_cached_control_state": false,
       "require_exact_screen_share_target": true,

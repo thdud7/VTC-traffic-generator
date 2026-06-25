@@ -37,6 +37,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(remote_config["adapter_config"]["skip_join_flow"])
         self.assertGreaterEqual(remote_config["adapter_config"]["joined_wait_sec"], 20)
         self.assertFalse(remote_config["adapter_config"]["reset_user_data_dir"])
+        self.assertTrue(remote_config["adapter_config"]["coordinates_relative_to_window"])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["join_button"], [239, 384])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["mic_button"], [100, 450])
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["left"], 0)
@@ -61,6 +62,19 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             adapter._build_launch_command(),
             ["/opt/jitsi/jitsi-meet.AppImage", "--no-sandbox", "https://jitsi.example/testroom"],
         )
+
+    def test_coordinate_fallback_is_relative_to_jitsi_window(self):
+        adapter = JitsiElectronAdapter({"adapter_config": {}})
+        adapter.window_id = "100"
+
+        def fake_run_xdotool(args, check=True, timeout=None):
+            if args == ["getwindowgeometry", "--shell", "100"]:
+                return subprocess.CompletedProcess(args, 0, stdout="X=480\nY=20\nWIDTH=400\nHEIGHT=600\n", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        adapter._run_xdotool = fake_run_xdotool
+
+        self.assertEqual(adapter._absolute_coordinate((260, 137)), (740, 157))
 
     def test_jitsi_audio_capture_status_uses_source_output_source_column(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})

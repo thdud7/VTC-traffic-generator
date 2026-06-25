@@ -993,6 +993,34 @@ class JitsiElectronAdapter(ServiceAdapter):
             return int(value[0]), int(value[1])
         raise ValueError(f"Invalid coordinate for {key}: {value}")
 
+    def _window_origin(self) -> tuple[int, int] | None:
+        if not self.window_id:
+            return None
+        result = self._run_xdotool(["getwindowgeometry", "--shell", str(self.window_id)], check=False)
+        if result.returncode != 0:
+            return None
+        origin: dict[str, int] = {}
+        for line in result.stdout.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key in {"X", "Y"}:
+                try:
+                    origin[key] = int(value.strip())
+                except ValueError:
+                    return None
+        if "X" not in origin or "Y" not in origin:
+            return None
+        return origin["X"], origin["Y"]
+
+    def _absolute_coordinate(self, coords: tuple[int, int]) -> tuple[int, int]:
+        if not self._optional_bool("coordinates_relative_to_window", True):
+            return coords
+        origin = self._window_origin()
+        if not origin:
+            return coords
+        return origin[0] + coords[0], origin[1] + coords[1]
+
     def _optional_bool(self, key: str, default: bool | None = None) -> bool | None:
         value = self.adapter_config.get(key, default)
         if value is None:
@@ -1010,8 +1038,8 @@ class JitsiElectronAdapter(ServiceAdapter):
         return self._optional_bool("use_cached_control_state", False) is True
 
     def _click_coordinate(self, coords: tuple[int, int]):
-        x, y = coords
         self._activate_window()
+        x, y = self._absolute_coordinate(coords)
         self._run_xdotool(["mousemove", str(x), str(y)])
         self._run_xdotool(["click", "1"])
 
