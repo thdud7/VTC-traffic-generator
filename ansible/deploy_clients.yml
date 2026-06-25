@@ -341,3 +341,27 @@
         host: "127.0.0.1"
         port: "{{ c2_port | default(8001) }}"
         timeout: 20
+
+    - name: Ensure openbox remains available after startup
+      ansible.builtin.shell: |
+        set -euo pipefail
+        display={{ vtc_display | default(":99") | quote }}
+
+        if pgrep -x openbox >/dev/null 2>&1 && DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        pkill -x openbox >/dev/null 2>&1 || true
+        nohup setsid env DISPLAY="$display" openbox --replace > /tmp/vtc-openbox.log 2>&1 &
+
+        for _ in $(seq 1 10); do
+          if pgrep -x openbox >/dev/null 2>&1 && DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 1
+        done
+
+        DISPLAY="$display" wmctrl -m
+      args:
+        executable: /bin/bash
+      changed_when: false
