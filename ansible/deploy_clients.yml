@@ -390,8 +390,6 @@
           exit 0
         fi
 
-        pkill -f '[x]term .*VTC Share Window' >/dev/null 2>&1 || true
-
         browser="$(command -v xterm || command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || true)"
         if [ -z "$browser" ]; then
           echo "No supported browser or xterm found for screen share window" >&2
