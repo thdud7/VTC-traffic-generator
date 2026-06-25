@@ -76,6 +76,11 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
         self.assertEqual(adapter._absolute_coordinate((260, 137)), (740, 157))
 
+    def test_screen_share_window_does_not_force_above_jitsi(self):
+        deploy_playbook = Path("ansible/deploy_clients.yml").read_text(encoding="utf-8")
+        self.assertIn("wmctrl -r \"$title\" -b remove,above", deploy_playbook)
+        self.assertNotIn("wmctrl -r \"$title\" -b add,above", deploy_playbook)
+
     def test_jitsi_audio_capture_status_uses_source_output_source_column(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
         adapter._pulse_source_status = lambda microphone_name: {
