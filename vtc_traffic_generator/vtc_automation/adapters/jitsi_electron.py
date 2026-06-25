@@ -420,7 +420,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         outputs = self._run_command(["pactl", "list", "short", "source-outputs"], check=False)
         rows = self._parse_pactl_short_rows(outputs.stdout)
         source_index = str(source_status.get("source_index") or "")
-        matching_outputs = [row for row in rows if len(row) >= 5 and row[4] == source_index]
+        matching_outputs = [row for row in rows if len(row) >= 2 and row[1] == source_index]
         return {
             "success": bool(source_status.get("success")) and bool(matching_outputs),
             "target": microphone_name,

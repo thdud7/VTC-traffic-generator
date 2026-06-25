@@ -32,9 +32,10 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
         self.assertTrue(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
-        self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])
-        self.assertTrue(remote_config["adapter_config"]["skip_url_entry"])
-        self.assertTrue(remote_config["adapter_config"]["skip_join_flow"])
+        self.assertFalse(remote_config["adapter_config"]["launch_url_as_arg"])
+        self.assertFalse(remote_config["adapter_config"]["skip_url_entry"])
+        self.assertFalse(remote_config["adapter_config"]["skip_join_flow"])
+        self.assertGreaterEqual(remote_config["adapter_config"]["joined_wait_sec"], 20)
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
@@ -55,6 +56,29 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             adapter._build_launch_command(),
             ["/opt/jitsi/jitsi-meet.AppImage", "--no-sandbox", "https://jitsi.example/testroom"],
         )
+
+    def test_jitsi_audio_capture_status_uses_source_output_source_column(self):
+        adapter = JitsiElectronAdapter({"adapter_config": {}})
+        adapter._pulse_source_status = lambda microphone_name: {
+            "success": True,
+            "source_index": "2",
+            "target": microphone_name,
+        }
+
+        def fake_run_command(command, timeout=None, check=True):
+            self.assertEqual(command, ["pactl", "list", "short", "source-outputs"])
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="0\t1\t-\tmodule-remap-source.c\ts16le 2ch 44100Hz\n"
+                "1\t2\t26\tprotocol-native.c\ts16le 2ch 44100Hz\n",
+                stderr="",
+            )
+
+        adapter._run_command = fake_run_command
+        status = adapter._jitsi_audio_capture_status("VTC_Microphone")
+        self.assertTrue(status["success"])
+        self.assertEqual(status["matching_source_outputs"][0][1], "2")
 
     def test_inventory_values_quote_ini_comments(self):
         self.assertEqual(quote_inventory_value("#aabbcc"), '"#aabbcc"')
