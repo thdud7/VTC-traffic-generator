@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import shlex
 import subprocess
 import time
@@ -104,6 +105,16 @@ class JitsiElectronAdapter(ServiceAdapter):
                 ["pkill", "-f", self.adapter_config.get("process_match", "jitsi-meet")],
                 timeout=5,
                 check=False,
+            )
+
+        if self._optional_bool("reset_user_data_dir", False):
+            user_data_dir = Path(str(self.adapter_config.get("user_data_dir", "~/.config/Jitsi Meet"))).expanduser()
+            shutil.rmtree(user_data_dir, ignore_errors=True)
+            emit_event(
+                self.config,
+                "jitsi_user_data_dir_reset",
+                {"path": str(user_data_dir), "success": True},
+                self.service_name,
             )
 
         launch_command = self._build_launch_command()
