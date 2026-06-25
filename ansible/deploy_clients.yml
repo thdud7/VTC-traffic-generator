@@ -324,7 +324,10 @@
         mode: "0644"
 
     - name: Stop existing VTC client process
-      ansible.builtin.shell: pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
+      ansible.builtin.shell: |
+        video_device={{ video_device | default('/dev/video5') | quote }}
+        pkill -f '[v]tc_traffic_generator/vtc_generator.py' || true
+        pkill -f "[f]fmpeg.*${video_device}" || true
       args:
         executable: /bin/bash
       changed_when: false
