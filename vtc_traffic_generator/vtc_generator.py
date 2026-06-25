@@ -34,6 +34,10 @@ speech_lock = threading.Lock()
 speech_until = 0
 speech_thread_active = False
 action_log_lock = threading.Lock()
+video_lock = threading.Lock()
+video_process = None
+video_supervisor_thread = None
+video_supervisor_stop = threading.Event()
 active_adapter_lock = threading.Lock()
 active_adapter = None
 active_loop = None
@@ -577,6 +581,9 @@ class VtcClient:
 
 
 def run_client(client_config):
+    if client_config.get("videoconference"):
+        ensure_video_supervisor()
+
     # Register functions and respond to calls indefinitely
     #server = SimpleXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
     server = AsyncXMLRPCServer(("0.0.0.0", client_config['c2_port']), allow_none=True)
@@ -1047,56 +1054,94 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec):
         ffmpeg_process.wait()
 
 
+def video_stream_config():
+    video_filepath = str(PurePath(config["video_path"], config["video_name"]))
+    virtual_video_config = config.get("virtual_video", {})
+    if not isinstance(virtual_video_config, dict):
+        virtual_video_config = {}
+    video_device = config.get("video_device") or virtual_video_config.get("device") or "/dev/video5"
+    font_size = 50 if "270" in str(config.get("video_name", "")) else 200
+    y_position = "h-th-20" if "270" in str(config.get("video_name", "")) else "h-th-50"
+    return video_filepath, video_device, font_size, y_position
+
+
+def build_video_stream_process():
+    if ffmpeg is None:
+        raise RuntimeError("Client video playback requires the ffmpeg-python package.")
+
+    video_filepath, video_device, font_size, y_position = video_stream_config()
+    return (
+        ffmpeg
+        .input(video_filepath, re=None, stream_loop=-1)
+        .filter("format", "yuv420p")
+        .drawtext(
+            text=config["bot_name"],
+            x="(w-text_w)/2",
+            y=y_position,
+            fontcolor="red",
+            fontsize=font_size,
+        )
+        .output(video_device, format="v4l2")
+    )
+
+
+def start_video_stream():
+    global video_process
+
+    if not config.get("videoconference"):
+        return False
+
+    with video_lock:
+        if video_process is not None and video_process.poll() is None:
+            return video_process.pid
+
+        video_filepath, video_device, _, _ = video_stream_config()
+        print(f"Launching video playback: {video_filepath} -> {video_device}")
+        process = build_video_stream_process().run_async(pipe_stdin=True)
+        video_process = process
+
+    emit_event(
+        config,
+        "camera_stream_started",
+        {"video_path": video_filepath, "video_device": video_device, "video_pid": process.pid},
+    )
+    append_action_log(
+        config,
+        "camera_stream_started",
+        {"video_path": video_filepath, "video_device": video_device, "video_pid": process.pid},
+    )
+    return process.pid
+
+
+def video_supervisor_worker():
+    while not video_supervisor_stop.is_set():
+        try:
+            start_video_stream()
+        except Exception as exc:
+            emit_event(config, "camera_stream_error", {"error": str(exc)})
+            append_action_log(config, "camera_stream_error", {"error": str(exc)})
+        video_supervisor_stop.wait(2)
+
+
+def ensure_video_supervisor():
+    global video_supervisor_thread
+
+    if not config.get("videoconference"):
+        return False
+
+    with video_lock:
+        if video_supervisor_thread is not None and video_supervisor_thread.is_alive():
+            return True
+        video_supervisor_stop.clear()
+        video_supervisor_thread = threading.Thread(target=video_supervisor_worker, daemon=True)
+        video_supervisor_thread.start()
+    return True
+
+
 # XMLRPC
 def play_video():
-    # Setup streaming from file to v4l2 device
-    if config['videoconference']:
-        if ffmpeg is None:
-            raise RuntimeError("Client video playback requires the ffmpeg-python package.")
-
-        try:
-            video_filepath = str(PurePath(config['video_path'], config['video_name']))
-            virtual_video_config = config.get("virtual_video", {})
-            video_device = config.get("video_device") or virtual_video_config.get("device") or "/dev/video5"
-            print(video_filepath)
-            # time.sleep(5)
-
-            if "270" in config['video_name']:
-                process = (
-                    ffmpeg
-                        .input(video_filepath, re=None, stream_loop=-1)
-                        .filter('format', 'yuv420p')
-                        .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-20', fontcolor='red', fontsize=50)
-                        .output(video_device, format='v4l2')
-                )
-            else:
-                process = (
-                    ffmpeg
-                        .input(video_filepath, re=None, stream_loop=-1)
-                        .filter('format', 'yuv420p')
-                        .drawtext(text=config['bot_name'], x='(w-text_w)/2', y='h-th-50', fontcolor='red', fontsize=200)
-                        .output(video_device, format='v4l2')
-                )
-
-            # Launch video playback
-            print("Launching video playback")
-            # process = process.run_async(pipe_stdin=True, quiet=True)
-            process = process.run_async(pipe_stdin=True)
-            emit_event(
-                config,
-                "camera_on",
-                {"video_path": video_filepath, "video_device": video_device},
-            )
-
-        except ffmpeg.Error as e:
-            print('stdout:', e.stdout.decode('utf8'))
-            print('stderr:', e.stderr.decode('utf8'))
-            raise e
-
-        return process.pid
-
-    else:
-        return False
+    ensure_video_supervisor()
+    return start_video_stream()
 
 
 def set_microphone(enabled):
@@ -1261,11 +1306,25 @@ def get_connection_status():
 
 # XMLRPC
 def stop_video(video_pid):
+    global video_process
+
     print("Stopping video")
-    details = {"video_pid": video_pid, "success": bool(video_pid)}
-    if video_pid:
+    video_supervisor_stop.set()
+    with video_lock:
+        process = video_process
+        video_process = None
+
+    target_pid = process.pid if process is not None else video_pid
+    details = {"video_pid": target_pid, "success": bool(target_pid)}
+    if process is not None and process.poll() is None:
+        process.terminate()
         try:
-            os.kill(video_pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+    elif target_pid:
+        try:
+            os.kill(target_pid, signal.SIGTERM)
         except ProcessLookupError:
             details["already_stopped"] = True
         except Exception as exc:

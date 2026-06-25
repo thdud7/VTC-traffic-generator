@@ -171,7 +171,8 @@
         x11vnc -storepasswd "123456" "$vnc_password_file" >/dev/null
         chmod 0600 "$vnc_password_file"
 
-        if pgrep -x x11vnc >/dev/null 2>&1 && ss -ltnp 2>/dev/null | grep -F ":5900" >/dev/null 2>&1; then
+        if pgrep -af x11vnc | grep -F -- "-rfbport 5900" | grep -F -- "-viewonly" >/dev/null 2>&1 \
+          && ss -ltnp 2>/dev/null | grep -F ":5900" >/dev/null 2>&1; then
           exit 0
         fi
 
@@ -182,6 +183,7 @@
           -rfbport 5900 \
           -forever \
           -shared \
+          -viewonly \
           -noxdamage \
           -repeat \
           -bg \

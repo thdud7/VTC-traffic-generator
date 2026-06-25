@@ -3,9 +3,11 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -84,7 +86,12 @@ def build_controller_config(experiment, clients):
         "version": experiment.get("version", "VTC traffic generator X"),
     }
 
-    for optional_key in ("behavior", "behavior_mode", "adapter_action_timeout_sec", "action_log_path"):
+    controller.setdefault(
+        "action_log_path",
+        str(experiment.get("action_log_path") or f"/tmp/vtc-controller/actions-{experiment_run_log_id(experiment)}.txt"),
+    )
+
+    for optional_key in ("behavior", "behavior_mode", "adapter_action_timeout_sec"):
         if optional_key in experiment:
             controller[optional_key] = experiment[optional_key]
 
@@ -147,7 +154,9 @@ def build_remote_config(experiment, client):
         "bot": {
             "display_name": str(client.get("display_name", bot_name)),
         },
-        "action_log_path": str(client.get("action_log_path", f"/tmp/vtc-{bot_name}/actions.txt")),
+        "action_log_path": str(
+            client.get("action_log_path", f"/tmp/vtc-{bot_name}/actions-{experiment_run_log_id(experiment)}.txt")
+        ),
         "videoconference": bool(experiment.get("videoconference", True)),
         "audio_path": str(client.get("audio_path", defaults.get("audio_path", "VTC_AV/VTC_audio_tracks"))),
         "voice_name": str(client.get("voice_name", defaults.get("voice_name", ""))),
@@ -237,7 +246,9 @@ def render_inventory(experiment, clients, output_dir):
         if not isinstance(packet_capture, dict):
             packet_capture = {}
         capture_output_dir = str(packet_capture.get("output_dir") or "/tmp/vtc-captures")
-        action_log_path = str(client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions.txt"))
+        action_log_path = str(
+            client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions-{experiment_run_log_id(experiment)}.txt")
+        )
         event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events.jsonl"))
         app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron.log"))
         adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter.log"))
@@ -360,6 +371,32 @@ def append_capture_upload_inventory_vars(lines, experiment, capture_upload):
     lines.append(f"capture_upload_include_logs={quote_inventory_value(str(include_logs).lower())}")
 
 
+def experiment_run_log_id(experiment):
+    value = experiment.get("_run_log_id")
+    if value:
+        return str(value)
+
+    base = (
+        experiment.get("run_id")
+        or experiment.get("capture_upload", {}).get("run_id")
+        or "vtc-experiment"
+    )
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    value = sanitize_log_id(f"{base}-{timestamp}")
+    experiment["_run_log_id"] = value
+    return value
+
+
+def sanitize_log_id(value):
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
+    return text or "vtc-experiment"
+
+
+def capture_upload_configured(experiment):
+    capture_upload = experiment.get("capture_upload", {})
+    return isinstance(capture_upload, dict) and bool(capture_upload.get("s3_uri"))
+
+
 def merge_mapping(base, override):
     merged = {}
     if isinstance(base, dict):
@@ -380,6 +417,7 @@ def quote_inventory_value(value):
 
 def generate(experiment_path, output_dir):
     experiment = load_json(experiment_path)
+    experiment_run_log_id(experiment)
     clients = normalize_clients(experiment)
     output_dir = Path(output_dir).expanduser().resolve()
 
@@ -404,6 +442,7 @@ def generate(experiment_path, output_dir):
         "controller_config": controller_config_path,
         "inventory": inventory_path,
         "remote_configs": remote_paths,
+        "capture_upload_configured": capture_upload_configured(experiment),
     }
 
 
@@ -451,7 +490,12 @@ def main():
     parser.add_argument(
         "--upload-captures",
         action="store_true",
-        help="Upload client packet captures to S3 after optional controller run.",
+        help="Upload client packet captures to S3. This is automatic after --run-controller when capture_upload.s3_uri is set.",
+    )
+    parser.add_argument(
+        "--no-upload-captures",
+        action="store_true",
+        help="Do not automatically upload captures after --run-controller.",
     )
     parser.add_argument(
         "--upload-playbook",
@@ -477,15 +521,24 @@ def main():
         if ansible_result.returncode != 0:
             return ansible_result.returncode
 
+    controller_returncode = 0
     if args.run_controller:
         controller_result = run_local_controller(generated["controller_config"])
-        if controller_result.returncode != 0:
-            return controller_result.returncode
+        controller_returncode = controller_result.returncode
 
-    if args.upload_captures:
+    should_upload_captures = args.upload_captures or (
+        args.run_controller
+        and not args.no_upload_captures
+        and generated["capture_upload_configured"]
+    )
+    if should_upload_captures:
         upload_playbook_path = Path(args.upload_playbook).expanduser().resolve()
         upload_result = run_ansible(generated["inventory"], upload_playbook_path)
-        return upload_result.returncode
+        if upload_result.returncode != 0:
+            return upload_result.returncode
+
+    if controller_returncode != 0:
+        return controller_returncode
 
     return 0
 
