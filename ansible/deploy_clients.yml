@@ -147,7 +147,7 @@
 
         if ! pgrep -x openbox >/dev/null 2>&1 || ! DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
           pkill -x openbox >/dev/null 2>&1 || true
-          nohup env DISPLAY="$display" openbox > /tmp/vtc-openbox.log 2>&1 &
+          nohup setsid env DISPLAY="$display" openbox --replace > /tmp/vtc-openbox.log 2>&1 &
           for _ in $(seq 1 10); do
             if pgrep -x openbox >/dev/null 2>&1 && DISPLAY="$display" wmctrl -m >/dev/null 2>&1; then
               break
@@ -293,7 +293,7 @@
               --new-window "$target_url" > /tmp/vtc-screen-share-window.log 2>&1 &
             ;;
           xterm)
-            nohup env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
+            nohup setsid env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
               -T "$title" \
               -e bash -lc 'while true; do clear; printf "%s\n\n%s\n" "$0" "Screen sharing content for VTC traffic collection."; sleep 60; done' "$title" \
               > /tmp/vtc-screen-share-window.log 2>&1 &
