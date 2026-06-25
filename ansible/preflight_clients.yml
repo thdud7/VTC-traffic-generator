@@ -107,29 +107,29 @@
         export PREFLIGHT_NTP_SYNCED="$ntp_synced"
         export PREFLIGHT_DETAILS_PATH="$output_file"
         python3 -c 'import json, os, sys
-def as_bool(name):
-    return os.environ.get(name, "").lower() == "true"
-summary = {
-    "host": os.environ["PREFLIGHT_HOST"],
-    "utc": os.environ["PREFLIGHT_UTC"],
-    "display": os.environ["PREFLIGHT_DISPLAY"],
-    "source_name": os.environ["PREFLIGHT_SOURCE_NAME"],
-    "source_found": as_bool("PREFLIGHT_SOURCE_FOUND"),
-    "source_muted": os.environ["PREFLIGHT_SOURCE_MUTED"],
-    "source_volume": os.environ["PREFLIGHT_SOURCE_VOLUME"],
-    "video_device": os.environ["PREFLIGHT_VIDEO_DEVICE"],
-    "video_found": as_bool("PREFLIGHT_VIDEO_FOUND"),
-    "dumpcap_ok": as_bool("PREFLIGHT_DUMPCAP_OK"),
-    "tshark_ok": as_bool("PREFLIGHT_TSHARK_OK"),
-    "capinfos_ok": as_bool("PREFLIGHT_CAPINFOS_OK"),
-    "display_ok": as_bool("PREFLIGHT_DISPLAY_OK"),
-    "ntp_synced": os.environ["PREFLIGHT_NTP_SYNCED"],
-    "details_path": os.environ["PREFLIGHT_DETAILS_PATH"],
-}
-with open(sys.argv[1], "w", encoding="utf-8") as outfile:
-    json.dump(summary, outfile, indent=2, sort_keys=True)
-    outfile.write("\n")
-' "$summary_file"
+        def as_bool(name):
+            return os.environ.get(name, "").lower() == "true"
+        summary = {
+            "host": os.environ["PREFLIGHT_HOST"],
+            "utc": os.environ["PREFLIGHT_UTC"],
+            "display": os.environ["PREFLIGHT_DISPLAY"],
+            "source_name": os.environ["PREFLIGHT_SOURCE_NAME"],
+            "source_found": as_bool("PREFLIGHT_SOURCE_FOUND"),
+            "source_muted": os.environ["PREFLIGHT_SOURCE_MUTED"],
+            "source_volume": os.environ["PREFLIGHT_SOURCE_VOLUME"],
+            "video_device": os.environ["PREFLIGHT_VIDEO_DEVICE"],
+            "video_found": as_bool("PREFLIGHT_VIDEO_FOUND"),
+            "dumpcap_ok": as_bool("PREFLIGHT_DUMPCAP_OK"),
+            "tshark_ok": as_bool("PREFLIGHT_TSHARK_OK"),
+            "capinfos_ok": as_bool("PREFLIGHT_CAPINFOS_OK"),
+            "display_ok": as_bool("PREFLIGHT_DISPLAY_OK"),
+            "ntp_synced": os.environ["PREFLIGHT_NTP_SYNCED"],
+            "details_path": os.environ["PREFLIGHT_DETAILS_PATH"],
+        }
+        with open(sys.argv[1], "w", encoding="utf-8") as outfile:
+            json.dump(summary, outfile, indent=2, sort_keys=True)
+            outfile.write("\n")
+        ' "$summary_file"
 
         test "$source_found" = true
         test "$source_muted" = false
