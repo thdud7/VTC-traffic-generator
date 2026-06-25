@@ -30,12 +30,31 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
+        self.assertTrue(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
+        self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])
+        self.assertTrue(remote_config["adapter_config"]["skip_url_entry"])
+        self.assertTrue(remote_config["adapter_config"]["skip_join_flow"])
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
         self.assertFalse(adapter._trust_shortcut_state())
         self.assertFalse(adapter._use_cached_control_state())
+
+    def test_launch_command_appends_url_when_enabled(self):
+        adapter = JitsiElectronAdapter(
+            {
+                "vtc_url": "https://jitsi.example/testroom",
+                "adapter_config": {
+                    "launch_command": "/opt/jitsi/jitsi-meet.AppImage --no-sandbox",
+                    "launch_url_as_arg": True,
+                },
+            }
+        )
+        self.assertEqual(
+            adapter._build_launch_command(),
+            ["/opt/jitsi/jitsi-meet.AppImage", "--no-sandbox", "https://jitsi.example/testroom"],
+        )
 
     def test_inventory_values_quote_ini_comments(self):
         self.assertEqual(quote_inventory_value("#aabbcc"), '"#aabbcc"')

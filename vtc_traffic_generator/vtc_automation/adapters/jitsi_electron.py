@@ -450,6 +450,11 @@ class JitsiElectronAdapter(ServiceAdapter):
             emit_event(self.config, "meeting_state_verified", evidence, self.service_name)
             return True
 
+        media_evidence = self._find_media_session_evidence()
+        if media_evidence:
+            emit_event(self.config, "meeting_state_verified", media_evidence, self.service_name)
+            return True
+
         if self.window_id is not None and self._optional_bool("allow_window_id_meeting_fallback", False):
             emit_event(
                 self.config,
@@ -496,8 +501,12 @@ class JitsiElectronAdapter(ServiceAdapter):
         launch_command = self.adapter_config.get("launch_command")
         if launch_command:
             if isinstance(launch_command, str):
-                return shlex.split(launch_command)
-            return [str(part) for part in launch_command]
+                command = shlex.split(launch_command)
+            else:
+                command = [str(part) for part in launch_command]
+            if self.adapter_config.get("launch_url_as_arg", False):
+                command.append(str(self.config["vtc_url"]))
+            return command
 
         executable_path = self.adapter_config.get("executable_path")
         if not executable_path:
@@ -1073,6 +1082,28 @@ class JitsiElectronAdapter(ServiceAdapter):
         ):
             return {"success": True, "evidence_keys": sorted(evidence.keys()), "window_id": self.window_id}
         return None
+
+    def _find_media_session_evidence(self) -> dict[str, Any] | None:
+        if not self._optional_bool("allow_media_capture_meeting_fallback", False):
+            return None
+        microphone_name = str(self.adapter_config.get("microphone_name") or "")
+        if not microphone_name:
+            return None
+        status = self._jitsi_audio_capture_status(microphone_name)
+        if not status.get("success"):
+            emit_event(
+                self.config,
+                "meeting_state_media_fallback_unverified",
+                {"success": False, "window_id": self.window_id, "audio_capture": status},
+                self.service_name,
+            )
+            return None
+        return {
+            "success": True,
+            "evidence_keys": ["jitsi_audio_capture"],
+            "window_id": self.window_id,
+            "audio_capture": status,
+        }
 
     def _window_regex_for_accessibility(self) -> str:
         return self.adapter_config.get("accessibility_window_regex") or self._window_title_regexes()[0]
