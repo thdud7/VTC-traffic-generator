@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
-from vtc_traffic_generator.run_experiment import generate
+from vtc_traffic_generator.run_experiment import generate, quote_inventory_value
 from vtc_traffic_generator.tools.analyze_media_capture import (
     classify_udp_payload,
     load_stats_mappings,
@@ -32,6 +32,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
         self.assertFalse(adapter._trust_shortcut_state())
         self.assertFalse(adapter._use_cached_control_state())
+
+    def test_inventory_values_quote_ini_comments(self):
+        self.assertEqual(quote_inventory_value("#aabbcc"), '"#aabbcc"')
 
     def test_parse_rtp_header_ignores_stun_and_extracts_ssrc_payload_type(self):
         stun = bytes.fromhex("000100002112a442000000000000000000000000")

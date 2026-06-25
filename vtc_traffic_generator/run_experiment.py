@@ -464,7 +464,7 @@ def quote_inventory_value(value):
     text = str(value)
     if not text:
         return '""'
-    if any(char.isspace() for char in text):
+    if any(char.isspace() for char in text) or "#" in text:
         return json.dumps(text)
     return text
 
