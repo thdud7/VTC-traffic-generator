@@ -47,6 +47,7 @@
           - wmctrl
           - xdotool
           - x11-utils
+          - x11vnc
           - xvfb
           - openbox
           - xterm
@@ -155,6 +156,39 @@
     - name: Enable desktop accessibility for UI automation
       ansible.builtin.shell: |
         dbus-run-session -- gsettings set org.gnome.desktop.interface toolkit-accessibility true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Start x11vnc for VNC access
+      ansible.builtin.shell: |
+        set -euo pipefail
+        display={{ vtc_display | default(":99") | quote }}
+        vnc_password_file="$HOME/.vnc/passwd"
+
+        mkdir -p "$HOME/.vnc"
+        chmod 0700 "$HOME/.vnc"
+        x11vnc -storepasswd "123456" "$vnc_password_file" >/dev/null
+        chmod 0600 "$vnc_password_file"
+
+        if pgrep -af "x11vnc" | grep -F " -display $display " | grep -F " -rfbport 5900 " >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        pkill -f "x11vnc .* -rfbport 5900" >/dev/null 2>&1 || true
+        nohup x11vnc \
+          -display "$display" \
+          -rfbauth "$vnc_password_file" \
+          -rfbport 5900 \
+          -forever \
+          -shared \
+          -noxdamage \
+          -repeat \
+          -o /tmp/vtc-x11vnc.log \
+          >/tmp/vtc-x11vnc.nohup 2>&1 &
+
+        sleep 1
+        pgrep -af "x11vnc" | grep -F " -display $display " | grep -F " -rfbport 5900 " >/dev/null
       args:
         executable: /bin/bash
       changed_when: false
