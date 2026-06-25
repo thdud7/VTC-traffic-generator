@@ -297,13 +297,39 @@
                 line-height: 1.4;
                 margin: 0;
               }
+              .marker {
+                width: 100%;
+                height: 180px;
+                margin-top: 32px;
+                background:
+                  linear-gradient(45deg, {{ screen_share_marker_color | default('#111111') }} 25%, transparent 25%),
+                  linear-gradient(-45deg, {{ screen_share_marker_color | default('#111111') }} 25%, transparent 25%),
+                  linear-gradient(45deg, transparent 75%, {{ screen_share_marker_color | default('#111111') }} 75%),
+                  linear-gradient(-45deg, transparent 75%, {{ screen_share_marker_color | default('#111111') }} 75%);
+                background-size: 48px 48px;
+                background-position: 0 0, 0 24px, 24px -24px, -24px 0;
+                border: 8px solid #000;
+              }
             </style>
           </head>
           <body>
             <main>
-              <h1>{{ inventory_hostname }}</h1>
-              <p>Screen sharing content for VTC traffic collection.</p>
+              <h1>{{ screen_share_run_id | default('vtc-run') }}</h1>
+              <p>bot={{ inventory_hostname }}</p>
+              <p>nonce={{ screen_share_nonce | default('missing-nonce') }}</p>
+              <p>utc=<span id="utc"></span></p>
+              <p>counter=<span id="counter">0</span></p>
+              <div class="marker"></div>
             </main>
+            <script>
+              let counter = 0;
+              function tick() {
+                document.getElementById('utc').textContent = new Date().toISOString();
+                document.getElementById('counter').textContent = counter++;
+              }
+              tick();
+              setInterval(tick, 1000);
+            </script>
           </body>
           </html>
       when: screen_share_window_enabled | default(false) | bool
@@ -313,12 +339,19 @@
         set -euo pipefail
         title={{ screen_share_window_title | default('VTC Share Window') | quote }}
         target_url={{ screen_share_window_url | default('file:///home/ubuntu/vtc_data/screen_share/share.html') | quote }}
+        run_id={{ screen_share_run_id | default('vtc-run') | quote }}
+        nonce={{ screen_share_nonce | default('missing-nonce') | quote }}
+        marker_color={{ screen_share_marker_color | default('#111111') | quote }}
 
         if pgrep -af xterm | grep -F -- "-T $title" >/dev/null 2>&1; then
+          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+          test "$existing_count" -eq 1
           exit 0
         fi
 
         if DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | grep -F "$title" >/dev/null 2>&1; then
+          existing_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+          test "$existing_count" -eq 1
           exit 0
         fi
 
@@ -344,13 +377,19 @@
           xterm)
             nohup setsid env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
               -T "$title" \
-              -e bash -lc 'while true; do clear; printf "%s\n\n%s\n" "$0" "Screen sharing content for VTC traffic collection."; sleep 60; done' "$title" \
+              -e bash -lc 'counter=0; while true; do clear; printf "%s\n\nRUN_ID=%s\nbot=%s\nnonce=%s\nutc=%s\ncounter=%s\n\n%s\n%s\n%s\n" "$0" "$1" "$2" "$3" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$counter" "$4" "## ## ## ## ## ## ## ##" "  ## ## ## ## ## ## ##"; counter=$((counter+1)); sleep 1; done' "$title" "$run_id" "{{ inventory_hostname }}" "$nonce" "$marker_color" \
               > /tmp/vtc-screen-share-window.log 2>&1 &
             ;;
         esac
 
         sleep 2
         DISPLAY={{ vtc_display | default(":99") }} wmctrl -r "$title" -b add,above || true
+        window_count="$(DISPLAY={{ vtc_display | default(":99") }} wmctrl -l | awk -v title="$title" 'index($0, title) {count++} END{print count+0}')"
+        if [ "$window_count" -ne 1 ]; then
+          echo "Expected exactly one screen share window titled '$title', found $window_count" >&2
+          DISPLAY={{ vtc_display | default(":99") }} wmctrl -l >&2 || true
+          exit 1
+        fi
       args:
         executable: /bin/bash
       changed_when: false

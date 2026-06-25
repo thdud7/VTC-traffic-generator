@@ -63,6 +63,12 @@
     "video_name": "class_5_6.mov",
     "executable_path": "/home/ubuntu/service/jitsi-electron/run-jitsi.sh",
     "icsi_audio_root": "/tmp/vtc-data/icsi/ICSI/Signals",
+    "audio_loopback_probe": {
+      "enabled": true,
+      "duration_sec": 2.5,
+      "peak_threshold_db": -50.0,
+      "required": true
+    },
     "screen_share_window": {
       "enabled": true,
       "title": "VTC Share Window",
@@ -82,6 +88,7 @@
       "launch_command": "/home/ubuntu/service/jitsi-electron/jitsi-meet.AppImage --no-sandbox --disable-gpu --disable-gpu-compositing --disable-dev-shm-usage --ignore-certificate-errors --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required",
       "ignore_certificate_errors": true,
       "camera_name": "VTC Bot Camera",
+      "microphone_name": "VTC_Microphone",
       "window_title_regex": "Jitsi Meet|testroom|jitsi",
       "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
       "launch_timeout_sec": 20,
@@ -90,10 +97,14 @@
       "url_entry_mode": "room_input",
       "skip_url_entry": false,
       "skip_join_flow": false,
-      "skip_device_selection": true,
+      "skip_device_selection": false,
       "page_load_wait_sec": 8,
       "joined_wait_sec": 8,
       "meeting_window_wait_sec": 10,
+      "trust_shortcut_state": false,
+      "use_cached_control_state": false,
+      "require_exact_screen_share_target": true,
+      "require_exact_screen_share_target_window": true,
       "initial_mic_enabled": true,
       "initial_camera_enabled": true,
       "initial_screen_sharing": false,
@@ -122,6 +133,11 @@
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
+      "sink_name": "VTC_Speaker",
+      "source_name": "VTC_Microphone",
+      "sink_description": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "microphone_name": "VTC_Microphone",
       "voice_name": "male_1-en-US-Wavenet-I"
     },
     {
@@ -131,6 +147,11 @@
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
+      "sink_name": "VTC_Speaker",
+      "source_name": "VTC_Microphone",
+      "sink_description": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "microphone_name": "VTC_Microphone",
       "voice_name": "female_2-en-US-Wavenet-E"
     },
     {
@@ -140,6 +161,11 @@
       "c2_port": 8001,
       "display": ":99",
       "video_device": "/dev/video5",
+      "sink_name": "VTC_Speaker",
+      "source_name": "VTC_Microphone",
+      "sink_description": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "microphone_name": "VTC_Microphone",
       "voice_name": "male_3-en-GB-Wavenet-D"
     }
   ]

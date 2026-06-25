@@ -1,0 +1,143 @@
+---
+- name: Run VTC client media preflight checks
+  hosts: vtc_clients
+  gather_facts: false
+
+  tasks:
+    - name: Ensure preflight artifact directory exists
+      ansible.builtin.file:
+        path: "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+        state: directory
+        mode: "0755"
+
+    - name: Collect media preflight diagnostics
+      ansible.builtin.shell: |
+        set -euo pipefail
+        display={{ vtc_display | default(':99') | quote }}
+        output_dir={{ capture_output_dir | default('/tmp/vtc-captures') | quote }}
+        output_file="$output_dir/{{ inventory_hostname }}.preflight.txt"
+        summary_file="$output_dir/{{ inventory_hostname }}.preflight.json"
+        source_name="VTC_Microphone"
+        video_device={{ video_device | default('/dev/video5') | quote }}
+
+        run_section() {
+          title="$1"
+          shift
+          {
+            printf '\n===== %s =====\n' "$title"
+            "$@" 2>&1 || printf 'COMMAND_FAILED rc=%s\n' "$?"
+          } >> "$output_file"
+        }
+
+        : > "$output_file"
+        printf 'host=%s\nutc=%s\ndisplay=%s\nvideo_device=%s\n' \
+          "{{ inventory_hostname }}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$display" "$video_device" \
+          >> "$output_file"
+
+        run_section "pactl info" pactl info
+        run_section "pactl list short sinks" pactl list short sinks
+        run_section "pactl list short sources" pactl list short sources
+        run_section "pactl get-source-mute VTC_Microphone" pactl get-source-mute "$source_name"
+        run_section "pactl get-source-volume VTC_Microphone" pactl get-source-volume "$source_name"
+        run_section "pactl list source-outputs" pactl list source-outputs
+        run_section "processes" ps -eo pid,ppid,%mem,%cpu,comm,args
+        run_section "pgrep vtc media" pgrep -af 'vtc_generator|jitsi|ffmpeg|dumpcap|tshark|Xvfb|openbox|x11vnc|pulseaudio'
+        run_section "lsmod" lsmod
+        run_section "v4l2-ctl" bash -lc "command -v v4l2-ctl >/dev/null 2>&1 && v4l2-ctl --device=$video_device --all || true"
+        run_section "dumpcap interfaces" dumpcap -D
+        run_section "tshark version" tshark --version
+        run_section "capinfos version" capinfos --version
+        run_section "xdotool visible VTC windows" bash -lc "DISPLAY=$display xdotool search --onlyvisible --name 'VTC|Jitsi|testroom' || true"
+        run_section "wmctrl windows" bash -lc "DISPLAY=$display wmctrl -l || true"
+        run_section "timedatectl" timedatectl status
+
+        source_found=false
+        source_muted=unknown
+        source_volume=""
+        video_found=false
+        dumpcap_ok=false
+        tshark_ok=false
+        capinfos_ok=false
+        display_ok=false
+        ntp_synced=unknown
+
+        if pactl list short sources | awk '{print $2}' | grep -Fx "$source_name" >/dev/null 2>&1; then
+          source_found=true
+        fi
+        if pactl get-source-mute "$source_name" 2>/dev/null | grep -qi 'no'; then
+          source_muted=false
+        elif pactl get-source-mute "$source_name" 2>/dev/null | grep -qi 'yes'; then
+          source_muted=true
+        fi
+        source_volume="$(pactl get-source-volume "$source_name" 2>/dev/null || true)"
+        if [ -e "$video_device" ]; then
+          video_found=true
+        fi
+        if dumpcap -D >/dev/null 2>&1; then
+          dumpcap_ok=true
+        fi
+        if tshark --version >/dev/null 2>&1; then
+          tshark_ok=true
+        fi
+        if capinfos --version >/dev/null 2>&1; then
+          capinfos_ok=true
+        fi
+        if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
+          display_ok=true
+        fi
+        if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi yes; then
+          ntp_synced=true
+        elif timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi no; then
+          ntp_synced=false
+        fi
+
+        export PREFLIGHT_HOST="{{ inventory_hostname }}"
+        export PREFLIGHT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        export PREFLIGHT_DISPLAY="$display"
+        export PREFLIGHT_SOURCE_NAME="$source_name"
+        export PREFLIGHT_SOURCE_FOUND="$source_found"
+        export PREFLIGHT_SOURCE_MUTED="$source_muted"
+        export PREFLIGHT_SOURCE_VOLUME="$source_volume"
+        export PREFLIGHT_VIDEO_DEVICE="$video_device"
+        export PREFLIGHT_VIDEO_FOUND="$video_found"
+        export PREFLIGHT_DUMPCAP_OK="$dumpcap_ok"
+        export PREFLIGHT_TSHARK_OK="$tshark_ok"
+        export PREFLIGHT_CAPINFOS_OK="$capinfos_ok"
+        export PREFLIGHT_DISPLAY_OK="$display_ok"
+        export PREFLIGHT_NTP_SYNCED="$ntp_synced"
+        export PREFLIGHT_DETAILS_PATH="$output_file"
+        python3 -c 'import json, os, sys
+def as_bool(name):
+    return os.environ.get(name, "").lower() == "true"
+summary = {
+    "host": os.environ["PREFLIGHT_HOST"],
+    "utc": os.environ["PREFLIGHT_UTC"],
+    "display": os.environ["PREFLIGHT_DISPLAY"],
+    "source_name": os.environ["PREFLIGHT_SOURCE_NAME"],
+    "source_found": as_bool("PREFLIGHT_SOURCE_FOUND"),
+    "source_muted": os.environ["PREFLIGHT_SOURCE_MUTED"],
+    "source_volume": os.environ["PREFLIGHT_SOURCE_VOLUME"],
+    "video_device": os.environ["PREFLIGHT_VIDEO_DEVICE"],
+    "video_found": as_bool("PREFLIGHT_VIDEO_FOUND"),
+    "dumpcap_ok": as_bool("PREFLIGHT_DUMPCAP_OK"),
+    "tshark_ok": as_bool("PREFLIGHT_TSHARK_OK"),
+    "capinfos_ok": as_bool("PREFLIGHT_CAPINFOS_OK"),
+    "display_ok": as_bool("PREFLIGHT_DISPLAY_OK"),
+    "ntp_synced": os.environ["PREFLIGHT_NTP_SYNCED"],
+    "details_path": os.environ["PREFLIGHT_DETAILS_PATH"],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as outfile:
+    json.dump(summary, outfile, indent=2, sort_keys=True)
+    outfile.write("\n")
+' "$summary_file"
+
+        test "$source_found" = true
+        test "$source_muted" = false
+        test "$video_found" = true
+        test "$dumpcap_ok" = true
+        test "$tshark_ok" = true
+        test "$capinfos_ok" = true
+        test "$display_ok" = true
+      args:
+        executable: /bin/bash
+      changed_when: false

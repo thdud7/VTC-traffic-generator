@@ -12,7 +12,7 @@ from pathlib import Path, PurePath
 import asyncio
 import concurrent.futures
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
@@ -54,7 +54,7 @@ connection_status = {
 def append_action_log(log_config, event_name, details=None):
     details = dict(details or {})
     path = action_log_path(log_config)
-    timestamp = datetime.now().isoformat(timespec="seconds")
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     bot_name = log_config.get("bot_name") or details.get("bot_name") or log_config.get("role", "unknown")
     line = (
         f"{timestamp}\t"
@@ -674,6 +674,7 @@ def initialize_vtc_client():
         pulse.mute(source, False)
 
     set_default_pulse_devices(sink_name, source_name)
+    run_audio_loopback_probe()
 
     # Check for v4l2 virtual webcam kernel module
     if 'v4l2loopback' not in str(subprocess.run(['lsmod'], capture_output=True)):
@@ -715,6 +716,186 @@ def set_default_pulse_devices(sink_name, source_name):
         },
     )
     return results
+
+
+def audio_artifact_dir():
+    bot_name = str(config.get("bot_name") or config.get("role") or "bot")
+    configured_dir = config.get("artifact_dir")
+    if configured_dir:
+        return Path(str(configured_dir)).expanduser()
+    return Path(f"/tmp/vtc-{bot_name}/artifacts")
+
+
+def run_audio_loopback_probe():
+    probe_config = config.get("audio_loopback_probe", {})
+    if probe_config is None:
+        probe_config = {}
+    if not isinstance(probe_config, dict):
+        probe_config = {}
+    if not bool(probe_config.get("enabled", False)):
+        return True
+
+    audio_devices = virtual_audio_config()
+    sink_name = audio_devices["sink_name"]
+    source_name = audio_devices["source_name"]
+    duration_sec = float(probe_config.get("duration_sec", 2.5))
+    threshold_db = float(probe_config.get("peak_threshold_db", -50.0))
+    artifact_dir = audio_artifact_dir() / "preflight"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    tone_path = artifact_dir / "audio-loopback-tone.wav"
+    recorded_path = artifact_dir / "audio-loopback-recorded.wav"
+    result_path = artifact_dir / "audio-loopback-probe.json"
+
+    emit_event(
+        config,
+        "audio_loopback_probe_start",
+        {
+            "sink": sink_name,
+            "source": source_name,
+            "duration_sec": duration_sec,
+            "recorded_path": str(recorded_path),
+        },
+    )
+
+    result = {
+        "sink": sink_name,
+        "source": source_name,
+        "duration_sec": duration_sec,
+        "tone_path": str(tone_path),
+        "recorded_path": str(recorded_path),
+        "peak_threshold_db": threshold_db,
+        "success": False,
+    }
+
+    try:
+        tone = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=1000:duration={duration_sec}",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                str(tone_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(10, int(duration_sec) + 5),
+        )
+        result["tone_returncode"] = tone.returncode
+        result["tone_stderr"] = tone.stderr.strip()
+        if tone.returncode != 0:
+            raise RuntimeError(f"failed to generate loopback tone: {tone.stderr.strip()}")
+
+        recorder = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-y",
+                "-f",
+                "pulse",
+                "-i",
+                source_name,
+                "-t",
+                str(duration_sec + 0.5),
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                str(recorded_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.35)
+        player = subprocess.Popen(
+            ["paplay", "-d", sink_name, str(tone_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        result["record_pid"] = recorder.pid
+        result["play_pid"] = player.pid
+        play_stdout, play_stderr = player.communicate(timeout=max(10, int(duration_sec) + 5))
+        record_stdout, record_stderr = recorder.communicate(timeout=max(10, int(duration_sec) + 8))
+        result.update(
+            {
+                "play_returncode": player.returncode,
+                "play_stdout": play_stdout.strip(),
+                "play_stderr": play_stderr.strip(),
+                "record_returncode": recorder.returncode,
+                "record_stdout": record_stdout.strip(),
+                "record_stderr": record_stderr.strip(),
+            }
+        )
+        if player.returncode != 0:
+            raise RuntimeError(f"loopback paplay failed: {play_stderr.strip()}")
+        if recorder.returncode != 0:
+            raise RuntimeError(f"loopback record failed: {record_stderr.strip()}")
+
+        volume = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-i",
+                str(recorded_path),
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        volume_text = "\n".join([volume.stdout, volume.stderr])
+        result["volumedetect_returncode"] = volume.returncode
+        result["volumedetect_output"] = volume_text
+        max_volume = parse_volumedetect_value(volume_text, "max_volume")
+        mean_volume = parse_volumedetect_value(volume_text, "mean_volume")
+        result["max_volume_db"] = max_volume
+        result["mean_volume_db"] = mean_volume
+        result["recorded_size_bytes"] = recorded_path.stat().st_size if recorded_path.exists() else 0
+
+        if max_volume is None:
+            raise RuntimeError("loopback probe could not parse max_volume")
+        if max_volume <= threshold_db:
+            raise RuntimeError(f"loopback probe peak too low: {max_volume} dB")
+
+        result["success"] = True
+        event_name = "audio_loopback_probe_passed"
+        return True
+    except Exception as exc:
+        result["error"] = str(exc)
+        event_name = "audio_loopback_probe_failed"
+        if bool(probe_config.get("required", True)):
+            raise
+        return False
+    finally:
+        result_path.write_text(json.dumps(result, sort_keys=True, indent=2), encoding="utf-8")
+        emit_event(config, event_name, result)
+        append_action_log(config, event_name, result)
+
+
+def parse_volumedetect_value(text, key):
+    marker = f"{key}:"
+    for line in text.splitlines():
+        if marker not in line:
+            continue
+        value = line.split(marker, 1)[1].strip().split(" ", 1)[0]
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
 
 
 # XMLRPC
@@ -768,6 +949,15 @@ def start_speech(duration_sec, metadata=None):
 
     audio_file_path = metadata.get("audio_file_path") or choose_icsi_audio_file(metadata)
     if audio_file_path:
+        audio_path = Path(str(audio_file_path)).expanduser()
+        if not audio_path.exists():
+            emit_event(config, "audio_playback_failed", {"error": "audio file does not exist", **metadata})
+            append_action_log(config, "audio_playback_failed", {"error": "audio file does not exist", **metadata})
+            return False
+        if duration_sec <= 0:
+            emit_event(config, "audio_playback_failed", {"error": "invalid duration", **metadata})
+            append_action_log(config, "audio_playback_failed", {"error": "invalid duration", **metadata})
+            return False
         metadata["audio_file_path"] = audio_file_path
         emit_event(
             config,
@@ -848,7 +1038,7 @@ def speech_audio_segment_worker(duration_sec, metadata):
         audio_file_path = metadata.get("audio_file_path")
         audio_start_sec = float(metadata.get("audio_start_sec", 0))
         if audio_file_path:
-            play_audio_segment(audio_file_path, audio_start_sec, duration_sec)
+            play_audio_segment(audio_file_path, audio_start_sec, duration_sec, metadata)
     finally:
         emit_event(
             config,
@@ -1055,10 +1245,54 @@ def choose_audio_file():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
-    subprocess.run(['paplay', '-d', virtual_audio_config()["sink_name"], audio_file_path], capture_output=True)
+    audio_devices = virtual_audio_config()
+    details = {
+        "audio_file_path": str(audio_file_path),
+        "sink": audio_devices["sink_name"],
+        "source": audio_devices["source_name"],
+    }
+    emit_event(config, "audio_playback_start", details)
+    append_action_log(config, "audio_playback_start", details)
+    try:
+        process = subprocess.Popen(
+            ["paplay", "-d", audio_devices["sink_name"], audio_file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        emit_event(config, "audio_playback_process_started", {**details, "pid": process.pid})
+        stdout, stderr = process.communicate()
+        done_details = {
+            **details,
+            "pid": process.pid,
+            "returncode": process.returncode,
+            "stdout": stdout.strip(),
+            "stderr": stderr.strip(),
+        }
+        event_name = "audio_playback_done" if process.returncode == 0 else "audio_playback_failed"
+        emit_event(config, event_name, done_details)
+        append_action_log(config, event_name, done_details)
+        return process.returncode == 0
+    except Exception as exc:
+        failed_details = {**details, "error": str(exc)}
+        emit_event(config, "audio_playback_failed", failed_details)
+        append_action_log(config, "audio_playback_failed", failed_details)
+        return False
 
 
-def play_audio_segment(audio_file_path, start_sec, duration_sec):
+def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
+    metadata = dict(metadata or {})
+    audio_devices = virtual_audio_config()
+    details = {
+        **metadata,
+        "audio_file_path": str(audio_file_path),
+        "audio_start_sec": float(start_sec),
+        "duration_sec": float(duration_sec),
+        "sink": audio_devices["sink_name"],
+        "source": audio_devices["source_name"],
+    }
+    emit_event(config, "audio_playback_start", details)
+    append_action_log(config, "audio_playback_start", details)
     ffmpeg_process = subprocess.Popen(
         [
             'ffmpeg',
@@ -1076,18 +1310,48 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec):
             'pipe:1',
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=False,
     )
+    paplay_process = None
     try:
-        subprocess.run(
-            ['paplay', '-d', virtual_audio_config()["sink_name"]],
+        paplay_process = subprocess.Popen(
+            ['paplay', '-d', audio_devices["sink_name"]],
             stdin=ffmpeg_process.stdout,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
         )
-    finally:
+        emit_event(
+            config,
+            "audio_playback_process_started",
+            {**details, "ffmpeg_pid": ffmpeg_process.pid, "paplay_pid": paplay_process.pid},
+        )
         if ffmpeg_process.stdout:
             ffmpeg_process.stdout.close()
+        paplay_stdout, paplay_stderr = paplay_process.communicate()
+        ffmpeg_stderr = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else b""
         ffmpeg_process.wait()
+        done_details = {
+            **details,
+            "ffmpeg_pid": ffmpeg_process.pid,
+            "paplay_pid": paplay_process.pid,
+            "ffmpeg_returncode": ffmpeg_process.returncode,
+            "paplay_returncode": paplay_process.returncode,
+            "ffmpeg_stderr": ffmpeg_stderr.decode("utf-8", errors="replace").strip() if ffmpeg_stderr else "",
+            "paplay_stdout": paplay_stdout.decode("utf-8", errors="replace").strip() if paplay_stdout else "",
+            "paplay_stderr": paplay_stderr.decode("utf-8", errors="replace").strip() if paplay_stderr else "",
+        }
+        success = ffmpeg_process.returncode == 0 and paplay_process.returncode == 0
+        event_name = "audio_playback_done" if success else "audio_playback_failed"
+        emit_event(config, event_name, done_details)
+        append_action_log(config, event_name, done_details)
+        return success
+    finally:
+        if paplay_process is not None and paplay_process.poll() is None:
+            paplay_process.terminate()
+        if ffmpeg_process.poll() is None:
+            ffmpeg_process.terminate()
 
 
 def video_stream_config():

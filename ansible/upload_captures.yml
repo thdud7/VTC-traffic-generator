@@ -52,6 +52,14 @@
           - "*.analysis.txt"
           - "--include"
           - "*.metadata.json"
+          - "--include"
+          - "*.media-analysis.json"
+          - "--include"
+          - "*.media-analysis.md"
+          - "--include"
+          - "*.preflight.json"
+          - "--include"
+          - "*.preflight.txt"
       changed_when: true
 
     - name: Upload client logs
@@ -86,7 +94,13 @@
         find "{{ capture_output_dir | default('/tmp/vtc-captures') }}" \
           -maxdepth 1 \
           -type f \
-          \( -name "*.pcapng" -o -name "*.analysis.txt" -o -name "*.metadata.json" \) \
+          \( -name "*.pcapng" \
+             -o -name "*.analysis.txt" \
+             -o -name "*.metadata.json" \
+             -o -name "*.media-analysis.json" \
+             -o -name "*.media-analysis.md" \
+             -o -name "*.preflight.json" \
+             -o -name "*.preflight.txt" \) \
           -delete
       args:
         executable: /bin/bash

@@ -40,6 +40,8 @@ class PacketCaptureSession:
         self.process: subprocess.Popen | None = None
         self.pcapng_path: Path | None = None
         self.analysis_path: Path | None = None
+        self.media_analysis_json_path: Path | None = None
+        self.media_analysis_md_path: Path | None = None
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "PacketCaptureSession":
@@ -182,6 +184,7 @@ class PacketCaptureSession:
 
         result = subprocess.run(command, capture_output=True, text=True)
         self.analysis_path.write_text(result.stdout, encoding="utf-8")
+        media_result = self._analyze_media()
         self._write_metadata(result)
 
         emit_event(
@@ -190,11 +193,64 @@ class PacketCaptureSession:
             {
                 "pcapng_path": str(self.pcapng_path),
                 "analysis_path": str(self.analysis_path),
+                "media_analysis_json_path": str(self.media_analysis_json_path) if self.media_analysis_json_path else None,
+                "media_analysis_md_path": str(self.media_analysis_md_path) if self.media_analysis_md_path else None,
                 "display_filter": self.display_filter,
                 "returncode": result.returncode,
                 "stderr": result.stderr.strip(),
+                "media_returncode": media_result.returncode if media_result else None,
+                "media_stderr": media_result.stderr.strip() if media_result else None,
             },
         )
+
+    def _analyze_media(self) -> subprocess.CompletedProcess[str] | None:
+        if not self.pcapng_path:
+            return None
+
+        analyzer_path = Path(__file__).resolve().parents[1] / "tools" / "analyze_media_capture.py"
+        if not analyzer_path.exists():
+            return None
+
+        packet_capture = self.config.get("packet_capture", {})
+        if not isinstance(packet_capture, Mapping):
+            packet_capture = {}
+
+        self.media_analysis_json_path = self.pcapng_path.with_suffix(".media-analysis.json")
+        self.media_analysis_md_path = self.pcapng_path.with_suffix(".media-analysis.md")
+        command = [
+            "python3",
+            str(analyzer_path),
+            str(self.pcapng_path),
+            "--output-json",
+            str(self.media_analysis_json_path),
+            "--output-md",
+            str(self.media_analysis_md_path),
+        ]
+        if packet_capture.get("client_ip"):
+            command.extend(["--client-ip", str(packet_capture["client_ip"])])
+        if packet_capture.get("jvb_ip"):
+            command.extend(["--jvb-ip", str(packet_capture["jvb_ip"])])
+        if packet_capture.get("jvb_port"):
+            command.extend(["--jvb-port", str(packet_capture["jvb_port"])])
+
+        event_log_path = self._event_log_path()
+        if event_log_path and event_log_path.exists():
+            command.extend(["--events-jsonl", str(event_log_path)])
+
+        result = subprocess.run(command, capture_output=True, text=True)
+        emit_event(
+            self.config,
+            "packet_media_analysis_done" if result.returncode == 0 else "packet_media_analysis_failed",
+            {
+                "pcapng_path": str(self.pcapng_path),
+                "media_analysis_json_path": str(self.media_analysis_json_path),
+                "media_analysis_md_path": str(self.media_analysis_md_path),
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            },
+        )
+        return result
 
     def _write_metadata(self, result: subprocess.CompletedProcess[str]) -> None:
         if not self.pcapng_path:
@@ -204,6 +260,8 @@ class PacketCaptureSession:
         metadata = {
             "pcapng_path": str(self.pcapng_path),
             "analysis_path": str(self.analysis_path) if self.analysis_path else None,
+            "media_analysis_json_path": str(self.media_analysis_json_path) if self.media_analysis_json_path else None,
+            "media_analysis_md_path": str(self.media_analysis_md_path) if self.media_analysis_md_path else None,
             "bot_id": get_bot_id(self.config),
             "service": get_service_name(self.config),
             "interface": self.interface,
@@ -213,6 +271,14 @@ class PacketCaptureSession:
             "tshark_stderr": result.stderr.strip(),
         }
         metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
+
+    def _event_log_path(self) -> Path | None:
+        adapter_config = self.config.get("adapter_config", {})
+        if isinstance(adapter_config, Mapping) and adapter_config.get("event_log_path"):
+            return Path(str(adapter_config["event_log_path"])).expanduser()
+        if self.config.get("event_log_path"):
+            return Path(str(self.config["event_log_path"])).expanduser()
+        return None
 
     def _file_stem(self) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -4,10 +4,12 @@
 import argparse
 import json
 import re
+import secrets
 import subprocess
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -134,7 +136,7 @@ def build_remote_config(experiment, client):
         "adapter_log_path": str(client.get("adapter_log_path", f"/tmp/vtc-{bot_name}/adapter.log")),
         "restart_existing": bool(client.get("restart_existing", False)),
     }
-    screen_share_window = merge_mapping(defaults.get("screen_share_window"), client.get("screen_share_window"))
+    screen_share_window = resolve_screen_share_window(experiment, client, defaults)
     if screen_share_window.get("enabled"):
         adapter_config.setdefault(
             "screen_share_target",
@@ -144,6 +146,14 @@ def build_remote_config(experiment, client):
     executable_path = client.get("executable_path") or defaults.get("executable_path")
     if executable_path:
         adapter_config.setdefault("executable_path", str(executable_path))
+
+    packet_capture = merge_mapping(defaults.get("packet_capture"), client.get("packet_capture"))
+    if packet_capture:
+        packet_capture.setdefault("client_ip", client["c2_host"])
+        parsed_vtc_url = urlparse(str(experiment.get("vtc_url") or experiment.get("room_url") or ""))
+        if parsed_vtc_url.hostname:
+            packet_capture.setdefault("jvb_ip", parsed_vtc_url.hostname)
+        packet_capture.setdefault("jvb_port", 10000)
 
     remote = {
         "role": "client",
@@ -165,12 +175,19 @@ def build_remote_config(experiment, client):
         "video_name": str(client.get("video_name", defaults.get("video_name", ""))),
         "virtual_audio": virtual_audio,
         "virtual_video": virtual_video,
-        "packet_capture": client.get("packet_capture", defaults.get("packet_capture", {"enabled": False})),
+        "packet_capture": packet_capture or {"enabled": False},
         "adapter_config": adapter_config,
         "version": experiment.get("version", "VTC traffic generator X"),
     }
 
-    for optional_key in ("icsi_audio_root", "icsi_audio_meeting_dir", "icsi", "adapter_action_timeout_sec"):
+    for optional_key in (
+        "icsi_audio_root",
+        "icsi_audio_meeting_dir",
+        "icsi",
+        "adapter_action_timeout_sec",
+        "audio_loopback_probe",
+        "artifact_dir",
+    ):
         if optional_key in client:
             remote[optional_key] = client[optional_key]
         elif optional_key in defaults:
@@ -253,7 +270,7 @@ def render_inventory(experiment, clients, output_dir):
         event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events.jsonl"))
         app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron.log"))
         adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter.log"))
-        screen_share_window = merge_mapping(defaults.get("screen_share_window"), client.get("screen_share_window"))
+        screen_share_window = resolve_screen_share_window(experiment, client, defaults)
         screen_share_window_enabled = bool(screen_share_window.get("enabled", False))
         screen_share_window_title = str(screen_share_window.get("title") or f"VTC Share Window - {client['name']}")
         screen_share_window_html_path = str(
@@ -264,6 +281,9 @@ def render_inventory(experiment, clients, output_dir):
             screen_share_window.get("url")
             or f"file://{screen_share_window_html_path}"
         )
+        screen_share_nonce = str(screen_share_window.get("nonce", ""))
+        screen_share_run_id = str(screen_share_window.get("run_id", experiment.get("run_id", "")))
+        screen_share_marker_color = str(screen_share_window.get("marker_color", "#111111"))
         parts = [
             client["name"],
             f"ansible_host={quote_inventory_value(client['host'])}",
@@ -283,6 +303,9 @@ def render_inventory(experiment, clients, output_dir):
             f"screen_share_window_title={quote_inventory_value(screen_share_window_title)}",
             f"screen_share_window_html_path={quote_inventory_value(screen_share_window_html_path)}",
             f"screen_share_window_url={quote_inventory_value(screen_share_window_url)}",
+            f"screen_share_nonce={quote_inventory_value(screen_share_nonce)}",
+            f"screen_share_run_id={quote_inventory_value(screen_share_run_id)}",
+            f"screen_share_marker_color={quote_inventory_value(screen_share_marker_color)}",
         ]
         if launcher_path:
             parts.append(f"jitsi_electron_launcher={quote_inventory_value(launcher_path)}")
@@ -405,6 +428,32 @@ def merge_mapping(base, override):
     if isinstance(override, dict):
         merged.update(override)
     return merged
+
+
+def resolve_screen_share_window(experiment, client, defaults):
+    screen_share_window = merge_mapping(defaults.get("screen_share_window"), client.get("screen_share_window"))
+    if not screen_share_window.get("enabled"):
+        return screen_share_window
+    if screen_share_window.get("unique_per_run", True) is False:
+        return screen_share_window
+
+    windows = experiment.setdefault("_screen_share_windows", {})
+    bot_name = client["name"]
+    if bot_name not in windows:
+        run_log_id = experiment_run_log_id(experiment)
+        nonce = secrets.token_hex(16)
+        marker_color = "#" + secrets.token_hex(3)
+        title = f"VTC Share Window {run_log_id} {bot_name} {nonce[:12]}"
+        default_html_path = f"/home/ubuntu/vtc_data/screen_share/{run_log_id}-{bot_name}.html"
+        windows[bot_name] = {
+            "title": title,
+            "html_path": str(screen_share_window.get("html_path") or default_html_path),
+            "url": screen_share_window.get("url") or f"file://{screen_share_window.get('html_path') or default_html_path}",
+            "nonce": nonce,
+            "run_id": str(experiment.get("run_id") or run_log_id),
+            "marker_color": marker_color,
+        }
+    return {**screen_share_window, **windows[bot_name]}
 
 
 def quote_inventory_value(value):

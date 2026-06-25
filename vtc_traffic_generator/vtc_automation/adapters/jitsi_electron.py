@@ -87,9 +87,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         self.accessibility_dump_path = self.adapter_config.get("accessibility_dump_path")
         self.window_id = None
         self.process = None
-        self.mic_enabled = self._optional_bool("initial_mic_enabled")
-        self.camera_enabled = self._optional_bool("initial_camera_enabled")
-        self.screen_sharing = self._optional_bool("initial_screen_sharing", False)
+        self.mic_enabled = None
+        self.camera_enabled = None
+        self.screen_sharing = None
 
     async def launch(self):
         emit_event(
@@ -160,10 +160,15 @@ class JitsiElectronAdapter(ServiceAdapter):
         camera_name = self.adapter_config.get("camera_name")
         microphone_name = self.adapter_config.get("microphone_name")
         if not self.adapter_config.get("skip_device_selection", False) and (camera_name or microphone_name):
-            await self.select_devices(
+            if not await self.select_devices(
                 camera_name=str(camera_name or ""),
                 microphone_name=str(microphone_name or ""),
-            )
+            ):
+                self._write_device_diagnostics("device_selection_failed")
+                raise RuntimeError(
+                    "Jitsi Electron device selection failed: "
+                    f"camera={camera_name!r} microphone={microphone_name!r}"
+                )
 
         if not self.adapter_config.get("skip_join_flow", False):
             await self._enter_display_name(display_name)
@@ -225,6 +230,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         opened = self._open_device_settings()
         self.dump_accessibility_tree("settings_opened")
         if not opened:
+            self._write_device_diagnostics("device_settings_open_failed")
             emit_event(
                 self.config,
                 "adapter_error",
@@ -241,11 +247,34 @@ class JitsiElectronAdapter(ServiceAdapter):
             video_selected = self._select_device_name("video", camera_name)
 
         self._run_xdotool(["key", "Escape"], check=False)
-        return audio_selected and video_selected
+        success = audio_selected and video_selected
+        if not success:
+            self._write_device_diagnostics("device_selection_incomplete")
+        return success
 
     async def is_in_meeting(self):
         await asyncio.sleep(float(self.adapter_config.get("joined_wait_sec", 3)))
-        return self.window_id is not None
+        evidence = self._find_in_meeting_evidence()
+        if evidence:
+            emit_event(self.config, "meeting_state_verified", evidence, self.service_name)
+            return True
+
+        if self.window_id is not None and self._optional_bool("allow_window_id_meeting_fallback", False):
+            emit_event(
+                self.config,
+                "meeting_state_unverified_fallback",
+                {"window_id": self.window_id, "success": True},
+                self.service_name,
+            )
+            return True
+
+        emit_event(
+            self.config,
+            "meeting_state_unverified",
+            {"window_id": self.window_id, "success": False},
+            self.service_name,
+        )
+        return False
 
     def dump_accessibility_tree(self, stage: str | None = None, output_path: str | None = None) -> bool:
         output_path = output_path or self._dump_path(stage)
@@ -431,14 +460,14 @@ class JitsiElectronAdapter(ServiceAdapter):
             after_state = self._infer_control_state(control)
             if self._trust_shortcut_state() and after_state == before_state:
                 after_state = desired_state
-            if after_state == desired_state or after_state is None:
+            if after_state == desired_state:
                 self._set_cached_state(control, desired_state)
                 self._emit_action_event(
                     event_name,
                     control,
                     method,
                     before_state,
-                    desired_state if after_state is None else after_state,
+                    after_state,
                     True,
                 )
                 return True
@@ -447,7 +476,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         if method:
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
             after_state = self._infer_control_state(control)
-            success = after_state == desired_state or after_state is None
+            success = after_state == desired_state
             if success:
                 self._set_cached_state(control, desired_state)
             self._emit_action_event(event_name, control, method, before_state, after_state, success)
@@ -459,7 +488,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             self._click_coordinate(coords)
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
             after_state = self._infer_control_state(control)
-            success = after_state == desired_state or after_state is None
+            success = after_state == desired_state
             if success:
                 self._set_cached_state(control, desired_state)
             self._emit_action_event(event_name, control, "coordinate", before_state, after_state, success)
@@ -488,7 +517,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             after_state = self._infer_control_state("screen_share")
             if self._trust_shortcut_state() and after_state == before_state:
                 after_state = desired_state
-            success = after_state == desired_state or after_state is None
+            success = after_state == desired_state
             if success:
                 self.screen_sharing = desired_state
             self._emit_action_event(event_name, "screen_share", method, before_state, after_state, success)
@@ -498,9 +527,11 @@ class JitsiElectronAdapter(ServiceAdapter):
         if method:
             if desired_state:
                 self.dump_accessibility_tree("screen_share_picker_opened")
-                self._select_screen_share_target()
+                if not self._select_screen_share_target():
+                    self._emit_screen_share_error("screen share target could not be selected", before_state, method)
+                    return False
             after_state = self._infer_control_state("screen_share")
-            success = after_state == desired_state or after_state is None
+            success = after_state == desired_state
             if success:
                 self.screen_sharing = desired_state
             self._emit_action_event(event_name, "screen_share", method, before_state, after_state, success)
@@ -511,9 +542,11 @@ class JitsiElectronAdapter(ServiceAdapter):
             self._emit_fallback("screen_share_button", "coordinate", "shortcut/accessibility unavailable")
             self._click_coordinate(coords)
             if desired_state:
-                self._select_screen_share_target()
+                if not self._select_screen_share_target():
+                    self._emit_screen_share_error("screen share target could not be selected", before_state, "coordinate")
+                    return False
             after_state = self._infer_control_state("screen_share")
-            success = after_state == desired_state or after_state is None
+            success = after_state == desired_state
             if success:
                 self.screen_sharing = desired_state
             self._emit_action_event(event_name, "screen_share", "coordinate", before_state, after_state, success)
@@ -571,9 +604,19 @@ class JitsiElectronAdapter(ServiceAdapter):
         target_title = self.adapter_config.get("screen_share_target")
         if not target_title:
             return True
+        if self._optional_bool("require_exact_screen_share_target_window", True):
+            exact_count = self._target_window_count_exact(str(target_title))
+            if exact_count != 1:
+                emit_event(
+                    self.config,
+                    "screen_share_target_window_check_failed",
+                    {"target": str(target_title), "exact_count": exact_count, "success": False},
+                    self.service_name,
+                )
+                return False
 
         method = self._click_accessible_names([str(target_title)], [], partial=False)
-        if not method:
+        if not method and not self._optional_bool("require_exact_screen_share_target", True):
             method = self._click_accessible_names([str(target_title)], [], partial=True)
         if not method:
             coords = self._coordinate("screen_share_target")
@@ -583,7 +626,7 @@ class JitsiElectronAdapter(ServiceAdapter):
                 method = "coordinate"
 
         if not method:
-            if self._target_window_exists(str(target_title)) and self._optional_bool("trust_screen_share_target_window", True):
+            if self._target_window_exists(str(target_title)) and self._optional_bool("trust_screen_share_target_window", False):
                 self._emit_fallback(
                     "screen_share_target",
                     "keyboard",
@@ -609,12 +652,12 @@ class JitsiElectronAdapter(ServiceAdapter):
             state = self._infer_state_from_accessibility(self._names("mic_currently_on"), self._names("mic_currently_off"))
             if state is not None:
                 self.mic_enabled = state
-            return self.mic_enabled if state is None else state
+            return self.mic_enabled if state is None and self._use_cached_control_state() else state
         if control == "camera":
             state = self._infer_state_from_accessibility(self._names("camera_currently_on"), self._names("camera_currently_off"))
             if state is not None:
                 self.camera_enabled = state
-            return self.camera_enabled if state is None else state
+            return self.camera_enabled if state is None and self._use_cached_control_state() else state
         if control == "screen_share":
             state = self._infer_state_from_accessibility(
                 self._names("screen_share_currently_on"),
@@ -622,7 +665,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             )
             if state is not None:
                 self.screen_sharing = state
-            return self.screen_sharing if state is None else state
+            return self.screen_sharing if state is None and self._use_cached_control_state() else state
         return None
 
     def _infer_state_from_accessibility(self, true_names: list[str], false_names: list[str]) -> bool | None:
@@ -660,6 +703,17 @@ class JitsiElectronAdapter(ServiceAdapter):
         result = self._run_xdotool(["search", "--name", title], check=False)
         return result.returncode == 0 and bool(result.stdout.strip())
 
+    def _target_window_count_exact(self, title: str) -> int:
+        result = self._run_command(["wmctrl", "-l"], check=False)
+        if result.returncode != 0:
+            return 0
+        count = 0
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) == 4 and parts[3] == title:
+                count += 1
+        return count
+
     def _activate_window(self):
         if self.window_id:
             self._run_xdotool(["windowactivate", "--sync", str(self.window_id)], check=False)
@@ -690,7 +744,10 @@ class JitsiElectronAdapter(ServiceAdapter):
         return bool(value)
 
     def _trust_shortcut_state(self) -> bool:
-        return self._optional_bool("trust_shortcut_state", True) is True
+        return self._optional_bool("trust_shortcut_state", False) is True
+
+    def _use_cached_control_state(self) -> bool:
+        return self._optional_bool("use_cached_control_state", False) is True
 
     def _click_coordinate(self, coords: tuple[int, int]):
         x, y = coords
@@ -773,6 +830,60 @@ class JitsiElectronAdapter(ServiceAdapter):
         if "{stage}" in str(self.accessibility_dump_path):
             return str(self.accessibility_dump_path).format(stage=stage or "tree")
         return str(self.accessibility_dump_path)
+
+    def _diagnostic_path(self, stage: str) -> Path:
+        configured = self.adapter_config.get("diagnostic_dir")
+        if configured:
+            base = Path(str(configured)).expanduser()
+        else:
+            base = Path(self.adapter_log_path).expanduser().parent / "diagnostics"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{stage}.json"
+
+    def _write_device_diagnostics(self, stage: str) -> str:
+        diagnostics: dict[str, Any] = {
+            "stage": stage,
+            "display": self.display,
+            "window_id": self.window_id,
+            "commands": {},
+        }
+        for key, command in {
+            "pactl_info": ["pactl", "info"],
+            "pactl_sinks": ["pactl", "list", "short", "sinks"],
+            "pactl_sources": ["pactl", "list", "short", "sources"],
+            "pactl_source_outputs": ["pactl", "list", "source-outputs"],
+            "media_windows": ["wmctrl", "-l"],
+        }.items():
+            result = self._run_command(command, check=False)
+            diagnostics["commands"][key] = {
+                "command": command,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        path = self._diagnostic_path(stage)
+        path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+        self.dump_accessibility_tree(stage)
+        emit_event(
+            self.config,
+            "device_diagnostics_saved",
+            {"stage": stage, "path": str(path), "success": True},
+            self.service_name,
+        )
+        return str(path)
+
+    def _find_in_meeting_evidence(self) -> dict[str, Any] | None:
+        evidence = {}
+        for key in ("hangup_button", "mic_currently_on", "mic_currently_off", "camera_currently_on", "camera_currently_off"):
+            found = self._find_accessible_names(self._names(key), self._roles(key))
+            if found:
+                evidence[key] = found
+        if "hangup_button" in evidence or (
+            ("mic_currently_on" in evidence or "mic_currently_off" in evidence)
+            and ("camera_currently_on" in evidence or "camera_currently_off" in evidence)
+        ):
+            return {"success": True, "evidence_keys": sorted(evidence.keys()), "window_id": self.window_id}
+        return None
 
     def _window_regex_for_accessibility(self) -> str:
         return self.adapter_config.get("accessibility_window_regex") or self._window_title_regexes()[0]
