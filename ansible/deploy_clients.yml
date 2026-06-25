@@ -105,6 +105,8 @@
           modprobe v4l2loopback video_nr={{ video_nr | default(5) }} exclusive_caps=1
         fi
         test -e {{ video_device | default('/dev/video5') }}
+        usermod -aG video {{ ansible_user | default('ubuntu') }}
+        chmod 0666 {{ video_device | default('/dev/video5') }}
       args:
         executable: /bin/bash
 
@@ -171,7 +173,7 @@
         x11vnc -storepasswd "123456" "$vnc_password_file" >/dev/null
         chmod 0600 "$vnc_password_file"
 
-        if pgrep -af x11vnc | grep -F -- "-rfbport 5900" | grep -F -- "-viewonly" >/dev/null 2>&1 \
+        if ps -C x11vnc -o args= | grep -F -- "-rfbport 5900" | grep -F -- "-viewonly" >/dev/null 2>&1 \
           && ss -ltnp 2>/dev/null | grep -F ":5900" >/dev/null 2>&1; then
           exit 0
         fi
