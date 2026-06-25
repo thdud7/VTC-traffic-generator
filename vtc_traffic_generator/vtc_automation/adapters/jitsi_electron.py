@@ -131,6 +131,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             )
 
         self.window_id = self._wait_for_window()
+        self._position_window_after_launch()
         emit_event(
             self.config,
             "adapter_launch_done",
@@ -572,6 +573,19 @@ class JitsiElectronAdapter(ServiceAdapter):
                 last_error = result.stderr or result.stdout
             time.sleep(0.5)
         raise RuntimeError(f"Timed out waiting for Jitsi Electron window. Last output: {last_error}")
+
+    def _position_window_after_launch(self) -> None:
+        geometry = self.adapter_config.get("window_geometry")
+        if not isinstance(geometry, Mapping) or not self.window_id:
+            return
+        width = geometry.get("width")
+        height = geometry.get("height")
+        left = geometry.get("left", 0)
+        top = geometry.get("top", 0)
+        if width and height:
+            self._run_xdotool(["windowsize", str(self.window_id), str(int(width)), str(int(height))], check=False)
+        self._run_xdotool(["windowmove", str(self.window_id), str(int(left)), str(int(top))], check=False)
+        self._run_xdotool(["windowactivate", "--sync", str(self.window_id)], check=False)
 
     async def _type_url(self, vtc_url: str):
         self._activate_window()

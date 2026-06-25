@@ -91,6 +91,12 @@
       "microphone_name": "VTC_Microphone",
       "window_title_regex": "Jitsi Meet|testroom|jitsi",
       "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
+      "window_geometry": {
+        "left": 0,
+        "top": 0,
+        "width": 480,
+        "height": 720
+      },
       "launch_timeout_sec": 20,
       "action_timeout_sec": 10,
       "reset_user_data_dir": true,
