@@ -79,3 +79,15 @@
         executable: /bin/bash
       changed_when: true
       when: capture_upload_include_logs | default(true) | bool
+
+    - name: Delete local capture artifacts after upload
+      ansible.builtin.shell: |
+        set -euo pipefail
+        find "{{ capture_output_dir | default('/tmp/vtc-captures') }}" \
+          -maxdepth 1 \
+          -type f \
+          \( -name "*.pcapng" -o -name "*.analysis.txt" -o -name "*.metadata.json" \) \
+          -delete
+      args:
+        executable: /bin/bash
+      changed_when: true
