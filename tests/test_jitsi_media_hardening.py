@@ -36,7 +36,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(remote_config["adapter_config"]["skip_url_entry"])
         self.assertFalse(remote_config["adapter_config"]["skip_join_flow"])
         self.assertGreaterEqual(remote_config["adapter_config"]["joined_wait_sec"], 20)
-        self.assertTrue(remote_config["adapter_config"]["reset_user_data_dir"])
+        self.assertFalse(remote_config["adapter_config"]["reset_user_data_dir"])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["join_button"], [239, 384])
         self.assertEqual(remote_config["adapter_config"]["coordinates"]["mic_button"], [100, 450])
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["left"], 0)
