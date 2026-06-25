@@ -622,7 +622,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         if width and height:
             self._run_xdotool(["windowsize", str(self.window_id), str(int(width)), str(int(height))], check=False)
         self._run_xdotool(["windowmove", str(self.window_id), str(int(left)), str(int(top))], check=False)
-        self._run_xdotool(["windowactivate", "--sync", str(self.window_id)], check=False)
+        self._activate_window()
 
     async def _type_url(self, vtc_url: str):
         self._activate_window()
@@ -976,6 +976,7 @@ class JitsiElectronAdapter(ServiceAdapter):
 
     def _activate_window(self):
         if self.window_id:
+            self._run_xdotool(["windowraise", str(self.window_id)], check=False)
             self._run_xdotool(["windowactivate", "--sync", str(self.window_id)], check=False)
 
     def _coordinate(self, key: str):

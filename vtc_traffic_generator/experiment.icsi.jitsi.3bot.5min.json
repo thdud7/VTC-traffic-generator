@@ -92,8 +92,8 @@
       "window_title_regex": "Jitsi Meet|testroom|jitsi",
       "accessibility_window_regex": "Jitsi Meet|testroom|jitsi",
       "window_geometry": {
-        "left": 0,
-        "top": 0,
+        "left": 480,
+        "top": 40,
         "width": 480,
         "height": 720
       },
