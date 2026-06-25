@@ -9,3 +9,9 @@
       args:
         executable: /bin/bash
       changed_when: false
+
+    - name: Stop orphaned packet capture process
+      ansible.builtin.shell: pkill -x dumpcap || true
+      args:
+        executable: /bin/bash
+      changed_when: false
