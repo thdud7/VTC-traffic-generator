@@ -893,6 +893,23 @@ class JitsiElectronAdapter(ServiceAdapter):
             self._emit_action_event(event_name, control, "none", before_state, before_state, True)
             return True
 
+        if control == "mic" and self._optional_bool("allow_pulse_microphone_mute_fallback", False):
+            pulse_result = self._set_microphone_with_pulse_source(desired_state)
+            if pulse_result and pulse_result.get("success"):
+                after_state = bool(desired_state)
+                self._set_cached_state(control, after_state)
+                self._emit_action_event(
+                    event_name,
+                    control,
+                    "pulse_source_mute",
+                    pulse_result.get("state_before", before_state),
+                    after_state,
+                    True,
+                    requested_state=desired_state,
+                    extra=pulse_result,
+                )
+                return True
+
         if before_state is not None:
             method = self._press_shortcut(shortcut)
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
@@ -936,6 +953,48 @@ class JitsiElectronAdapter(ServiceAdapter):
         self._emit_fallback(control, "none", "state unknown or target state could not be reached without blind toggle")
         self._emit_action_event(event_name, control, "none", before_state, before_state, False)
         return False
+
+    def _set_microphone_with_pulse_source(self, desired_state: bool) -> dict[str, Any] | None:
+        microphone_name = str(self.adapter_config.get("microphone_name") or "")
+        if not microphone_name:
+            return None
+
+        before_status = self._pulse_source_status(microphone_name)
+        requested_mute = "0" if desired_state else "1"
+        result = self._run_command(["pactl", "set-source-mute", microphone_name, requested_mute], check=False)
+        time.sleep(float(self.adapter_config.get("pulse_mic_state_wait_sec", 0.2)))
+        after_status = self._pulse_source_status(microphone_name)
+        audio_capture = None
+
+        if desired_state and self._optional_bool("verify_audio_capture_attached", False):
+            audio_capture = self._jitsi_audio_capture_status(microphone_name)
+            success = result.returncode == 0 and after_status.get("mute") == "no" and bool(audio_capture.get("success"))
+        else:
+            expected_mute = "no" if desired_state else "yes"
+            success = result.returncode == 0 and after_status.get("mute") == expected_mute
+
+        state_before = self._mic_state_from_pulse_status(before_status)
+        state_after = bool(desired_state) if success else self._mic_state_from_pulse_status(after_status)
+        return {
+            "success": success,
+            "requested_state": bool(desired_state),
+            "state_before": state_before,
+            "state_after": state_after,
+            "verified_state": bool(desired_state) if success else None,
+            "pulse_source_before": before_status,
+            "pulse_source_after": after_status,
+            "audio_capture": audio_capture,
+            "set_source_mute_returncode": result.returncode,
+            "failure_reason": None if success else "pulse source mute state or Jitsi capture was not verified",
+        }
+
+    def _mic_state_from_pulse_status(self, status: Mapping[str, Any]) -> bool | None:
+        mute = status.get("mute")
+        if mute == "no":
+            return True
+        if mute == "yes":
+            return False
+        return None
 
     async def _ensure_screen_share_state(self, desired_state: bool):
         before_state = self._infer_control_state("screen_share")
@@ -1477,6 +1536,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         after_state: bool | None,
         success: bool,
         requested_state: bool | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         if requested_state is None:
             requested_state = {
@@ -1487,10 +1547,7 @@ class JitsiElectronAdapter(ServiceAdapter):
                 "screen_share_start": True,
                 "screen_share_stop": False,
             }.get(event_name)
-        emit_event(
-            self.config,
-            event_name,
-            {
+        details = {
                 "action": action,
                 "requested_state": requested_state,
                 "method": method,
@@ -1502,9 +1559,10 @@ class JitsiElectronAdapter(ServiceAdapter):
                 "verified_state": after_state if success else None,
                 "success": success,
                 "failure_reason": None if success else "requested state was not verified",
-            },
-            self.service_name,
-        )
+        }
+        if extra:
+            details.update(dict(extra))
+        emit_event(self.config, event_name, details, self.service_name)
 
     def _emit_fallback(self, action: str, method: str, reason: str) -> None:
         emit_event(

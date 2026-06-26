@@ -139,6 +139,7 @@
       "skip_join_flow": false,
       "skip_device_selection": false,
       "allow_pulse_default_device_selection_fallback": true,
+      "allow_pulse_microphone_mute_fallback": true,
       "allow_media_capture_meeting_fallback": false,
       "verify_audio_capture_attached": true,
       "require_audio_capture_attached": false,

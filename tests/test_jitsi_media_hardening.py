@@ -41,6 +41,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
+        self.assertTrue(remote_config["adapter_config"]["allow_pulse_microphone_mute_fallback"])
         self.assertFalse(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
         self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])

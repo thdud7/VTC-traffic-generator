@@ -432,6 +432,7 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
     )
     scenario_state = make_scenario_state(vtc_clients)
     scenario_state["random_mic_off_disallowed"] = True
+    prewarm_strict_mics(vtc_clients, utterances, scenario_state, mic_pre_roll_sec, mic_action_timeout_sec)
     scenario_runtime_sec = min(max_duration_sec, icsi_policy.end_sec - scenario_offset_sec)
     scenario_thread = None
     scenario_stop = threading.Event()
@@ -588,6 +589,60 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
         uri = 'http://' + client.ip + ':' + str(client.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(client.video_pid)
+
+
+def prewarm_strict_mics(vtc_clients, utterances, scenario_state, mic_pre_roll_sec, mic_action_timeout_sec):
+    first_by_bot = {}
+    for utterance in utterances:
+        bot_index = utterance["bot_index"]
+        if utterance["scheduled_start_sec"] <= mic_pre_roll_sec and bot_index not in first_by_bot:
+            first_by_bot[bot_index] = utterance
+    if not first_by_bot:
+        return
+
+    emit_event(
+        config,
+        "strict_mic_prewarm_start",
+        {
+            "bot_indices": sorted(first_by_bot),
+            "mic_pre_roll_sec": mic_pre_roll_sec,
+            "timeout_sec": mic_action_timeout_sec,
+        },
+    )
+    futures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(first_by_bot))) as executor:
+        for bot_index, utterance in sorted(first_by_bot.items()):
+            now_ns = time.monotonic_ns()
+            details = {
+                "prewarm": True,
+                "bot_index": bot_index,
+                "speech_id": utterance["speech_id"],
+                "meeting_id": utterance["meeting_id"],
+                "icsi_meeting_id": utterance["icsi_meeting_id"],
+                "icsi_participant": utterance["icsi_participant"],
+                "icsi_channel": utterance["icsi_channel"],
+                "scheduled_t_rel_sec": utterance["scheduled_start_sec"],
+                "requested_state": True,
+                "actual_utc": utc_now_iso(),
+                "actual_monotonic_ns": now_ns,
+            }
+            emit_event(config, "speech_prepare_mic_on_start", details)
+            append_action_log(config, "speech_prepare_mic_on_start", details)
+            futures.append(
+                executor.submit(
+                    call_client_action_with_result,
+                    vtc_clients[bot_index],
+                    bot_index,
+                    "set_microphone",
+                    True,
+                    "speech_prepare_mic_on_result",
+                    details,
+                    scenario_state,
+                    mic_action_timeout_sec,
+                )
+            )
+        wait_futures(futures, timeout=mic_action_timeout_sec + 5)
+    emit_event(config, "strict_mic_prewarm_done", {"bot_indices": sorted(first_by_bot)})
 
 
 def build_icsi_strict_schedule(icsi_policy, max_duration_sec, scenario_offset_sec=0.0):
