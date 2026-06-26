@@ -832,7 +832,7 @@ def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario
     )
     try:
         with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            success = bool(proxy.start_speech(utterance["playback_duration_sec"], metadata))
+            success = bool(proxy.start_speech(utterance["playback_duration_sec"], xmlrpc_safe_value(metadata)))
     except Exception as exc:
         success = False
         details["failure_reason"] = str(exc)
@@ -848,6 +848,19 @@ def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario
     emit_event(config, "speech_start_response", details)
     append_action_log(config, "speech_start_response", details)
     return success
+
+
+def xmlrpc_safe_value(value):
+    if isinstance(value, dict):
+        return {str(key): xmlrpc_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [xmlrpc_safe_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [xmlrpc_safe_value(item) for item in value]
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < -(2**31) or value > (2**31 - 1):
+            return str(value)
+    return value
 
 
 def handle_post_speech_mic_decision(

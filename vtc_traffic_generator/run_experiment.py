@@ -105,6 +105,10 @@ def build_controller_config(experiment, clients):
         "action_log_path",
         str(experiment.get("action_log_path") or f"/tmp/vtc-controller/actions-{experiment_run_log_id(experiment)}.txt"),
     )
+    controller.setdefault(
+        "event_log_path",
+        str(experiment.get("event_log_path") or f"/tmp/vtc-controller/events-{experiment_run_log_id(experiment)}.jsonl"),
+    )
 
     for optional_key in ("behavior", "behavior_mode", "adapter_action_timeout_sec"):
         if optional_key in experiment:
@@ -609,6 +613,7 @@ def generate(experiment_path, output_dir):
         "capture_upload_s3_uri": str(experiment.get("capture_upload", {}).get("s3_uri") or "").rstrip("/"),
         "capture_upload_run_id": str(experiment.get("capture_upload", {}).get("run_id") or ""),
         "controller_action_log_path": controller_config.get("action_log_path"),
+        "controller_event_log_path": controller_config.get("event_log_path"),
     }
 
 
@@ -643,6 +648,7 @@ def upload_controller_artifacts(generated):
             generated.get("controller_config"),
             *generated.get("remote_configs", []),
             generated.get("controller_action_log_path"),
+            generated.get("controller_event_log_path"),
         ]
 
         staged_count = 0

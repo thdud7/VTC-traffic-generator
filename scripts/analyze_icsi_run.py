@@ -35,6 +35,63 @@ def load_jsonl_events(run_dir: Path) -> list[dict[str, Any]]:
     return events
 
 
+def load_controller_action_events(run_dir: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for path in sorted((run_dir / "controller").glob("actions-*.txt")):
+        with path.open("r", encoding="utf-8", errors="replace") as infile:
+            for line_number, line in enumerate(infile, 1):
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                fields: dict[str, str] = {}
+                parts = line.split("\t")
+                if parts:
+                    fields["ts"] = parts[0]
+                for part in parts[1:]:
+                    key, sep, value = part.partition("=")
+                    if sep:
+                        fields[key] = value
+                event_name = fields.get("event")
+                if not event_name:
+                    events.append(
+                        {
+                            "event_type": "invalid_action_log",
+                            "source_path": str(path),
+                            "line_number": line_number,
+                        }
+                    )
+                    continue
+                details: dict[str, Any] = {}
+                if fields.get("details"):
+                    try:
+                        parsed = json.loads(fields["details"])
+                        if isinstance(parsed, dict):
+                            details = parsed
+                    except json.JSONDecodeError:
+                        details = {"unparsed_details": fields["details"]}
+                events.append(
+                    {
+                        "ts": fields.get("ts"),
+                        "event_type": event_name,
+                        "event": event_name,
+                        "bot_id": fields.get("bot", "controller"),
+                        "role": "controller",
+                        "details": details,
+                        "source_path": str(path),
+                        "line_number": line_number,
+                    }
+                )
+    return events
+
+
+def load_events(run_dir: Path) -> list[dict[str, Any]]:
+    events = load_jsonl_events(run_dir)
+    has_controller_jsonl = any(Path(str(record.get("source_path", ""))).parent.name == "controller" for record in events)
+    if not has_controller_jsonl:
+        events.extend(load_controller_action_events(run_dir))
+    return events
+
+
 def event_type(record: dict[str, Any]) -> str:
     return str(record.get("event_type") or record.get("event") or "")
 
@@ -118,7 +175,7 @@ def media_summary(run_dir: Path, min_media_duration_sec: float) -> dict[str, Any
 
 
 def analyze(run_dir: Path, min_media_duration_sec: float) -> tuple[dict[str, Any], bool]:
-    events = load_jsonl_events(run_dir)
+    events = load_events(run_dir)
     by_type: dict[str, list[dict[str, Any]]] = {}
     for record in events:
         by_type.setdefault(event_type(record), []).append(record)

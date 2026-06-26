@@ -66,12 +66,15 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             second = generate("vtc_traffic_generator/experiment.icsi.jitsi.3bot.5min.json", second_tmp)
 
             first_remote = json.loads(Path(first["remote_configs"][0]).read_text())
+            first_controller = json.loads(Path(first["controller_config"]).read_text())
             second_remote = json.loads(Path(second["remote_configs"][0]).read_text())
             first_manifest = json.loads(Path(first["run_manifest"]).read_text())
             second_manifest = json.loads(Path(second["run_manifest"]).read_text())
             inventory = Path(first["inventory"]).read_text(encoding="utf-8")
 
         execution_id = first_remote["execution_id"]
+        self.assertIn(execution_id, first_controller["action_log_path"])
+        self.assertIn(execution_id, first_controller["event_log_path"])
         self.assertIn(execution_id, first_remote["action_log_path"])
         self.assertIn(execution_id, first_remote["adapter_config"]["event_log_path"])
         self.assertIn(execution_id, first_remote["adapter_config"]["app_log_path"])
@@ -110,7 +113,8 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             controller_config = root / "controller_config.json"
             remote_config = root / "remote_config_bot1.json"
             action_log = root / "actions-run-1.txt"
-            for path in (manifest, controller_config, remote_config, action_log):
+            event_log = root / "events-run-1.jsonl"
+            for path in (manifest, controller_config, remote_config, action_log, event_log):
                 path.write_text(path.name, encoding="utf-8")
 
             calls = []
@@ -132,6 +136,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
                         "controller_config": controller_config,
                         "remote_configs": [remote_config],
                         "controller_action_log_path": action_log,
+                        "controller_event_log_path": event_log,
                     }
                 )
             finally:
@@ -145,6 +150,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             [
                 "actions-run-1.txt",
                 "controller_config.json",
+                "events-run-1.jsonl",
                 "remote_config_bot1.json",
                 "run-manifest-run-1.json",
             ],
