@@ -774,14 +774,15 @@ def build_icsi_playback_segments(utterances, merge_gap_sec=0.0):
     """Merge adjacent same-bot ICSI utterances into one physical audio output."""
     merge_gap_sec = max(0.0, float(merge_gap_sec or 0.0))
     segments = []
-    current = None
+    current_by_bot = {}
     for utterance in utterances:
+        bot_index = utterance["bot_index"]
+        current = current_by_bot.get(bot_index)
         can_merge = False
         if current is not None:
             gap = float(utterance["scheduled_start_sec"]) - float(current["playback_end_sec"])
             can_merge = (
-                utterance["bot_index"] == current["bot_index"]
-                and utterance["file_channel"] == current["file_channel"]
+                utterance["file_channel"] == current["file_channel"]
                 and gap <= merge_gap_sec
                 and gap >= -0.001
                 and not current.get("clipped")
@@ -801,6 +802,7 @@ def build_icsi_playback_segments(utterances, merge_gap_sec=0.0):
             utterance["playback_segment_id"] = segment_id
             utterance["playback_segment_primary"] = True
             segments.append(segment)
+            current_by_bot[bot_index] = segment
             current = segment
         else:
             utterance["playback_segment_id"] = current["playback_segment_id"]
@@ -2695,6 +2697,8 @@ async def connect_vtc_session(duration):
     adapter = None
     closed = False
     stop_reason = "unknown"
+    terminal_error = None
+    terminal_error_code = None
     try:
         set_connection_status(
             "initializing",
@@ -2797,21 +2801,16 @@ async def connect_vtc_session(duration):
             service,
         )
         set_connection_status(
-            "done",
+            "finalizing",
             connected=False,
             ready=False,
             media_ready=False,
             error=None,
             vtc_url=config.get("vtc_url"),
-            stage="connect_vtc_session",
-            reason="session_done",
+            stage="packet_capture_analysis",
+            reason="session_finalizing",
         )
-        emit_event(
-            config,
-            "connect_vtc_session_done",
-            {"vtc_url": config.get("vtc_url")},
-            service,
-        )
+        emit_event(config, "connect_vtc_session_finalizing", {"vtc_url": config.get("vtc_url")}, service)
         append_action_log(
             config,
             "meeting_end",
@@ -2820,15 +2819,17 @@ async def connect_vtc_session(duration):
         return result
     except Exception as exc:
         stop_reason = f"failure:{type(exc).__name__}"
+        terminal_error = str(exc)
+        terminal_error_code = type(exc).__name__
         set_connection_status(
-            "error",
+            "finalizing_error",
             connected=False,
             ready=False,
             media_ready=False,
             error=str(exc),
             vtc_url=config.get("vtc_url"),
-            stage="connect_vtc_session",
-            reason="exception",
+            stage="packet_capture_analysis",
+            reason="exception_finalizing",
             error_code=type(exc).__name__,
         )
         emit_event(
@@ -2858,6 +2859,41 @@ async def connect_vtc_session(duration):
         raise
     finally:
         packet_capture.stop_and_analyze_with_reason(stop_reason)
+        if stop_reason == "success":
+            set_connection_status(
+                "done",
+                connected=False,
+                ready=False,
+                media_ready=False,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="connect_vtc_session",
+                reason="analysis_done",
+            )
+            emit_event(
+                config,
+                "connect_vtc_session_done",
+                {"vtc_url": config.get("vtc_url")},
+                service,
+            )
+        else:
+            set_connection_status(
+                "error",
+                connected=False,
+                ready=False,
+                media_ready=False,
+                error=terminal_error,
+                vtc_url=config.get("vtc_url"),
+                stage="connect_vtc_session",
+                reason="analysis_done_after_error",
+                error_code=terminal_error_code,
+            )
+            emit_event(
+                config,
+                "connect_vtc_session_failed",
+                {"vtc_url": config.get("vtc_url"), "error": terminal_error, "error_code": terminal_error_code},
+                service,
+            )
         config.pop("_meeting_joined_callback", None)
         config.pop("_media_ready_callback", None)
         with active_adapter_lock:

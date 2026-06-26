@@ -53,7 +53,7 @@
       "mic_pre_roll_sec": 4.0,
       "mic_action_timeout_sec": 3.0,
       "mic_state_cache_ttl_sec": 10.0,
-      "merge_same_bot_gap_ms": 250,
+      "merge_same_bot_gap_ms": 500,
       "audio_warmup_enabled": true,
       "audio_warmup_duration_ms": 500,
       "post_speech_mic_guard_ms": 250,
@@ -66,7 +66,7 @@
       "time_scale": 1.0,
       "connect_timeout_sec": 180,
       "connect_grace_sec": 5,
-      "client_stop_timeout_sec": 90
+      "client_stop_timeout_sec": 180
     },
     "scenario": {
       "enabled": true,

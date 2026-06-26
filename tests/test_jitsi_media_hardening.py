@@ -73,8 +73,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["packet_capture"]["jvb_port"], 10000)
         self.assertEqual(remote_config["capture"]["tail_after_disconnect_sec"], 10)
         self.assertTrue(controller_config["behavior"]["icsi"]["audio_warmup_enabled"])
-        self.assertEqual(controller_config["behavior"]["icsi"]["merge_same_bot_gap_ms"], 250)
+        self.assertEqual(controller_config["behavior"]["icsi"]["merge_same_bot_gap_ms"], 500)
         self.assertEqual(controller_config["behavior"]["icsi"]["post_speech_mic_guard_ms"], 250)
+        self.assertEqual(controller_config["behavior"]["icsi"]["client_stop_timeout_sec"], 180)
         self.assertFalse(controller_config["behavior"]["scenario"]["keep_camera_on"])
         self.assertFalse(controller_config["behavior"]["random_actions"]["keep_camera_on"])
 
@@ -319,6 +320,52 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(utterances[0]["playback_segment_primary"])
         self.assertFalse(utterances[1]["playback_segment_primary"])
         self.assertNotEqual(segments[0]["playback_segment_id"], segments[1]["playback_segment_id"])
+
+    def test_strict_icsi_playback_segments_merge_same_bot_across_interleaved_bot(self):
+        utterances = [
+            {
+                "speech_id": "bot0-a",
+                "bot_index": 0,
+                "file_channel": "chan0",
+                "scheduled_start_sec": 10.0,
+                "scheduled_end_sec": 11.0,
+                "playback_end_sec": 11.0,
+                "annotation_end_sec": 11.0,
+                "playback_duration_sec": 1.0,
+                "clipped": False,
+            },
+            {
+                "speech_id": "bot1-a",
+                "bot_index": 1,
+                "file_channel": "chan1",
+                "scheduled_start_sec": 10.5,
+                "scheduled_end_sec": 11.2,
+                "playback_end_sec": 11.2,
+                "annotation_end_sec": 11.2,
+                "playback_duration_sec": 0.7,
+                "clipped": False,
+            },
+            {
+                "speech_id": "bot0-b",
+                "bot_index": 0,
+                "file_channel": "chan0",
+                "scheduled_start_sec": 11.2,
+                "scheduled_end_sec": 12.0,
+                "playback_end_sec": 12.0,
+                "annotation_end_sec": 12.0,
+                "playback_duration_sec": 0.8,
+                "clipped": False,
+            },
+        ]
+
+        segments = generator_module.build_icsi_playback_segments(utterances, merge_gap_sec=0.5)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["bot_index"], 0)
+        self.assertEqual(segments[0]["merged_utterance_count"], 2)
+        self.assertEqual(utterances[0]["playback_segment_id"], utterances[2]["playback_segment_id"])
+        self.assertFalse(utterances[2]["playback_segment_primary"])
+        self.assertEqual(segments[1]["bot_index"], 1)
 
     def test_random_mic_off_is_not_selected_during_speech_or_preroll(self):
         state = generator_module.make_scenario_state([object()])
