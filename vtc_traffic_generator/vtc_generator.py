@@ -787,12 +787,16 @@ def mark_pre_roll_inactive(scenario_state, bot_index):
 
 def mic_state_is_fresh_on(scenario_state, bot_index, ttl_sec, now_ns=None):
     now_ns = now_ns or time.monotonic_ns()
+    return mic_state_is_fresh_on_at(scenario_state, bot_index, ttl_sec, now_ns)
+
+
+def mic_state_is_fresh_on_at(scenario_state, bot_index, ttl_sec, target_ns):
     with scenario_state["lock"]:
         is_on = scenario_state["states"][bot_index].get("mic") is True
         verified_at = int(scenario_state["mic_verified_at_monotonic_ns"][bot_index])
     if not is_on or verified_at <= 0:
         return False
-    return now_ns - verified_at <= seconds_to_ns(ttl_sec)
+    return target_ns - verified_at <= seconds_to_ns(ttl_sec)
 
 
 def set_mic_verified_state(scenario_state, bot_index, enabled, verified):
@@ -827,7 +831,8 @@ def submit_mic_prepare(
             "mic_state_cache_ttl_sec": mic_state_cache_ttl_sec,
         },
     )
-    if mic_state_is_fresh_on(scenario_state, utterance["bot_index"], mic_state_cache_ttl_sec, now_ns):
+    speech_start_ns = scenario_start_monotonic_ns + seconds_to_ns(utterance["scheduled_start_sec"])
+    if mic_state_is_fresh_on_at(scenario_state, utterance["bot_index"], mic_state_cache_ttl_sec, speech_start_ns):
         details.update({"success": True, "suppressed": True, "suppression_reason": "mic_already_verified_on"})
         emit_event(config, "speech_prepare_mic_on_result", details)
         append_action_log(config, "speech_prepare_mic_on_result", details)
