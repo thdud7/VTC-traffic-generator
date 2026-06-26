@@ -1167,6 +1167,16 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event, sce
             elif action_name == "camera":
                 bot_index = rng.randrange(0, len(vtc_clients))
                 desired_state = not get_scenario_state(scenario_state, bot_index, "camera")
+                if not desired_state and bool(scenario.get("keep_camera_on", False)):
+                    details = {
+                        "action": "camera",
+                        "bot_index": bot_index,
+                        "requested_state": desired_state,
+                        "reason": "keep_camera_on",
+                    }
+                    emit_event(config, "random_action_suppressed", details)
+                    append_action_log(config, "camera_action_skipped", details)
+                    continue
                 success = call_client_action(vtc_clients[bot_index], bot_index, "set_camera", desired_state)
                 if success:
                     set_scenario_state(scenario_state, bot_index, "camera", desired_state)

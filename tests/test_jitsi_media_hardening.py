@@ -30,6 +30,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             generated = generate("vtc_traffic_generator/experiment.icsi.jitsi.3bot.5min.json", tmpdir)
             remote_config = json.loads(Path(generated["remote_configs"][0]).read_text())
+            controller_config = json.loads(Path(generated["controller_config"]).read_text())
 
         self.assertEqual(remote_config["virtual_audio"]["sink_name"], "VTC_Speaker")
         self.assertEqual(remote_config["virtual_audio"]["source_name"], "VTC_Microphone")
@@ -48,6 +49,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["adapter_config"]["trust_screen_share_target_window"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_microphone_mute_fallback"])
+        self.assertFalse(remote_config["adapter_config"]["require_audio_capture_for_mic_actions"])
         self.assertFalse(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
         self.assertTrue(remote_config["adapter_config"]["verify_audio_capture_attached"])
         self.assertTrue(remote_config["adapter_config"]["launch_url_as_arg"])
@@ -66,6 +68,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["top"], 40)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["width"], 800)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["height"], 720)
+        self.assertTrue(controller_config["behavior"]["random_actions"]["keep_camera_on"])
 
     def test_generation_uses_execution_scoped_logs_and_stable_config_hash(self):
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:

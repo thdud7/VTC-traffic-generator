@@ -67,7 +67,8 @@
       "max_interval_sec": 45,
       "screen_share_probability": 0.6,
       "camera_probability": 1.0,
-      "mic_probability": 0.8
+      "mic_probability": 0.8,
+      "keep_camera_on": true
     },
     "random_actions": {
       "enabled": true,
@@ -76,7 +77,8 @@
       "max_interval_sec": 45,
       "screen_share_probability": 0.6,
       "camera_probability": 1.0,
-      "mic_probability": 0.8
+      "mic_probability": 0.8,
+      "keep_camera_on": true
     }
   },
   "defaults": {
@@ -140,6 +142,7 @@
       "skip_device_selection": false,
       "allow_pulse_default_device_selection_fallback": true,
       "allow_pulse_microphone_mute_fallback": true,
+      "require_audio_capture_for_mic_actions": false,
       "allow_media_capture_meeting_fallback": false,
       "verify_audio_capture_attached": true,
       "require_audio_capture_attached": false,

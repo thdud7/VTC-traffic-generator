@@ -966,9 +966,12 @@ class JitsiElectronAdapter(ServiceAdapter):
         after_status = self._pulse_source_status(microphone_name)
         audio_capture = None
 
-        if desired_state and self._optional_bool("verify_audio_capture_attached", False):
+        require_audio_capture = self._optional_bool("require_audio_capture_for_mic_actions", False)
+        if desired_state and (self._optional_bool("verify_audio_capture_attached", False) or require_audio_capture):
             audio_capture = self._jitsi_audio_capture_status(microphone_name)
-            success = result.returncode == 0 and after_status.get("mute") == "no" and bool(audio_capture.get("success"))
+            success = result.returncode == 0 and after_status.get("mute") == "no"
+            if require_audio_capture:
+                success = success and bool(audio_capture.get("success"))
         else:
             expected_mute = "no" if desired_state else "yes"
             success = result.returncode == 0 and after_status.get("mute") == expected_mute
