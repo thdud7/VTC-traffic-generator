@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import time
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -172,6 +173,28 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
         self.assertIn("executor.submit(\n                        handle_post_speech_mic_decision", generator_source)
         self.assertNotIn("futures.append(\n                    handle_post_speech_mic_decision", generator_source)
+
+    def test_mic_reservation_uses_speech_start_freshness_target(self):
+        now_ns = time.monotonic_ns()
+        scenario_state = {
+            "lock": threading.Lock(),
+            "states": [{"mic": True}],
+            "mic_verified_at_monotonic_ns": [now_ns - generator_module.seconds_to_ns(8.0)],
+            "mic_action_pending": [None],
+            "mic_action_pending_since_ns": [0],
+        }
+
+        reservation = generator_module.reserve_mic_action(
+            scenario_state,
+            0,
+            True,
+            ttl_sec=10.0,
+            coalesce_window_ms=1500,
+            fresh_target_ns=now_ns + generator_module.seconds_to_ns(4.0),
+        )
+
+        self.assertEqual(reservation, "reserved")
+        self.assertIs(scenario_state["mic_action_pending"][0], True)
 
     def test_controller_artifacts_upload_to_run_root_prefix(self):
         with tempfile.TemporaryDirectory() as tmpdir:

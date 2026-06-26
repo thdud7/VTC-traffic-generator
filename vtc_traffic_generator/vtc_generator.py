@@ -979,8 +979,9 @@ def mic_state_is_fresh(scenario_state, bot_index, enabled, ttl_sec, now_ns=None)
     return matches and verified_at > 0 and now_ns - verified_at <= seconds_to_ns(ttl_sec)
 
 
-def reserve_mic_action(scenario_state, bot_index, desired_state, ttl_sec, coalesce_window_ms):
+def reserve_mic_action(scenario_state, bot_index, desired_state, ttl_sec, coalesce_window_ms, fresh_target_ns=None):
     now_ns = time.monotonic_ns()
+    freshness_check_ns = int(fresh_target_ns) if fresh_target_ns is not None else now_ns
     with scenario_state["lock"]:
         pending = scenario_state["mic_action_pending"][bot_index]
         pending_since = int(scenario_state["mic_action_pending_since_ns"][bot_index])
@@ -991,7 +992,11 @@ def reserve_mic_action(scenario_state, bot_index, desired_state, ttl_sec, coales
                 return "pending_same_state"
         if pending is not None:
             return "mic_action_already_pending"
-        if current_state is bool(desired_state) and verified_at > 0 and now_ns - verified_at <= seconds_to_ns(ttl_sec):
+        if (
+            current_state is bool(desired_state)
+            and verified_at > 0
+            and freshness_check_ns - verified_at <= seconds_to_ns(ttl_sec)
+        ):
             return "cached_verified_state"
         scenario_state["mic_action_pending"][bot_index] = bool(desired_state)
         scenario_state["mic_action_pending_since_ns"][bot_index] = now_ns
@@ -1045,6 +1050,7 @@ def submit_mic_prepare(
         True,
         mic_state_cache_ttl_sec,
         mic_action_coalesce_window_ms,
+        fresh_target_ns=speech_start_ns,
     )
     if reservation != "reserved":
         coalesced_details = {
