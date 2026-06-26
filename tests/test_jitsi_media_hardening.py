@@ -45,6 +45,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["adapter_config"]["trust_screen_share_shortcut_state"])
         self.assertTrue(remote_config["adapter_config"]["use_cached_camera_state"])
         self.assertTrue(remote_config["adapter_config"]["use_cached_screen_share_state"])
+        self.assertTrue(remote_config["adapter_config"]["trust_screen_share_target_window"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_microphone_mute_fallback"])
         self.assertFalse(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])

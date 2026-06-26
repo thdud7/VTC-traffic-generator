@@ -164,6 +164,7 @@
       "use_cached_screen_share_state": true,
       "require_exact_screen_share_target": true,
       "require_exact_screen_share_target_window": true,
+      "trust_screen_share_target_window": true,
       "initial_mic_enabled": true,
       "initial_camera_enabled": true,
       "initial_screen_sharing": false,
