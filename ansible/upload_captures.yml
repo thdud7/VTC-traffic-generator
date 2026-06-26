@@ -100,19 +100,19 @@
           cp "{{ client_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_client.log"
         fi
 
-        readable_sources=()
+        readable_sources=""
         for source_path in "{{ action_log_path | default('') }}" "{{ event_log_path | default('') }}"; do
           if [ -n "$source_path" ] && [ -f "$source_path" ]; then
-            readable_sources+=("$source_path")
+            readable_sources="$readable_sources $source_path"
           fi
         done
-        if [ "${#readable_sources[@]}" -gt 0 ]; then
+        if [ -n "$readable_sources" ]; then
           "{{ python_bin | default('python3') }}" "{{ repo_dir }}/vtc_traffic_generator/tools/render_readable_events.py" \
             --experiment-name "$experiment_name" \
             --run-id "$run_id" \
             --bot-id "$bot_id" \
             --output "$staging_dir/logs/readable/${experiment_name}_${run_id}_${bot_id}_successful_actions.log" \
-            "${readable_sources[@]}"
+            $readable_sources
         fi
 
         diagnostics_dir="{{ adapter_log_path | default(client_log_path | default('/tmp/vtc-client/client.log')) | dirname }}/diagnostics/{{ capture_upload_execution_id | default(capture_upload_run_id) }}"
