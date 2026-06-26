@@ -6,8 +6,10 @@ import hashlib
 import json
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -602,6 +604,9 @@ def generate(experiment_path, output_dir):
         "remote_configs": remote_paths,
         "run_manifest": manifest_path,
         "capture_upload_configured": capture_upload_configured(experiment),
+        "capture_upload_s3_uri": str(experiment.get("capture_upload", {}).get("s3_uri") or "").rstrip("/"),
+        "capture_upload_run_id": str(experiment.get("capture_upload", {}).get("run_id") or ""),
+        "controller_action_log_path": controller_config.get("action_log_path"),
     }
 
 
@@ -621,6 +626,43 @@ def run_local_controller(controller_config_path):
         str(controller_config_path),
     ]
     return subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
+
+
+def upload_controller_artifacts(generated):
+    s3_uri = generated.get("capture_upload_s3_uri")
+    run_id = generated.get("capture_upload_run_id")
+    if not s3_uri or not run_id:
+        return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
+
+    with tempfile.TemporaryDirectory(prefix="vtc-controller-upload-") as tmpdir:
+        staging_dir = Path(tmpdir)
+        artifact_paths = [
+            generated.get("run_manifest"),
+            generated.get("controller_config"),
+            *generated.get("remote_configs", []),
+            generated.get("controller_action_log_path"),
+        ]
+
+        staged_count = 0
+        for artifact_path in artifact_paths:
+            if not artifact_path:
+                continue
+            path = Path(artifact_path).expanduser()
+            if not path.is_file():
+                continue
+            shutil.copy2(path, staging_dir / path.name)
+            staged_count += 1
+
+        if staged_count == 0:
+            return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
+
+        destination = f"{s3_uri}/logs/{run_id}/controller/"
+        command = ["aws", "s3", "sync", str(staging_dir), destination]
+        try:
+            return subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
+        except FileNotFoundError:
+            print("Error: aws CLI is not installed or not on PATH.", file=sys.stderr)
+            return subprocess.CompletedProcess(command, 127)
 
 
 def main():
@@ -712,6 +754,9 @@ def main():
         upload_result = run_ansible(generated["inventory"], upload_playbook_path)
         if upload_result.returncode != 0:
             return upload_result.returncode
+        controller_upload_result = upload_controller_artifacts(generated)
+        if controller_upload_result.returncode != 0:
+            return controller_upload_result.returncode
 
     if cleanup_returncode != 0:
         return cleanup_returncode

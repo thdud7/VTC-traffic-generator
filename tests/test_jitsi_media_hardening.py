@@ -9,6 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
+import vtc_traffic_generator.run_experiment as run_experiment_module
 from vtc_traffic_generator.run_experiment import generate, quote_inventory_value
 from vtc_traffic_generator.tools.analyze_media_capture import (
     classify_udp_payload,
@@ -94,6 +95,53 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertIn("capture_upload_include_pattern", upload_playbook)
         self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
         self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
+
+    def test_controller_artifacts_upload_to_controller_log_prefix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = root / "run-manifest-run-1.json"
+            controller_config = root / "controller_config.json"
+            remote_config = root / "remote_config_bot1.json"
+            action_log = root / "actions-run-1.txt"
+            for path in (manifest, controller_config, remote_config, action_log):
+                path.write_text(path.name, encoding="utf-8")
+
+            calls = []
+            staged_files = []
+
+            def fake_run(command, cwd=None, check=False):
+                calls.append((command, cwd, check))
+                staged_files.extend(sorted(path.name for path in Path(command[3]).iterdir()))
+                return subprocess.CompletedProcess(command, 0)
+
+            original_run = run_experiment_module.subprocess.run
+            run_experiment_module.subprocess.run = fake_run
+            try:
+                result = run_experiment_module.upload_controller_artifacts(
+                    {
+                        "capture_upload_s3_uri": "s3://vtc-traffic-data/captures",
+                        "capture_upload_run_id": "run-1",
+                        "run_manifest": manifest,
+                        "controller_config": controller_config,
+                        "remote_configs": [remote_config],
+                        "controller_action_log_path": action_log,
+                    }
+                )
+            finally:
+                run_experiment_module.subprocess.run = original_run
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(calls[0][0][:3], ["aws", "s3", "sync"])
+        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/logs/run-1/controller/")
+        self.assertEqual(
+            staged_files,
+            [
+                "actions-run-1.txt",
+                "controller_config.json",
+                "remote_config_bot1.json",
+                "run-manifest-run-1.json",
+            ],
+        )
 
     def test_controller_registers_graceful_session_stop_rpc(self):
         generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
