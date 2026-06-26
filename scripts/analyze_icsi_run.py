@@ -266,7 +266,7 @@ def media_summary(run_dir: Path, min_media_duration_sec: float) -> dict[str, Any
         for path in run_dir.rglob("*.pcapng")
         if "jitsi-only" not in path.name and "filtered" not in path.name
     )
-    media_jsons = sorted(run_dir.rglob("*.media-analysis.json"))
+    media_jsons = sorted({*run_dir.rglob("*.media-analysis.json"), *run_dir.rglob("*_media-analysis.json")})
     per_bot = {}
     media_by_bot = {}
     for path in media_jsons:
@@ -332,6 +332,9 @@ def artifact_bot_id(path: Path, run_dir: Path) -> str:
         parts = path.relative_to(run_dir).parts
     except ValueError:
         parts = path.parts
+    for token in path.stem.replace("-", "_").split("_"):
+        if token.startswith("bot") and token[3:].isdigit():
+            return token
     for part in parts:
         if part.startswith("bot"):
             return part
