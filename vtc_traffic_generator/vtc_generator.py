@@ -45,10 +45,18 @@ connection_status_lock = threading.Lock()
 connection_status = {
     "state": "idle",
     "connected": False,
+    "ready": False,
+    "media_ready": False,
     "error": None,
+    "error_code": None,
+    "stage": None,
+    "reason": None,
     "vtc_url": None,
     "updated_at": None,
+    "transition_history": [],
 }
+TERMINAL_CONNECTION_STATES = {"error"}
+MEDIA_READY_CONNECTION_STATES = {"media_ready", "running"}
 
 
 def append_action_log(log_config, event_name, details=None):
@@ -208,28 +216,48 @@ def wait_for_clients_before_replay(vtc_clients):
 
     print(f"Waiting for {len(vtc_clients)} clients to join before ICSI replay.")
     while time.time() < deadline:
-        connected_count = 0
-        statuses = {}
-        for index, client in enumerate(vtc_clients):
-            uri = 'http://' + client.ip + ':' + str(client.port)
-            try:
-                with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-                    status = proxy.get_connection_status()
-            except Exception as exc:
-                status = {"state": "rpc_error", "connected": False, "error": str(exc)}
-
-            statuses[index] = status
-            if status.get("connected"):
-                connected_count += 1
+        statuses = poll_client_connection_statuses(vtc_clients)
+        ready_count = count_media_ready_clients(statuses)
+        terminal_errors = terminal_client_errors(statuses)
+        if terminal_errors:
+            raise RuntimeError(
+                "Client reached terminal connection error before ICSI replay: "
+                + json.dumps(terminal_errors, sort_keys=True)
+            )
 
         if statuses != last_statuses:
-            print("Client join status: " + json.dumps(statuses, sort_keys=True))
+            print("Client media readiness status: " + json.dumps(statuses, sort_keys=True))
             last_statuses = statuses
 
-        if connected_count == len(vtc_clients):
+        if ready_count == len(vtc_clients):
             if grace_sec > 0:
-                print(f"All clients joined. Waiting {grace_sec} more seconds before ICSI replay.")
-                time.sleep(grace_sec)
+                print(f"All clients media-ready. Waiting {grace_sec} more seconds before ICSI replay.")
+                grace_deadline = time.time() + grace_sec
+                while time.time() < grace_deadline:
+                    time.sleep(min(1, max(0, grace_deadline - time.time())))
+                    statuses = poll_client_connection_statuses(vtc_clients)
+                    terminal_errors = terminal_client_errors(statuses)
+                    if terminal_errors:
+                        raise RuntimeError(
+                            "Client reached terminal connection error during ICSI grace period: "
+                            + json.dumps(terminal_errors, sort_keys=True)
+                        )
+                    if count_media_ready_clients(statuses) != len(vtc_clients):
+                        print("Client media readiness changed during grace period.")
+                        break
+                else:
+                    emit_event(
+                        config,
+                        "client_media_barrier_ready",
+                        {"statuses": statuses, "grace_sec": grace_sec},
+                    )
+                    return
+                continue
+            emit_event(
+                config,
+                "client_media_barrier_ready",
+                {"statuses": statuses, "grace_sec": grace_sec},
+            )
             return
 
         time.sleep(1)
@@ -238,6 +266,36 @@ def wait_for_clients_before_replay(vtc_clients):
         "Timed out waiting for all clients to join before ICSI replay: "
         + json.dumps(last_statuses, sort_keys=True)
     )
+
+
+def poll_client_connection_statuses(vtc_clients):
+    statuses = {}
+    for index, client in enumerate(vtc_clients):
+        uri = 'http://' + client.ip + ':' + str(client.port)
+        try:
+            with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+                status = proxy.get_connection_status()
+        except Exception as exc:
+            status = {"state": "rpc_error", "connected": False, "ready": False, "media_ready": False, "error": str(exc)}
+        statuses[index] = status
+    return statuses
+
+
+def client_is_media_ready(status):
+    state = status.get("state")
+    return bool(status.get("media_ready") or status.get("ready") or state in MEDIA_READY_CONNECTION_STATES)
+
+
+def count_media_ready_clients(statuses):
+    return sum(1 for status in statuses.values() if client_is_media_ready(status))
+
+
+def terminal_client_errors(statuses):
+    return {
+        index: status
+        for index, status in statuses.items()
+        if status.get("state") in TERMINAL_CONNECTION_STATES
+    }
 
 
 def run_icsi_replay_controller(vtc_clients, icsi_policy):
@@ -1519,12 +1577,18 @@ async def connect_vtc_session(duration):
     service = get_service_name(config)
     packet_capture = PacketCaptureSession.from_config(config)
     adapter = None
+    closed = False
+    stop_reason = "unknown"
     try:
         set_connection_status(
-            "connecting",
+            "initializing",
             connected=False,
+            ready=False,
+            media_ready=False,
             error=None,
             vtc_url=config.get("vtc_url"),
+            stage="connect_vtc_session",
+            reason="session_start",
         )
         emit_event(
             config,
@@ -1534,16 +1598,89 @@ async def connect_vtc_session(duration):
         )
         packet_capture.start()
         config["_meeting_joined_callback"] = mark_meeting_joined
+        config["_media_ready_callback"] = mark_media_ready
         adapter = get_adapter(config)
         with active_adapter_lock:
             active_adapter = adapter
             active_loop = asyncio.get_running_loop()
-        result = await adapter.connect(duration)
+
+        if hasattr(adapter, "launch") and hasattr(adapter, "connect_to_meeting"):
+            set_connection_status(
+                "launching",
+                connected=False,
+                ready=False,
+                media_ready=False,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="adapter_launch",
+                reason="launch_start",
+            )
+            await adapter.launch()
+            set_connection_status(
+                "joining",
+                connected=False,
+                ready=False,
+                media_ready=False,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="adapter_join",
+                reason="join_start",
+            )
+            await adapter.connect_to_meeting(
+                vtc_url=str(config["vtc_url"]),
+                display_name=adapter._display_name() if hasattr(adapter, "_display_name") else str(config.get("bot_name") or "bot"),
+            )
+            set_connection_status(
+                "running",
+                connected=True,
+                ready=True,
+                media_ready=True,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="meeting_running",
+                reason="media_ready_confirmed",
+            )
+            await asyncio.sleep(duration * 60)
+            set_connection_status(
+                "leaving",
+                connected=True,
+                ready=False,
+                media_ready=False,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="adapter_leave",
+                reason="duration_complete",
+            )
+            await adapter.leave()
+            await adapter.close()
+            closed = True
+            success_postroll = postroll_seconds("success_postroll_sec", default=10)
+            if success_postroll > 0:
+                await asyncio.sleep(success_postroll)
+            result = f"{config.get('bot_name') or 'client'} connected to {service}."
+        else:
+            set_connection_status(
+                "connecting",
+                connected=False,
+                ready=False,
+                media_ready=False,
+                error=None,
+                vtc_url=config.get("vtc_url"),
+                stage="adapter_connect",
+                reason="legacy_adapter_connect",
+            )
+            result = await adapter.connect(duration)
+
+        stop_reason = "success"
         set_connection_status(
             "done",
             connected=False,
+            ready=False,
+            media_ready=False,
             error=None,
             vtc_url=config.get("vtc_url"),
+            stage="connect_vtc_session",
+            reason="session_done",
         )
         emit_event(
             config,
@@ -1558,21 +1695,47 @@ async def connect_vtc_session(duration):
         )
         return result
     except Exception as exc:
+        stop_reason = f"failure:{type(exc).__name__}"
         set_connection_status(
             "error",
             connected=False,
+            ready=False,
+            media_ready=False,
             error=str(exc),
             vtc_url=config.get("vtc_url"),
+            stage="connect_vtc_session",
+            reason="exception",
+            error_code=type(exc).__name__,
         )
         emit_event(
             config,
             "adapter_error",
-            {"error": str(exc), "vtc_url": config.get("vtc_url")},
+            {"error": str(exc), "error_code": type(exc).__name__, "vtc_url": config.get("vtc_url")},
             service,
         )
+        if adapter is not None and hasattr(adapter, "collect_diagnostics"):
+            try:
+                adapter.collect_diagnostics("connect_vtc_session_error", {"error": str(exc), "error_code": type(exc).__name__})
+            except Exception as diagnostic_exc:
+                emit_event(
+                    config,
+                    "session_diagnostics_failed",
+                    {"stage": "connect_vtc_session_error", "error": str(diagnostic_exc)},
+                    service,
+                )
+        failure_postroll = postroll_seconds("failure_postroll_sec", default=10)
+        if failure_postroll > 0:
+            await asyncio.sleep(failure_postroll)
+        if adapter is not None and not closed and hasattr(adapter, "close"):
+            try:
+                await adapter.close()
+            except Exception:
+                pass
         raise
     finally:
-        packet_capture.stop_and_analyze()
+        packet_capture.stop_and_analyze_with_reason(stop_reason)
+        config.pop("_meeting_joined_callback", None)
+        config.pop("_media_ready_callback", None)
         with active_adapter_lock:
             if active_adapter is adapter:
                 active_adapter = None
@@ -1587,30 +1750,104 @@ def run_connect(duration):
     return True
 
 
-def set_connection_status(state, connected=False, error=None, vtc_url=None):
+def postroll_seconds(key, default=10):
+    adapter_config = config.get("adapter_config", {})
+    if not isinstance(adapter_config, dict):
+        adapter_config = {}
+    packet_capture = config.get("packet_capture", {})
+    if not isinstance(packet_capture, dict):
+        packet_capture = {}
+    value = adapter_config.get(key, packet_capture.get(key, config.get(key, default)))
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def set_connection_status(
+    state,
+    connected=False,
+    ready=False,
+    media_ready=False,
+    error=None,
+    vtc_url=None,
+    stage=None,
+    reason=None,
+    error_code=None,
+):
+    updated_at = time.time()
     status = {
         "state": state,
         "connected": bool(connected),
+        "ready": bool(ready),
+        "media_ready": bool(media_ready),
         "error": error,
+        "error_code": error_code,
+        "stage": stage,
+        "reason": reason,
         "vtc_url": vtc_url,
-        "updated_at": time.time(),
+        "updated_at": updated_at,
     }
     with connection_status_lock:
+        previous = dict(connection_status)
+        transition = {
+            "previous_state": previous.get("state"),
+            "new_state": state,
+            "connected": bool(connected),
+            "ready": bool(ready),
+            "media_ready": bool(media_ready),
+            "stage": stage,
+            "reason": reason,
+            "error_code": error_code,
+            "updated_at": updated_at,
+        }
+        history = list(previous.get("transition_history") or [])
+        history.append(transition)
+        status["transition_history"] = history[-200:]
         connection_status.update(status)
     config["_connection_status"] = dict(connection_status)
-    emit_event(config, "connection_status_updated", status)
+    emit_event(
+        config,
+        "connection_status_updated",
+        {
+            **{key: value for key, value in status.items() if key != "transition_history"},
+            "previous_state": previous.get("state"),
+        },
+    )
 
 
 def mark_meeting_joined(vtc_url=None):
     set_connection_status(
         "meeting_joined",
         connected=True,
+        ready=False,
+        media_ready=False,
         error=None,
         vtc_url=vtc_url or config.get("vtc_url"),
+        stage="adapter_join",
+        reason="meeting_joined",
     )
     append_action_log(
         config,
         "meeting_start",
+        {"vtc_url": vtc_url or config.get("vtc_url"), "service": get_service_name(config)},
+    )
+
+
+def mark_media_ready(vtc_url=None):
+    set_connection_status(
+        "media_ready",
+        connected=True,
+        ready=True,
+        media_ready=True,
+        error=None,
+        vtc_url=vtc_url or config.get("vtc_url"),
+        stage="media_probe",
+        reason="media_ready",
+    )
+    append_action_log(
+        config,
+        "media_ready",
         {"vtc_url": vtc_url or config.get("vtc_url"), "service": get_service_name(config)},
     )
 

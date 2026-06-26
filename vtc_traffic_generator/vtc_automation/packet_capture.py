@@ -6,6 +6,8 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,6 +44,11 @@ class PacketCaptureSession:
         self.analysis_path: Path | None = None
         self.media_analysis_json_path: Path | None = None
         self.media_analysis_md_path: Path | None = None
+        self.metadata_path: Path | None = None
+        self.started_at_monotonic: float | None = None
+        self.stopped_at_monotonic: float | None = None
+        self.stop_reason: str | None = None
+        self._lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any]) -> "PacketCaptureSession":
@@ -65,6 +72,19 @@ class PacketCaptureSession:
         if not self.enabled:
             return
 
+        with self._lock:
+            if self.process and self.process.poll() is None:
+                emit_event(
+                    self.config,
+                    "packet_capture_start_skipped",
+                    {
+                        "reason": "already_running",
+                        "pcapng_path": str(self.pcapng_path) if self.pcapng_path else None,
+                        "pid": self.process.pid,
+                    },
+                )
+                return
+
         try:
             dumpcap_binary = self._resolve_binary(self.dumpcap_path)
             if not dumpcap_binary:
@@ -81,6 +101,8 @@ class PacketCaptureSession:
 
             self.output_dir.mkdir(parents=True, exist_ok=True)
             self.pcapng_path = self.output_dir / f"{self._file_stem()}.pcapng"
+            self.config["_packet_capture_path"] = str(self.pcapng_path)
+            self.started_at_monotonic = time.monotonic()
 
             command = [dumpcap_binary, "-q", "-w", str(self.pcapng_path)]
             if self.interface:
@@ -112,11 +134,14 @@ class PacketCaptureSession:
             )
 
     def stop_and_analyze(self) -> None:
+        self.stop_and_analyze_with_reason("unspecified")
+
+    def stop_and_analyze_with_reason(self, reason: str = "unspecified") -> None:
         if not self.enabled:
             return
 
         try:
-            self._stop()
+            self._stop(reason)
             self._analyze()
         except Exception as exc:
             emit_event(
@@ -125,26 +150,42 @@ class PacketCaptureSession:
                 {"error": str(exc)},
             )
 
-    def _stop(self) -> None:
-        if not self.process:
-            return
+    def _stop(self, reason: str) -> None:
+        with self._lock:
+            if not self.process:
+                emit_event(
+                    self.config,
+                    "packet_capture_stop_skipped",
+                    {"reason": "not_started", "stop_reason": reason},
+                )
+                return
+            process = self.process
+            self.process = None
 
-        if self.process.poll() is None:
-            self.process.send_signal(signal.SIGTERM)
+        self.stop_reason = reason
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
             try:
-                _, stderr = self.process.communicate(timeout=10)
+                _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                _, stderr = self.process.communicate(timeout=10)
+                process.kill()
+                _, stderr = process.communicate(timeout=10)
         else:
-            _, stderr = self.process.communicate(timeout=10)
+            _, stderr = process.communicate(timeout=10)
+        self.stopped_at_monotonic = time.monotonic()
 
         emit_event(
             self.config,
             "packet_capture_done",
             {
                 "pcapng_path": str(self.pcapng_path) if self.pcapng_path else None,
-                "returncode": self.process.returncode,
+                "returncode": process.returncode,
+                "stop_reason": reason,
+                "duration_monotonic_sec": (
+                    self.stopped_at_monotonic - self.started_at_monotonic
+                    if self.started_at_monotonic is not None and self.stopped_at_monotonic is not None
+                    else None
+                ),
                 "stderr": (stderr or "").strip(),
             },
         )
@@ -257,6 +298,7 @@ class PacketCaptureSession:
             return
 
         metadata_path = self.pcapng_path.with_suffix(".metadata.json")
+        self.metadata_path = metadata_path
         metadata = {
             "pcapng_path": str(self.pcapng_path),
             "analysis_path": str(self.analysis_path) if self.analysis_path else None,
@@ -267,6 +309,16 @@ class PacketCaptureSession:
             "interface": self.interface,
             "capture_filter": self.capture_filter,
             "display_filter": self.display_filter,
+            "execution_id": str(self.config.get("execution_id") or ""),
+            "experiment_id": str(self.config.get("experiment_id") or ""),
+            "git_sha": str(self.config.get("git_sha") or ""),
+            "config_sha256": str(self.config.get("config_sha256") or ""),
+            "stop_reason": self.stop_reason,
+            "duration_monotonic_sec": (
+                self.stopped_at_monotonic - self.started_at_monotonic
+                if self.started_at_monotonic is not None and self.stopped_at_monotonic is not None
+                else None
+            ),
             "tshark_returncode": result.returncode,
             "tshark_stderr": result.stderr.strip(),
         }
@@ -282,9 +334,11 @@ class PacketCaptureSession:
 
     def _file_stem(self) -> str:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        execution_id = self._sanitize(str(self.config.get("execution_id") or ""))
         service = self._sanitize(get_service_name(self.config))
         bot_id = self._sanitize(get_bot_id(self.config))
-        return f"{timestamp}-{service}-{bot_id}"
+        parts = [part for part in (execution_id, timestamp, service, bot_id) if part]
+        return "-".join(parts)
 
     def _resolve_binary(self, configured_path: str) -> str | None:
         resolved_path = shutil.which(configured_path)

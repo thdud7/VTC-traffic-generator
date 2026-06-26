@@ -146,6 +146,30 @@
         state: directory
         mode: "0755"
 
+    - name: Ensure capture output directory exists
+      ansible.builtin.file:
+        path: "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+        state: directory
+        mode: "0755"
+
+    - name: Remove stale local capture artifacts before starting a new run
+      ansible.builtin.shell: |
+        set -euo pipefail
+        find "{{ capture_output_dir | default('/tmp/vtc-captures') }}" \
+          -maxdepth 1 \
+          -type f \
+          \( -name "*.pcapng" \
+             -o -name "*.analysis.txt" \
+             -o -name "*.metadata.json" \
+             -o -name "*.media-analysis.json" \
+             -o -name "*.media-analysis.md" \
+             -o -name "*.preflight.json" \
+             -o -name "*.preflight.txt" \) \
+          -delete
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Ensure v4l2loopback is loaded
       become: true
       ansible.builtin.shell: |

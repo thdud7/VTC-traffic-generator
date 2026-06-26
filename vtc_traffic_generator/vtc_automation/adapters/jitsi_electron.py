@@ -8,12 +8,14 @@ import shutil
 import shlex
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from .base import ServiceAdapter
 from vtc_automation.event_log import emit_event
+from vtc_automation.live_media_probe import MediaProbeSnapshot, probe_pcap_media
 
 
 DEFAULT_COORDINATES = {
@@ -73,6 +75,30 @@ DEFAULT_ACCESSIBILITY_ROLES = {
 }
 
 
+@dataclass
+class MeetingProbeResult:
+    joined: bool = False
+    media_ready: bool = False
+    probe_name: str = "none"
+    strong_evidence: bool = False
+    observed: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    consecutive_success_count: int = 0
+    sampled_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "joined": self.joined,
+            "media_ready": self.media_ready,
+            "probe_name": self.probe_name,
+            "strong_evidence": self.strong_evidence,
+            "observed": self.observed,
+            "error": self.error,
+            "consecutive_success_count": self.consecutive_success_count,
+            "sampled_at": self.sampled_at,
+        }
+
+
 class JitsiElectronAdapter(ServiceAdapter):
     service_name = "jitsi_electron"
     supported_modes = ("native",)
@@ -92,6 +118,10 @@ class JitsiElectronAdapter(ServiceAdapter):
         self.mic_enabled = None
         self.camera_enabled = None
         self.screen_sharing = None
+        self._meeting_probe_history: list[dict[str, Any]] = []
+        self._meeting_joined_notified = False
+        self._media_ready_notified = False
+        self._current_vtc_url: str | None = None
 
     async def launch(self):
         emit_event(
@@ -162,6 +192,9 @@ class JitsiElectronAdapter(ServiceAdapter):
             raise
 
     async def connect_to_meeting(self, vtc_url: str, display_name: str):
+        self._current_vtc_url = vtc_url
+        self._meeting_joined_notified = False
+        self._media_ready_notified = False
         emit_event(self.config, "connect_vtc_session_start", {"vtc_url": vtc_url}, self.service_name)
         if not self.adapter_config.get("skip_url_entry", False):
             await self._type_url(vtc_url)
@@ -190,7 +223,9 @@ class JitsiElectronAdapter(ServiceAdapter):
             await self._ensure_prejoin_microphone_capture(str(microphone_name or ""))
             await self._click_join()
 
-        if not await self.is_in_meeting():
+        probe_result = await self.is_in_meeting()
+        if not probe_result:
+            self.collect_diagnostics("join_or_media_ready_timeout")
             raise RuntimeError("Jitsi Electron did not appear to join the meeting")
 
         self.dump_accessibility_tree("meeting_joined")
@@ -199,10 +234,8 @@ class JitsiElectronAdapter(ServiceAdapter):
             if not attached and self._optional_bool("require_audio_capture_attached", False):
                 raise RuntimeError(f"Jitsi Electron did not attach audio capture to {microphone_name!r}")
 
-        emit_event(self.config, "meeting_joined", {"vtc_url": vtc_url}, self.service_name)
-        joined_callback = self.config.get("_meeting_joined_callback")
-        if callable(joined_callback):
-            joined_callback(vtc_url)
+        self._notify_meeting_joined(vtc_url)
+        self._notify_media_ready(vtc_url)
         emit_event(self.config, "connect_vtc_session_done", {"vtc_url": vtc_url}, self.service_name)
 
     async def leave(self):
@@ -496,15 +529,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         return actual == expected or expected in actual or actual in expected
 
     async def is_in_meeting(self):
-        await asyncio.sleep(float(self.adapter_config.get("joined_wait_sec", 3)))
-        evidence = self._find_in_meeting_evidence()
-        if evidence:
-            emit_event(self.config, "meeting_state_verified", evidence, self.service_name)
-            return True
-
-        media_evidence = self._find_media_session_evidence()
-        if media_evidence:
-            emit_event(self.config, "meeting_state_verified", media_evidence, self.service_name)
+        result = await self.wait_for_meeting_probe()
+        if result.joined and result.media_ready:
+            emit_event(self.config, "meeting_state_verified", result.to_dict(), self.service_name)
             return True
 
         if self.window_id is not None and self._optional_bool("allow_window_id_meeting_fallback", False):
@@ -519,10 +546,143 @@ class JitsiElectronAdapter(ServiceAdapter):
         emit_event(
             self.config,
             "meeting_state_unverified",
-            {"window_id": self.window_id, "success": False},
+            {"window_id": self.window_id, "success": False, "last_probe": result.to_dict()},
             self.service_name,
         )
         return False
+
+    async def wait_for_meeting_probe(self) -> MeetingProbeResult:
+        timeout = float(
+            self.adapter_config.get(
+                "join_timeout_sec",
+                self.adapter_config.get("joined_wait_sec", 20),
+            )
+        )
+        join_interval = min(0.5, max(0.05, float(self.adapter_config.get("join_poll_interval_sec", 0.5))))
+        media_interval = min(
+            0.5,
+            max(0.05, float(self.adapter_config.get("media_ready_poll_interval_sec", join_interval))),
+        )
+        stable_required = max(1, int(self.adapter_config.get("join_stable_samples", 2)))
+        media_timeout = float(self.adapter_config.get("media_ready_timeout_sec", timeout))
+        deadline = time.time() + timeout
+        media_deadline: float | None = None
+        consecutive = 0
+        previous_snapshot: MediaProbeSnapshot | None = None
+        last_result = MeetingProbeResult(error="not sampled")
+
+        while time.time() < deadline or (
+            last_result.joined and media_deadline is not None and time.time() < media_deadline
+        ):
+            result, previous_snapshot = self._probe_meeting_and_media(previous_snapshot)
+            if result.joined:
+                if media_deadline is None:
+                    media_deadline = time.time() + media_timeout
+                self._notify_meeting_joined(self._current_vtc_url)
+            if result.joined and result.media_ready and result.strong_evidence:
+                consecutive += 1
+            else:
+                consecutive = 0
+            result.consecutive_success_count = consecutive
+            self._record_meeting_probe(result)
+            if consecutive >= stable_required:
+                self._notify_media_ready(self._current_vtc_url)
+                return result
+            last_result = result
+            await asyncio.sleep(media_interval if result.joined else join_interval)
+
+        return last_result
+
+    def _probe_meeting_and_media(
+        self,
+        previous_snapshot: MediaProbeSnapshot | None,
+    ) -> tuple[MeetingProbeResult, MediaProbeSnapshot | None]:
+        accessibility = self._find_in_meeting_evidence()
+        live_snapshot = self._live_media_snapshot()
+        observed: dict[str, Any] = {}
+        if accessibility:
+            observed["accessibility"] = accessibility
+
+        media_ready = False
+        strong_evidence = False
+        probe_name = "none"
+        error = None
+        if live_snapshot:
+            observed["live_media"] = live_snapshot.to_dict()
+            delta = live_snapshot.media_like_delta_from(previous_snapshot)
+            observed["live_media_delta"] = delta
+            media_ready = (
+                live_snapshot.readable
+                and live_snapshot.dtls_packets > 0
+                and live_snapshot.bidirectional_media_like
+                and delta["client_to_jvb_media_like_packets"] > 0
+                and delta["jvb_to_client_media_like_packets"] > 0
+            )
+            strong_evidence = media_ready
+            probe_name = "live_pcap_jvb_media"
+            error = live_snapshot.error
+
+        joined = bool(accessibility) or media_ready
+        if accessibility and not media_ready:
+            probe_name = "accessibility"
+            strong_evidence = True
+
+        return (
+            MeetingProbeResult(
+                joined=joined,
+                media_ready=media_ready,
+                probe_name=probe_name,
+                strong_evidence=strong_evidence,
+                observed=observed,
+                error=error,
+            ),
+            live_snapshot or previous_snapshot,
+        )
+
+    def _live_media_snapshot(self) -> MediaProbeSnapshot | None:
+        pcap_path = self.config.get("_packet_capture_path")
+        if not pcap_path:
+            return None
+        packet_capture = self.config.get("packet_capture")
+        if not isinstance(packet_capture, Mapping):
+            packet_capture = {}
+        jvb_ip = str(packet_capture.get("jvb_ip") or "")
+        if not jvb_ip:
+            return None
+        client_ip = packet_capture.get("client_ip")
+        jvb_port = int(packet_capture.get("jvb_port") or 10000)
+        return probe_pcap_media(
+            path=str(pcap_path),
+            client_ip=str(client_ip) if client_ip else None,
+            jvb_ip=jvb_ip,
+            jvb_port=jvb_port,
+        )
+
+    def _record_meeting_probe(self, result: MeetingProbeResult) -> None:
+        payload = result.to_dict()
+        self._meeting_probe_history.append(payload)
+        self._meeting_probe_history = self._meeting_probe_history[-100:]
+        emit_event(self.config, "meeting_probe_sample", payload, self.service_name)
+
+    def _notify_meeting_joined(self, vtc_url: str | None = None) -> None:
+        if self._meeting_joined_notified:
+            return
+        self._meeting_joined_notified = True
+        vtc_url = vtc_url or self._current_vtc_url or str(self.config.get("vtc_url") or "")
+        emit_event(self.config, "meeting_joined", {"vtc_url": vtc_url}, self.service_name)
+        joined_callback = self.config.get("_meeting_joined_callback")
+        if callable(joined_callback):
+            joined_callback(vtc_url)
+
+    def _notify_media_ready(self, vtc_url: str | None = None) -> None:
+        if self._media_ready_notified:
+            return
+        self._media_ready_notified = True
+        vtc_url = vtc_url or self._current_vtc_url or str(self.config.get("vtc_url") or "")
+        emit_event(self.config, "media_ready", {"vtc_url": vtc_url}, self.service_name)
+        media_ready_callback = self.config.get("_media_ready_callback")
+        if callable(media_ready_callback):
+            media_ready_callback(vtc_url)
 
     def dump_accessibility_tree(self, stage: str | None = None, output_path: str | None = None) -> bool:
         output_path = output_path or self._dump_path(stage)
@@ -1138,6 +1298,7 @@ class JitsiElectronAdapter(ServiceAdapter):
         return str(self.accessibility_dump_path)
 
     def _diagnostic_path(self, stage: str) -> Path:
+        stage = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(stage)).strip("-") or "diagnostics"
         configured = self.adapter_config.get("diagnostic_dir")
         if configured:
             base = Path(str(configured)).expanduser()
@@ -1145,6 +1306,91 @@ class JitsiElectronAdapter(ServiceAdapter):
             base = Path(self.adapter_log_path).expanduser().parent / "diagnostics"
         base.mkdir(parents=True, exist_ok=True)
         return base / f"{stage}.json"
+
+    def collect_diagnostics(self, stage: str, extra: Mapping[str, Any] | None = None) -> str:
+        path = self._diagnostic_path(stage)
+        accessibility_path = path.with_suffix(".accessibility.json")
+        diagnostics: dict[str, Any] = {
+            "stage": stage,
+            "extra": dict(extra or {}),
+            "display": self.display,
+            "display_backend": self.display_backend,
+            "window_id": self.window_id,
+            "vtc_url": self.config.get("vtc_url"),
+            "bot_id": self.config.get("bot_name"),
+            "execution_id": self.config.get("execution_id"),
+            "experiment_id": self.config.get("experiment_id"),
+            "git_sha": self.config.get("git_sha"),
+            "config_sha256": self.config.get("config_sha256"),
+            "connection_status": self.config.get("_connection_status"),
+            "packet_capture_path": self.config.get("_packet_capture_path"),
+            "meeting_probe_history": self._meeting_probe_history[-50:],
+            "commands": {},
+            "logs": {},
+        }
+
+        pcap_path = self.config.get("_packet_capture_path")
+        if pcap_path:
+            pcap = Path(str(pcap_path)).expanduser()
+            diagnostics["packet_capture"] = {
+                "path": str(pcap),
+                "exists": pcap.exists(),
+                "size_bytes": pcap.stat().st_size if pcap.exists() else None,
+            }
+
+        self.dump_accessibility_tree(str(stage), str(accessibility_path))
+        diagnostics["accessibility_dump_path"] = str(accessibility_path)
+        diagnostics["accessibility_dump_exists"] = accessibility_path.exists()
+
+        video_device = str(self.config.get("virtual_video", {}).get("device") or self.adapter_config.get("video_device") or "/dev/video5")
+        command_map = {
+            "wmctrl_windows": ["wmctrl", "-lG"],
+            "xdotool_visible_windows": ["xdotool", "search", "--onlyvisible", "--name", "."],
+            "processes": ["/bin/bash", "-lc", "ps -ef | grep -E '[j]itsi|[e]lectron|[f]fmpeg|[d]umpcap|[v]tc_generator'"],
+            "pactl_info": ["pactl", "info"],
+            "pactl_sinks": ["pactl", "list", "short", "sinks"],
+            "pactl_sources": ["pactl", "list", "short", "sources"],
+            "pactl_source_outputs": ["pactl", "list", "source-outputs"],
+            "pactl_sink_inputs": ["pactl", "list", "sink-inputs"],
+            "video_devices": ["/bin/bash", "-lc", f"ls -l {shlex.quote(video_device)} /dev/video* 2>/dev/null || true"],
+            "ffmpeg_video_device": ["/bin/bash", "-lc", f"ps -ef | grep -E '[f]fmpeg.*{re.escape(video_device)}' || true"],
+        }
+        for key, command in command_map.items():
+            result = self._run_command(command, check=False)
+            diagnostics["commands"][key] = {
+                "command": command,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+
+        for key, file_path in {
+            "app_log": self.app_log_path,
+            "adapter_log": self.adapter_log_path,
+            "event_log": self.adapter_config.get("event_log_path"),
+        }.items():
+            if file_path:
+                diagnostics["logs"][key] = self._tail_file(str(file_path))
+
+        path.write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+        emit_event(
+            self.config,
+            "session_diagnostics_saved",
+            {"stage": stage, "path": str(path), "accessibility_dump_path": str(accessibility_path), "success": True},
+            self.service_name,
+        )
+        return str(path)
+
+    def _tail_file(self, path: str, max_bytes: int = 65536) -> dict[str, Any]:
+        file_path = Path(path).expanduser()
+        if not file_path.exists():
+            return {"path": str(file_path), "exists": False}
+        with file_path.open("rb") as infile:
+            infile.seek(0, os.SEEK_END)
+            size = infile.tell()
+            infile.seek(max(0, size - max_bytes))
+            data = infile.read().decode("utf-8", errors="replace")
+        return {"path": str(file_path), "exists": True, "size_bytes": size, "tail": data}
 
     def _write_device_diagnostics(self, stage: str) -> str:
         diagnostics: dict[str, Any] = {

@@ -15,7 +15,9 @@ from vtc_traffic_generator.tools.analyze_media_capture import (
     load_stats_mappings,
     parse_rtp_header,
 )
-from vtc_traffic_generator.vtc_automation.adapters.jitsi_electron import JitsiElectronAdapter
+from vtc_traffic_generator.vtc_automation.adapters.jitsi_electron import JitsiElectronAdapter, MeetingProbeResult
+from vtc_traffic_generator.vtc_automation.live_media_probe import classify_udp_payload as classify_live_udp_payload
+from vtc_traffic_generator.vtc_automation.packet_capture import PacketCaptureSession
 
 
 class JitsiMediaHardeningTests(unittest.TestCase):
@@ -48,6 +50,45 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["top"], 40)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["width"], 800)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["height"], 720)
+
+    def test_generation_uses_execution_scoped_logs_and_stable_config_hash(self):
+        with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:
+            first = generate("vtc_traffic_generator/experiment.icsi.jitsi.3bot.5min.json", first_tmp)
+            second = generate("vtc_traffic_generator/experiment.icsi.jitsi.3bot.5min.json", second_tmp)
+
+            first_remote = json.loads(Path(first["remote_configs"][0]).read_text())
+            second_remote = json.loads(Path(second["remote_configs"][0]).read_text())
+            first_manifest = json.loads(Path(first["run_manifest"]).read_text())
+            second_manifest = json.loads(Path(second["run_manifest"]).read_text())
+            inventory = Path(first["inventory"]).read_text(encoding="utf-8")
+
+        execution_id = first_remote["execution_id"]
+        self.assertIn(execution_id, first_remote["action_log_path"])
+        self.assertIn(execution_id, first_remote["adapter_config"]["event_log_path"])
+        self.assertIn(execution_id, first_remote["adapter_config"]["app_log_path"])
+        self.assertIn(execution_id, first_remote["adapter_config"]["adapter_log_path"])
+        self.assertIn(f"capture_upload_execution_id={execution_id}", inventory)
+        self.assertEqual(first_manifest["config_sha256"], second_manifest["config_sha256"])
+        self.assertNotEqual(first_remote["execution_id"], second_remote["execution_id"])
+
+    def test_packet_capture_file_stem_includes_execution_id(self):
+        session = PacketCaptureSession(
+            config={
+                "execution_id": "run-abc",
+                "service": "jitsi_electron",
+                "bot_name": "bot1",
+            },
+            enabled=True,
+        )
+        stem = session._file_stem()
+        self.assertTrue(stem.startswith("run-abc-"))
+        self.assertTrue(stem.endswith("-jitsi_electron-bot1"))
+
+    def test_upload_playbook_filters_current_execution_only(self):
+        upload_playbook = Path("ansible/upload_captures.yml").read_text(encoding="utf-8")
+        self.assertIn("capture_upload_include_pattern", upload_playbook)
+        self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
+        self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
@@ -114,6 +155,43 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         asyncio.run(adapter.connect_to_meeting("https://172.31.32.200:8443/testroom", "bot1"))
 
         self.assertEqual(calls, [("activate", "https://172.31.32.200:8443/testroom"), ("position", None)])
+
+    def test_meeting_probe_requires_stable_media_ready_samples(self):
+        callbacks = []
+        adapter = JitsiElectronAdapter(
+            {
+                "vtc_url": "https://172.31.32.200:8443/testroom",
+                "_meeting_joined_callback": lambda url: callbacks.append(("joined", url)),
+                "_media_ready_callback": lambda url: callbacks.append(("media_ready", url)),
+                "adapter_config": {
+                    "join_timeout_sec": 1,
+                    "media_ready_timeout_sec": 1,
+                    "join_poll_interval_sec": 0.05,
+                    "join_stable_samples": 2,
+                },
+            }
+        )
+        adapter._current_vtc_url = "https://172.31.32.200:8443/testroom"
+        samples = [
+            MeetingProbeResult(joined=True, media_ready=True, strong_evidence=True, probe_name="live_pcap_jvb_media"),
+            MeetingProbeResult(joined=True, media_ready=True, strong_evidence=True, probe_name="live_pcap_jvb_media"),
+        ]
+
+        def fake_probe(previous_snapshot):
+            return samples.pop(0), None
+
+        adapter._probe_meeting_and_media = fake_probe
+        result = asyncio.run(adapter.wait_for_meeting_probe())
+
+        self.assertTrue(result.media_ready)
+        self.assertEqual(result.consecutive_success_count, 2)
+        self.assertEqual(
+            callbacks,
+            [
+                ("joined", "https://172.31.32.200:8443/testroom"),
+                ("media_ready", "https://172.31.32.200:8443/testroom"),
+            ],
+        )
 
     def test_coordinate_fallback_is_relative_to_jitsi_window(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
@@ -209,6 +287,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
     def test_parse_rtp_header_ignores_stun_and_extracts_ssrc_payload_type(self):
         stun = bytes.fromhex("000100002112a442000000000000000000000000")
         self.assertEqual(classify_udp_payload(stun), "stun")
+        self.assertEqual(classify_live_udp_payload(stun), "stun")
 
         payload = bytearray(32)
         payload[0] = 0x80

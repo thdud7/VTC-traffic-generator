@@ -2,6 +2,7 @@
 """Generate VTC experiment configs and optionally deploy/run them with Ansible."""
 
 import argparse
+import hashlib
 import json
 import re
 import secrets
@@ -10,6 +11,11 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+
+try:
+    from vtc_automation.event_log import resolve_git_sha
+except ImportError:
+    from vtc_traffic_generator.vtc_automation.event_log import resolve_git_sha
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +89,10 @@ def build_controller_config(experiment, clients):
     controller = {
         "role": "controller",
         "vtc_platform": service,
+        "experiment_id": experiment.get("experiment_id"),
+        "execution_id": experiment.get("execution_id"),
+        "git_sha": experiment.get("git_sha"),
+        "config_sha256": experiment.get("config_sha256"),
         "duration": experiment.get("duration", 1),
         "videoconference": bool(experiment.get("videoconference", True)),
         "vtc_clients": [[client["c2_host"], client["c2_port"]] for client in clients],
@@ -116,6 +126,7 @@ def build_remote_config(experiment, client):
         raise ValueError(f"{client['name']}.adapter_config must be an object when provided")
 
     bot_name = client["name"]
+    run_log_id = experiment_run_log_id(experiment)
     virtual_audio = {
         "sink_name": client["sink_name"],
         "source_name": client["source_name"],
@@ -131,9 +142,10 @@ def build_remote_config(experiment, client):
         "display": client["display"],
         "display_name": str(client.get("display_name", bot_name)),
         "microphone_name": str(client.get("microphone_name", client["source_name"])),
-        "event_log_path": str(client.get("event_log_path", f"/tmp/vtc-{bot_name}/events.jsonl")),
-        "app_log_path": str(client.get("app_log_path", f"/tmp/vtc-{bot_name}/jitsi-electron.log")),
-        "adapter_log_path": str(client.get("adapter_log_path", f"/tmp/vtc-{bot_name}/adapter.log")),
+        "event_log_path": str(client.get("event_log_path", f"/tmp/vtc-{bot_name}/events-{run_log_id}.jsonl")),
+        "app_log_path": str(client.get("app_log_path", f"/tmp/vtc-{bot_name}/jitsi-electron-{run_log_id}.log")),
+        "adapter_log_path": str(client.get("adapter_log_path", f"/tmp/vtc-{bot_name}/adapter-{run_log_id}.log")),
+        "diagnostic_dir": str(client.get("diagnostic_dir", f"/tmp/vtc-{bot_name}/diagnostics/{run_log_id}")),
         "restart_existing": bool(client.get("restart_existing", False)),
     }
     screen_share_window = resolve_screen_share_window(experiment, client, defaults)
@@ -159,6 +171,10 @@ def build_remote_config(experiment, client):
         "role": "client",
         "vtc_platform": service,
         "service": service,
+        "experiment_id": experiment.get("experiment_id"),
+        "execution_id": experiment.get("execution_id"),
+        "git_sha": experiment.get("git_sha"),
+        "config_sha256": experiment.get("config_sha256"),
         "vtc_url": require(experiment.get("vtc_url") or experiment.get("room_url"), "vtc_url"),
         "c2_port": client["c2_port"],
         "bot_name": bot_name,
@@ -166,7 +182,7 @@ def build_remote_config(experiment, client):
             "display_name": str(client.get("display_name", bot_name)),
         },
         "action_log_path": str(
-            client.get("action_log_path", f"/tmp/vtc-{bot_name}/actions-{experiment_run_log_id(experiment)}.txt")
+            client.get("action_log_path", f"/tmp/vtc-{bot_name}/actions-{run_log_id}.txt")
         ),
         "videoconference": bool(experiment.get("videoconference", True)),
         "audio_path": str(client.get("audio_path", defaults.get("audio_path", "VTC_AV/VTC_audio_tracks"))),
@@ -264,12 +280,11 @@ def render_inventory(experiment, clients, output_dir):
         if not isinstance(packet_capture, dict):
             packet_capture = {}
         capture_output_dir = str(packet_capture.get("output_dir") or "/tmp/vtc-captures")
-        action_log_path = str(
-            client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions-{experiment_run_log_id(experiment)}.txt")
-        )
-        event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events.jsonl"))
-        app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron.log"))
-        adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter.log"))
+        run_log_id = experiment_run_log_id(experiment)
+        action_log_path = str(client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions-{run_log_id}.txt"))
+        event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events-{run_log_id}.jsonl"))
+        app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron-{run_log_id}.log"))
+        adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter-{run_log_id}.log"))
         screen_share_window = resolve_screen_share_window(experiment, client, defaults)
         screen_share_window_enabled = bool(screen_share_window.get("enabled", False))
         screen_share_window_title = str(screen_share_window.get("title") or f"VTC Share Window - {client['name']}")
@@ -394,6 +409,7 @@ def append_capture_upload_inventory_vars(lines, experiment, capture_upload):
     run_id = capture_upload.get("run_id") or experiment.get("run_id")
     if run_id:
         lines.append(f"capture_upload_run_id={quote_inventory_value(run_id)}")
+        lines.append(f"capture_upload_execution_id={quote_inventory_value(str(experiment.get('execution_id') or run_id))}")
 
     include_logs = bool(capture_upload.get("include_logs", True))
     lines.append(f"capture_upload_include_logs={quote_inventory_value(str(include_logs).lower())}")
@@ -403,6 +419,11 @@ def experiment_run_log_id(experiment):
     value = experiment.get("_run_log_id")
     if value:
         return str(value)
+
+    if experiment.get("execution_id"):
+        value = sanitize_log_id(str(experiment["execution_id"]))
+        experiment["_run_log_id"] = value
+        return value
 
     base = (
         experiment.get("run_id")
@@ -423,6 +444,49 @@ def sanitize_log_id(value):
 def capture_upload_configured(experiment):
     capture_upload = experiment.get("capture_upload", {})
     return isinstance(capture_upload, dict) and bool(capture_upload.get("s3_uri"))
+
+
+def prepare_experiment_metadata(experiment, experiment_path):
+    experiment_id = str(
+        experiment.get("experiment_id")
+        or experiment.get("run_id")
+        or Path(experiment_path).expanduser().stem
+    )
+    execution_id = str(
+        experiment.get("execution_id")
+        or f"{sanitize_log_id(experiment_id)}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(4)}"
+    )
+    experiment["experiment_id"] = experiment_id
+    experiment["execution_id"] = execution_id
+    experiment["git_sha"] = experiment.get("git_sha") or resolve_git_sha(PROJECT_ROOT)
+    experiment["config_sha256"] = stable_config_sha256(experiment)
+
+    capture_upload = experiment.get("capture_upload")
+    if isinstance(capture_upload, dict) and capture_upload.get("s3_uri"):
+        capture_upload["run_id"] = execution_id
+
+
+def stable_config_sha256(experiment):
+    normalized = normalize_for_config_hash(experiment)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_for_config_hash(value, parent_key=""):
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in sorted(value.items()):
+            if str(key).startswith("_"):
+                continue
+            if key in {"execution_id", "git_sha", "config_sha256"}:
+                continue
+            if parent_key == "capture_upload" and key == "run_id":
+                continue
+            normalized[key] = normalize_for_config_hash(item, str(key))
+        return normalized
+    if isinstance(value, list):
+        return [normalize_for_config_hash(item, parent_key) for item in value]
+    return value
 
 
 def merge_mapping(base, override):
@@ -471,6 +535,7 @@ def quote_inventory_value(value):
 
 def generate(experiment_path, output_dir):
     experiment = load_json(experiment_path)
+    prepare_experiment_metadata(experiment, experiment_path)
     experiment_run_log_id(experiment)
     clients = normalize_clients(experiment)
     output_dir = Path(output_dir).expanduser().resolve()
@@ -489,6 +554,37 @@ def generate(experiment_path, output_dir):
     inventory_path = output_dir / "inventory.ini"
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     inventory_path.write_text(render_inventory(experiment, clients, output_dir), encoding="utf-8")
+    manifest_path = output_dir / f"run-manifest-{experiment['execution_id']}.json"
+    write_json(
+        manifest_path,
+        {
+            "experiment": str(Path(experiment_path).expanduser().resolve()),
+            "experiment_id": experiment["experiment_id"],
+            "execution_id": experiment["execution_id"],
+            "git_sha": experiment.get("git_sha"),
+            "config_sha256": experiment.get("config_sha256"),
+            "duration_minutes": experiment.get("duration"),
+            "validity": {
+                "intended_duration_sec": float(experiment.get("duration", 0)) * 60,
+                "minimum_media_ready_duration_sec": None,
+                "media_ready_required": True,
+                "packet_capture_required": True,
+                "s3_upload_run_id": experiment.get("capture_upload", {}).get("run_id")
+                if isinstance(experiment.get("capture_upload"), dict)
+                else None,
+            },
+            "clients": [
+                {
+                    "name": client["name"],
+                    "host": client["host"],
+                    "c2_host": client["c2_host"],
+                    "display": client["display"],
+                    "video_device": client["video_device"],
+                }
+                for client in clients
+            ],
+        },
+    )
 
     return {
         "experiment": Path(experiment_path).expanduser().resolve(),
@@ -496,6 +592,7 @@ def generate(experiment_path, output_dir):
         "controller_config": controller_config_path,
         "inventory": inventory_path,
         "remote_configs": remote_paths,
+        "run_manifest": manifest_path,
         "capture_upload_configured": capture_upload_configured(experiment),
     }
 
@@ -576,6 +673,7 @@ def main():
 
     print(f"Generated controller config: {generated['controller_config']}")
     print(f"Generated Ansible inventory: {generated['inventory']}")
+    print(f"Generated run manifest: {generated['run_manifest']}")
     for remote_config in generated["remote_configs"]:
         print(f"Generated client config: {remote_config}")
 

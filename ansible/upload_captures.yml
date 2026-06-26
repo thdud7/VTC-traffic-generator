@@ -18,6 +18,10 @@
       ansible.builtin.command: aws --version
       changed_when: false
 
+    - name: Set current execution capture include pattern
+      ansible.builtin.set_fact:
+        capture_upload_include_pattern: "*{{ capture_upload_execution_id | default(capture_upload_run_id) }}*"
+
     - name: Ensure capture output directory exists
       ansible.builtin.file:
         path: "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
@@ -35,7 +39,7 @@
           - "--exclude"
           - "*"
           - "--include"
-          - "*.pcapng"
+          - "{{ capture_upload_include_pattern }}.pcapng"
       changed_when: true
 
     - name: Upload capture analysis and metadata
@@ -49,17 +53,28 @@
           - "--exclude"
           - "*"
           - "--include"
-          - "*.analysis.txt"
+          - "{{ capture_upload_include_pattern }}.analysis.txt"
           - "--include"
-          - "*.metadata.json"
+          - "{{ capture_upload_include_pattern }}.metadata.json"
           - "--include"
-          - "*.media-analysis.json"
+          - "{{ capture_upload_include_pattern }}.media-analysis.json"
           - "--include"
-          - "*.media-analysis.md"
+          - "{{ capture_upload_include_pattern }}.media-analysis.md"
           - "--include"
-          - "*.preflight.json"
+          - "{{ capture_upload_include_pattern }}.preflight.json"
           - "--include"
-          - "*.preflight.txt"
+          - "{{ capture_upload_include_pattern }}.preflight.txt"
+      changed_when: true
+
+    - name: Upload client diagnostics
+      ansible.builtin.shell: |
+        set -euo pipefail
+        diagnostics_dir="{{ adapter_log_path | default(client_log_path | default('/tmp/vtc-client/client.log')) | dirname }}/diagnostics/{{ capture_upload_execution_id | default(capture_upload_run_id) }}"
+        if [ -d "$diagnostics_dir" ] && [ -n "$(find "$diagnostics_dir" -type f -print -quit)" ]; then
+          aws s3 sync "$diagnostics_dir" "{{ capture_upload_s3_uri }}/diagnostics/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+        fi
+      args:
+        executable: /bin/bash
       changed_when: true
 
     - name: Upload client logs
