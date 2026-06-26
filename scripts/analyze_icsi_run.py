@@ -381,6 +381,7 @@ def analyze(run_dir: Path, min_media_duration_sec: float) -> tuple[dict[str, Any
         if event_type(record) in {"mic_on", "speech_prepare_mic_on_result"}
         and details(record).get("requested_state") is True
         and details(record).get("success") is False
+        and details(record).get("suppressed") is not True
     ]
     post_decisions = by_type.get("post_speech_mic_decision", [])
     post_action_results = by_type.get("post_speech_mic_action_result", [])
@@ -508,7 +509,7 @@ def compute_mic_policy_checks(events: list[dict[str, Any]]) -> dict[str, Any]:
         data = details(action)
         segment_id = str(data.get("playback_segment_id") or "")
         action_ts = parse_utc(action.get("ts") or data.get("decision_utc"))
-        done_ts = parse_utc(data.get("actual_playback_done_utc"))
+        done_ts = parse_utc(data.get("playback_done_observed_utc") or data.get("actual_playback_done_utc"))
         if done_ts is None and segment_id in done_by_segment:
             done_ts = parse_utc(details(done_by_segment[segment_id]).get("actual_utc") or done_by_segment[segment_id].get("ts"))
         delta_ms = None
@@ -537,13 +538,22 @@ def compute_mic_policy_checks(events: list[dict[str, Any]]) -> dict[str, Any]:
         )
 
     duplicate_mic = 0
-    sorted_mic = sorted(mic_events, key=lambda item: parse_utc(item.get("ts")) or datetime.min.replace(tzinfo=timezone.utc))
+    action_requests = [
+        record
+        for record in events
+        if event_type(record) in {"speech_prepare_mic_on_start", "post_speech_mic_action_start"}
+    ]
+    sorted_mic = sorted(
+        action_requests,
+        key=lambda item: parse_utc(item.get("ts")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
     previous_by_bot_state: dict[tuple[str, str], datetime] = {}
     for record in sorted_mic:
         ts = parse_utc(record.get("ts"))
         if not ts:
             continue
-        key = (normalized_bot_id(record), event_type(record))
+        data = details(record)
+        key = (normalized_bot_id(record), str(data.get("requested_state")))
         prev = previous_by_bot_state.get(key)
         if prev and (ts - prev).total_seconds() * 1000.0 < 1500:
             duplicate_mic += 1

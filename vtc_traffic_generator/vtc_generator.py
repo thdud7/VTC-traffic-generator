@@ -1163,16 +1163,11 @@ def handle_post_speech_mic_decision(
         utterance.get("playback_segment_id") or utterance["speech_id"],
         max(1.0, mic_action_timeout_sec),
     )
-    playback_done_ns = 0
-    try:
-        playback_done_ns = int(playback_wait.get("updated_monotonic_ns") or 0)
-    except (TypeError, ValueError):
-        playback_done_ns = 0
-    if playback_wait.get("completed") and playback_done_ns > 0:
-        guard_deadline_ns = playback_done_ns + seconds_to_ns(float(post_speech_mic_guard_ms) / 1000.0)
+    playback_done_observed_utc = utc_now_iso()
+    playback_done_observed_ns = time.monotonic_ns()
+    if playback_wait.get("completed"):
+        guard_deadline_ns = playback_done_observed_ns + seconds_to_ns(float(post_speech_mic_guard_ms) / 1000.0)
         sleep_until_monotonic_ns(guard_deadline_ns)
-    elif playback_wait.get("completed"):
-        time.sleep(float(post_speech_mic_guard_ms) / 1000.0)
 
     random_value = rng.random()
     decision_off = random_value < post_speech_mic_off_probability
@@ -1205,6 +1200,8 @@ def handle_post_speech_mic_decision(
             "guard_ms": int(post_speech_mic_guard_ms),
             "playback_done_wait": playback_wait,
             "actual_playback_done_utc": playback_wait.get("updated_utc"),
+            "playback_done_observed_utc": playback_done_observed_utc,
+            "playback_done_observed_monotonic_ns": playback_done_observed_ns,
             "decision_utc": decision_utc,
             "requested_state": False if decision_off else None,
             "state_before": state_before,

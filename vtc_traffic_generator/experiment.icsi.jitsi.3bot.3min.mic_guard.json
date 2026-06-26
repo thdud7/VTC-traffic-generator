@@ -164,7 +164,7 @@
       "media_ready_timeout_sec": 60,
       "media_ready_poll_interval_sec": 0.5,
       "failure_postroll_sec": 10,
-      "success_postroll_sec": 5,
+      "success_postroll_sec": 10,
       "meeting_window_wait_sec": 10,
       "coordinates_relative_to_window": true,
       "trust_shortcut_state": false,
