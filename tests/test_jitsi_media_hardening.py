@@ -40,6 +40,11 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["adapter_config"]["microphone_name"], "VTC_Microphone")
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])
+        self.assertFalse(remote_config["adapter_config"]["use_cached_control_state"])
+        self.assertTrue(remote_config["adapter_config"]["trust_camera_shortcut_state"])
+        self.assertTrue(remote_config["adapter_config"]["trust_screen_share_shortcut_state"])
+        self.assertTrue(remote_config["adapter_config"]["use_cached_camera_state"])
+        self.assertTrue(remote_config["adapter_config"]["use_cached_screen_share_state"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_default_device_selection_fallback"])
         self.assertTrue(remote_config["adapter_config"]["allow_pulse_microphone_mute_fallback"])
         self.assertFalse(remote_config["adapter_config"]["allow_media_capture_meeting_fallback"])
@@ -268,7 +273,32 @@ class JitsiMediaHardeningTests(unittest.TestCase):
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
         self.assertFalse(adapter._trust_shortcut_state())
+        self.assertFalse(adapter._trust_shortcut_state("camera"))
         self.assertFalse(adapter._use_cached_control_state())
+        self.assertFalse(adapter._use_cached_control_state("screen_share"))
+
+    def test_adapter_supports_control_scoped_cached_state(self):
+        adapter = JitsiElectronAdapter(
+            {
+                "adapter_config": {
+                    "trust_shortcut_state": False,
+                    "use_cached_control_state": False,
+                    "trust_camera_shortcut_state": True,
+                    "trust_screen_share_shortcut_state": True,
+                    "use_cached_camera_state": True,
+                    "use_cached_screen_share_state": True,
+                }
+            }
+        )
+
+        self.assertFalse(adapter._trust_shortcut_state())
+        self.assertFalse(adapter._trust_shortcut_state("mic"))
+        self.assertTrue(adapter._trust_shortcut_state("camera"))
+        self.assertTrue(adapter._trust_shortcut_state("screen_share"))
+        self.assertFalse(adapter._use_cached_control_state())
+        self.assertFalse(adapter._use_cached_control_state("mic"))
+        self.assertTrue(adapter._use_cached_control_state("camera"))
+        self.assertTrue(adapter._use_cached_control_state("screen_share"))
 
     def test_launch_command_appends_url_when_enabled(self):
         adapter = JitsiElectronAdapter(

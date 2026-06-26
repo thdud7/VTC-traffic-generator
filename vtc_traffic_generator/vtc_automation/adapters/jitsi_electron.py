@@ -914,7 +914,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             method = self._press_shortcut(shortcut)
             await asyncio.sleep(float(self.adapter_config.get("state_change_wait_sec", 1)))
             after_state = self._infer_control_state(control)
-            if self._trust_shortcut_state() and after_state == before_state:
+            if self._trust_shortcut_state(control) and after_state == before_state:
                 after_state = desired_state
             if after_state == desired_state:
                 self._set_cached_state(control, desired_state)
@@ -1013,7 +1013,7 @@ class JitsiElectronAdapter(ServiceAdapter):
                     self._emit_screen_share_error("screen share target could not be selected", before_state, method)
                     return False
             after_state = self._infer_control_state("screen_share")
-            if self._trust_shortcut_state() and after_state == before_state:
+            if self._trust_shortcut_state("screen_share") and after_state == before_state:
                 after_state = desired_state
             success = after_state == desired_state
             if success:
@@ -1150,12 +1150,12 @@ class JitsiElectronAdapter(ServiceAdapter):
             state = self._infer_state_from_accessibility(self._names("mic_currently_on"), self._names("mic_currently_off"))
             if state is not None:
                 self.mic_enabled = state
-            return self.mic_enabled if state is None and self._use_cached_control_state() else state
+            return self.mic_enabled if state is None and self._use_cached_control_state(control) else state
         if control == "camera":
             state = self._infer_state_from_accessibility(self._names("camera_currently_on"), self._names("camera_currently_off"))
             if state is not None:
                 self.camera_enabled = state
-            return self.camera_enabled if state is None and self._use_cached_control_state() else state
+            return self.camera_enabled if state is None and self._use_cached_control_state(control) else state
         if control == "screen_share":
             state = self._infer_state_from_accessibility(
                 self._names("screen_share_currently_on"),
@@ -1163,7 +1163,7 @@ class JitsiElectronAdapter(ServiceAdapter):
             )
             if state is not None:
                 self.screen_sharing = state
-            return self.screen_sharing if state is None and self._use_cached_control_state() else state
+            return self.screen_sharing if state is None and self._use_cached_control_state(control) else state
         return None
 
     def _infer_state_from_accessibility(self, true_names: list[str], false_names: list[str]) -> bool | None:
@@ -1268,10 +1268,18 @@ class JitsiElectronAdapter(ServiceAdapter):
             return value.lower() in ("1", "true", "yes", "on")
         return bool(value)
 
-    def _trust_shortcut_state(self) -> bool:
+    def _trust_shortcut_state(self, control: str | None = None) -> bool:
+        if control:
+            key = f"trust_{control}_shortcut_state"
+            if key in self.adapter_config:
+                return self._optional_bool(key, False) is True
         return self._optional_bool("trust_shortcut_state", False) is True
 
-    def _use_cached_control_state(self) -> bool:
+    def _use_cached_control_state(self, control: str | None = None) -> bool:
+        if control:
+            key = f"use_cached_{control}_state"
+            if key in self.adapter_config:
+                return self._optional_bool(key, False) is True
         return self._optional_bool("use_cached_control_state", False) is True
 
     def _click_coordinate(self, coords: tuple[int, int]):
