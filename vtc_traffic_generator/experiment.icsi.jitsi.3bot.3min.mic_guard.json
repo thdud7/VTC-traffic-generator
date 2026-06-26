@@ -1,10 +1,10 @@
 {
   "service": "jitsi_electron",
   "vtc_url": "https://172.31.32.200:8443/testroom#config.prejoinConfig.enabled=false&config.startWithAudioMuted=false&config.startWithVideoMuted=false",
-  "duration": 10,
+  "duration": 3,
   "videoconference": true,
   "branch": "jitsi",
-  "run_id": "jitsi_icsi_3bot_10min_random_actions",
+  "run_id": "jitsi_icsi_3bot_3min_mic_guard",
   "repo": {
     "dir": "/home/ubuntu/project/VTC-traffic-generator",
     "url": "https://github.com/thdud7/VTC-traffic-generator.git",
@@ -32,7 +32,7 @@
   },
   "capture_upload": {
     "s3_uri": "s3://vtc-traffic-data/captures",
-    "run_id": "jitsi_icsi_3bot_10min_random_actions",
+    "run_id": "jitsi_icsi_3bot_3min_mic_guard",
     "include_logs": true
   },
   "capture": {
@@ -48,7 +48,7 @@
       "meeting_id": "Bdb001",
       "min_speaker_duration_sec": 1.0,
       "min_utterance_duration_sec": 0.05,
-      "max_duration_sec": 600,
+      "max_duration_sec": 180,
       "scenario_offset_sec": 0,
       "mic_pre_roll_sec": 4.0,
       "mic_action_timeout_sec": 3.0,
@@ -72,26 +72,20 @@
       "enabled": true,
       "min_interval_sec": 20,
       "max_interval_sec": 45,
-      "screen_share_probability": 0.6,
-      "camera_probability": 1.0,
+      "screen_share_probability": 0.0,
+      "camera_probability": 0.0,
       "mic_probability": 0.8,
-      "keep_camera_on": false,
-      "camera_coverage_per_bot": true,
-      "camera_coverage_off_hold_sec": 8.0,
-      "camera_coverage_inter_action_sec": 1.0
+      "keep_camera_on": false
     },
     "random_actions": {
       "enabled": true,
       "nonblocking": true,
       "min_interval_sec": 20,
       "max_interval_sec": 45,
-      "screen_share_probability": 0.6,
-      "camera_probability": 1.0,
+      "screen_share_probability": 0.0,
+      "camera_probability": 0.0,
       "mic_probability": 0.8,
-      "keep_camera_on": false,
-      "camera_coverage_per_bot": true,
-      "camera_coverage_off_hold_sec": 8.0,
-      "camera_coverage_inter_action_sec": 1.0
+      "keep_camera_on": false
     }
   },
   "defaults": {
@@ -190,9 +184,9 @@
       "coordinates": {
         "room_url_input": [260, 137],
         "room_url_go_button": [266, 193],
-        "name_input": null,
-        "join_button": null,
-        "mic_button": null,
+        "name_input": [200, 286],
+        "join_button": [200, 342],
+        "mic_button": [60, 408],
         "camera_button": null,
         "hangup_button": null,
         "device_settings_button": null,

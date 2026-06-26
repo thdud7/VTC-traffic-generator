@@ -96,6 +96,10 @@ Use `vtc_platform` to select the adapter. Current adapter keys include `jitsi`,
 `webex`, `google_meet`, `bigbluebutton`, `teams`, `zoom`, `messenger`, and
 `discord`.
 
+For the current EC2 Jitsi Electron collection workflow, validation sequence,
+S3 layout, and packet acceptance rules, see
+[`docs/jitsi_electron_collection.md`](docs/jitsi_electron_collection.md).
+
 ## Executing a VTC session
 1. Ensure each VTC client machine is [configured properly](#configuring-the-vtc-clients).
 1. Start the VTC client software on each client *n* with: `python vtc_generator.py <remote_config_n.json>`
@@ -232,11 +236,13 @@ configs and the Ansible playbooks to update and start remote clients.
 
    `--upload-captures` runs `ansible/upload_captures.yml`. It expects
    `capture_upload.s3_uri` and `capture_upload.run_id` in the experiment JSON.
-   Uploaded artifacts are grouped by experiment under
-   `capture_upload.s3_uri/experiments/<run_id>/`. Each bot folder contains its
-   `.pcapng`, analysis, metadata, and logs together; controller configs and the
-   run manifest are uploaded under the same experiment folder's `controller/`
-   prefix.
+   Uploaded artifacts are grouped by experiment name and generated execution id
+   under `capture_upload.s3_uri/experiments/<experiment_name>/<execution_id>/`.
+   Each bot folder contains raw `.pcapng`, analysis, metadata, readable logs,
+   source JSONL/action logs, and diagnostics together; controller configs and
+   the run manifest are uploaded under the same experiment folder's
+   `controller/` prefix. Postprocessed captures such as
+   `*.jitsi-only.pcapng` are not uploaded to S3.
    S3 prefixes do not need to be created ahead of time; S3 has object keys, not
    real directories, so `aws s3 sync` creates the needed prefixes when it uploads
    objects. The bucket itself must already exist, and each client EC2 needs AWS
@@ -270,10 +276,17 @@ configs and the Ansible playbooks to update and start remote clients.
 
    ```text
    s3://vtc-traffic-data/captures/
-     raw/<run_id>/<bot>/*.pcapng
-     analysis/<run_id>/<bot>/*.analysis.txt
-     analysis/<run_id>/<bot>/*.metadata.json
-     logs/<run_id>/<bot>/
+     experiments/<experiment_name>/<execution_id>/
+       metadata/
+       configs/
+       dialogue_acts/
+       pcaps/raw/<experiment_name>_<execution_id>_<bot>_raw.pcapng
+       logs/jsonl/
+       logs/readable/
+       analysis/
+       screenshots/
+       webrtc_stats/
+       accessibility/
    ```
 
 1. Stop remote clients:

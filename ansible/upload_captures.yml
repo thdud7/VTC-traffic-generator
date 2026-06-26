@@ -14,6 +14,11 @@
         msg: "Set experiment.capture_upload.run_id or experiment.run_id before uploading captures"
       when: capture_upload_run_id is not defined
 
+    - name: Fail if capture upload experiment name is not configured
+      ansible.builtin.fail:
+        msg: "Set capture_upload_experiment_name through run_experiment.py before uploading captures"
+      when: capture_upload_experiment_name is not defined
+
     - name: Verify AWS CLI exists
       ansible.builtin.command: aws --version
       changed_when: false
@@ -21,7 +26,7 @@
     - name: Set current execution capture include pattern
       ansible.builtin.set_fact:
         capture_upload_include_pattern: "*{{ capture_upload_execution_id | default(capture_upload_run_id) }}*"
-        capture_upload_host_prefix: "{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_run_id }}/{{ inventory_hostname }}"
+        capture_upload_run_prefix: "{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_experiment_name }}/{{ capture_upload_run_id }}"
 
     - name: Ensure capture output directory exists
       ansible.builtin.file:
@@ -29,82 +34,104 @@
         state: directory
         mode: "0755"
 
-    - name: Upload raw pcapng captures
-      ansible.builtin.command:
-        argv:
-          - aws
-          - s3
-          - sync
-          - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
-          - "{{ capture_upload_host_prefix }}/"
-          - "--exclude"
-          - "*"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.pcapng"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.jitsi-only.pcapng"
-      changed_when: true
-
-    - name: Upload capture analysis and metadata
-      ansible.builtin.command:
-        argv:
-          - aws
-          - s3
-          - sync
-          - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
-          - "{{ capture_upload_host_prefix }}/"
-          - "--exclude"
-          - "*"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.analysis.txt"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.metadata.json"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.media-analysis.json"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.media-analysis.md"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.preflight.json"
-          - "--include"
-          - "{{ capture_upload_include_pattern }}.preflight.txt"
-      changed_when: true
-
-    - name: Upload client diagnostics
+    - name: Upload client artifacts with canonical S3 layout
       ansible.builtin.shell: |
         set -euo pipefail
-        diagnostics_dir="{{ adapter_log_path | default(client_log_path | default('/tmp/vtc-client/client.log')) | dirname }}/diagnostics/{{ capture_upload_execution_id | default(capture_upload_run_id) }}"
-        if [ -d "$diagnostics_dir" ] && [ -n "$(find "$diagnostics_dir" -type f -print -quit)" ]; then
-          aws s3 sync "$diagnostics_dir" "{{ capture_upload_host_prefix }}/diagnostics/"
-        fi
-      args:
-        executable: /bin/bash
-      changed_when: true
-
-    - name: Upload client logs
-      ansible.builtin.shell: |
-        set -euo pipefail
+        experiment_name="{{ capture_upload_experiment_name }}"
+        run_id="{{ capture_upload_run_id }}"
+        bot_id="{{ inventory_hostname }}"
+        capture_dir="{{ capture_output_dir | default('/tmp/vtc-captures') }}"
+        include_pattern="{{ capture_upload_include_pattern }}"
         staging_dir="$(mktemp -d)"
         trap 'rm -rf "$staging_dir"' EXIT
+        mkdir -p \
+          "$staging_dir/metadata" \
+          "$staging_dir/pcaps/raw" \
+          "$staging_dir/logs/jsonl" \
+          "$staging_dir/logs/readable" \
+          "$staging_dir/analysis" \
+          "$staging_dir/screenshots" \
+          "$staging_dir/webrtc_stats" \
+          "$staging_dir/accessibility" \
+          "$staging_dir/configs"
 
-        for source_path in \
-          "{{ client_log_path | default('') }}" \
-          "{{ action_log_path | default('') }}" \
-          "{{ event_log_path | default('') }}" \
-          "{{ app_log_path | default('') }}" \
-          "{{ adapter_log_path | default('') }}"
-        do
+        raw_pcap="$(find "$capture_dir" -maxdepth 1 -type f \
+          -name "${include_pattern}.pcapng" \
+          ! -name "*.jitsi-only.pcapng" \
+          ! -name "*.jitsi_only.pcapng" \
+          ! -name "*.filtered.pcapng" \
+          ! -name "*.postprocessed.pcapng" \
+          ! -name "*.trimmed.pcapng" \
+          ! -name "*filtered*.pcapng" \
+          | sort | tail -n 1)"
+        if [ -n "$raw_pcap" ]; then
+          cp "$raw_pcap" "$staging_dir/pcaps/raw/${experiment_name}_${run_id}_${bot_id}_raw.pcapng"
+        fi
+
+        copy_capture_artifact() {
+          suffix="$1"
+          target="$2"
+          source_path="$(find "$capture_dir" -maxdepth 1 -type f -name "${include_pattern}${suffix}" | sort | tail -n 1)"
+          if [ -n "$source_path" ]; then
+            cp "$source_path" "$target"
+          fi
+        }
+
+        copy_capture_artifact ".analysis.txt" "$staging_dir/analysis/${experiment_name}_${run_id}_${bot_id}_tshark_analysis.txt"
+        copy_capture_artifact ".media-analysis.json" "$staging_dir/analysis/${experiment_name}_${run_id}_${bot_id}_media-analysis.json"
+        copy_capture_artifact ".media-analysis.md" "$staging_dir/analysis/${experiment_name}_${run_id}_${bot_id}_media-analysis.md"
+        copy_capture_artifact ".metadata.json" "$staging_dir/metadata/${experiment_name}_${run_id}_${bot_id}_capture_metadata.json"
+        copy_capture_artifact ".preflight.json" "$staging_dir/metadata/${experiment_name}_${run_id}_${bot_id}_preflight.json"
+        copy_capture_artifact ".preflight.txt" "$staging_dir/analysis/${experiment_name}_${run_id}_${bot_id}_preflight.txt"
+
+        if [ -n "{{ event_log_path | default('') }}" ] && [ -f "{{ event_log_path | default('') }}" ]; then
+          cp "{{ event_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_actions.jsonl"
+        fi
+        if [ -n "{{ action_log_path | default('') }}" ] && [ -f "{{ action_log_path | default('') }}" ]; then
+          cp "{{ action_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_actions.txt"
+        fi
+        if [ -n "{{ app_log_path | default('') }}" ] && [ -f "{{ app_log_path | default('') }}" ]; then
+          cp "{{ app_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_jitsi_electron.log"
+        fi
+        if [ -n "{{ adapter_log_path | default('') }}" ] && [ -f "{{ adapter_log_path | default('') }}" ]; then
+          cp "{{ adapter_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_adapter.log"
+        fi
+        if [ -n "{{ client_log_path | default('') }}" ] && [ -f "{{ client_log_path | default('') }}" ]; then
+          cp "{{ client_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_client.log"
+        fi
+
+        readable_sources=()
+        for source_path in "{{ action_log_path | default('') }}" "{{ event_log_path | default('') }}"; do
           if [ -n "$source_path" ] && [ -f "$source_path" ]; then
-            cp "$source_path" "$staging_dir/$(basename "$source_path")"
+            readable_sources+=("$source_path")
           fi
         done
+        if [ "${#readable_sources[@]}" -gt 0 ]; then
+          "{{ python_bin | default('python3') }}" "{{ repo_dir }}/vtc_traffic_generator/tools/render_readable_events.py" \
+            --experiment-name "$experiment_name" \
+            --run-id "$run_id" \
+            --bot-id "$bot_id" \
+            --output "$staging_dir/logs/readable/${experiment_name}_${run_id}_${bot_id}_successful_actions.log" \
+            "${readable_sources[@]}"
+        fi
 
-        if [ -n "$(find "$staging_dir" -maxdepth 1 -type f -print -quit)" ]; then
-          aws s3 sync "$staging_dir" "{{ capture_upload_host_prefix }}/"
+        diagnostics_dir="{{ adapter_log_path | default(client_log_path | default('/tmp/vtc-client/client.log')) | dirname }}/diagnostics/{{ capture_upload_execution_id | default(capture_upload_run_id) }}"
+        if [ -d "$diagnostics_dir" ] && [ -n "$(find "$diagnostics_dir" -type f -print -quit)" ]; then
+          find "$diagnostics_dir" -type f | while read -r diagnostic; do
+            case "$diagnostic" in
+              *.png|*.jpg|*.jpeg|*.webp) cp "$diagnostic" "$staging_dir/screenshots/${experiment_name}_${run_id}_${bot_id}_$(basename "$diagnostic")" ;;
+              *stats*|*.jsonl) cp "$diagnostic" "$staging_dir/webrtc_stats/${experiment_name}_${run_id}_${bot_id}_$(basename "$diagnostic")" ;;
+              *) cp "$diagnostic" "$staging_dir/accessibility/${experiment_name}_${run_id}_${bot_id}_$(basename "$diagnostic")" ;;
+            esac
+          done
+        fi
+
+        if [ -n "$(find "$staging_dir" -type f -print -quit)" ]; then
+          aws s3 sync "$staging_dir" "{{ capture_upload_run_prefix }}/"
         fi
       args:
         executable: /bin/bash
       changed_when: true
-      when: capture_upload_include_logs | default(true) | bool
 
     - name: Delete local capture artifacts after upload
       ansible.builtin.shell: |

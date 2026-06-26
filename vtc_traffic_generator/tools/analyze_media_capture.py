@@ -40,12 +40,33 @@ class StreamStats:
     codec_mime_type: str | None = None
     kind: str | None = None
     source: str = "rtp-header"
+    first_sequence_number: int | None = None
+    last_sequence_number: int | None = None
+    sequence_gap_count: int = 0
+    sequence_wrap_count: int = 0
+    duplicate_or_reordered_count: int = 0
 
-    def add(self, epoch: float, byte_count: int) -> None:
+    def add(self, epoch: float, byte_count: int, sequence_number: int) -> None:
         self.packets += 1
         self.bytes += byte_count
         self.first_epoch = epoch if self.first_epoch is None else min(self.first_epoch, epoch)
         self.last_epoch = epoch if self.last_epoch is None else max(self.last_epoch, epoch)
+        if self.last_sequence_number is None:
+            self.first_sequence_number = sequence_number
+            self.last_sequence_number = sequence_number
+            return
+
+        delta = (sequence_number - self.last_sequence_number) & 0xFFFF
+        if delta == 1:
+            if sequence_number < self.last_sequence_number:
+                self.sequence_wrap_count += 1
+        elif 1 < delta < 32768:
+            self.sequence_gap_count += delta - 1
+            if sequence_number < self.last_sequence_number:
+                self.sequence_wrap_count += 1
+        else:
+            self.duplicate_or_reordered_count += 1
+        self.last_sequence_number = sequence_number
 
     @property
     def duration_sec(self) -> float:
@@ -55,8 +76,10 @@ class StreamStats:
 
     def to_json(self) -> dict[str, Any]:
         duration = self.duration_sec
+        mean_bitrate = (self.bytes * 8.0 / duration) if duration > 0 else None
         return {
             "direction": self.direction,
+            "endpoint_direction": self.direction,
             "src_ip": self.src_ip,
             "src_port": int(self.src_port),
             "dst_ip": self.dst_ip,
@@ -69,9 +92,18 @@ class StreamStats:
             "bytes": self.bytes,
             "first_utc": epoch_to_iso(self.first_epoch),
             "last_utc": epoch_to_iso(self.last_epoch),
+            "first_seen": epoch_to_iso(self.first_epoch),
+            "last_seen": epoch_to_iso(self.last_epoch),
             "duration_sec": duration,
             "packets_per_sec": self.packets / duration if duration > 0 else None,
             "bytes_per_sec": self.bytes / duration if duration > 0 else None,
+            "mean_bitrate_bps": mean_bitrate,
+            "likely_kind": likely_kind(self.direction, self.kind, self.payload_type),
+            "sequence_gaps": self.sequence_gap_count,
+            "sequence_wraps": self.sequence_wrap_count,
+            "duplicate_or_reordered_packets": self.duplicate_or_reordered_count,
+            "first_sequence_number": self.first_sequence_number,
+            "last_sequence_number": self.last_sequence_number,
             "source": self.source,
         }
 
@@ -91,6 +123,7 @@ class Analysis:
     codec_by_ssrc: dict[int, dict[str, Any]] = field(default_factory=dict)
     codec_by_pt: dict[int, dict[str, Any]] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
+    rtp_time_bins: dict[tuple[str, str, int], dict[str, Any]] = field(default_factory=dict)
     capinfos: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -113,22 +146,24 @@ class Analysis:
             (stream.to_json() for stream in self.streams.values()),
             key=lambda item: (item["direction"], item["ssrc"], item["payload_type"]),
         )
-        audio_streams = [stream for stream in streams if stream.get("kind") == "audio"]
-        video_streams = [stream for stream in streams if stream.get("kind") == "video"]
+        audio_streams = [
+            stream
+            for stream in streams
+            if stream.get("kind") == "audio" or stream.get("likely_kind") in {"audio", "remote_audio"}
+        ]
+        video_streams = [
+            stream
+            for stream in streams
+            if stream.get("kind") == "video" or stream.get("likely_kind") in {"camera_video", "remote_video"}
+        ]
         media_udp = [
             value
             for value in self.udp_5tuples.values()
             if (not self.jvb_ip or value["src_ip"] == self.jvb_ip or value["dst_ip"] == self.jvb_ip)
             and (int(value["src_port"]) == self.jvb_port or int(value["dst_port"]) == self.jvb_port)
         ]
-        fail_reasons = []
-        if not media_udp:
-            fail_reasons.append("No UDP flow involving the configured JVB media port was found.")
-        if not audio_streams:
-            fail_reasons.append("No audio RTP stream could be verified from WebRTC stats/SDP mapping.")
-        if not video_streams:
-            fail_reasons.append("No video RTP stream could be verified from WebRTC stats/SDP mapping.")
-        verdict = "PASS" if not fail_reasons else "INCONCLUSIVE"
+        basic_validation, fail_reasons = self.basic_webrtc_validation(streams, media_udp)
+        verdict = "PASS" if all(basic_validation.values()) else "FAIL"
 
         return {
             "pcap": str(self.pcap),
@@ -143,19 +178,141 @@ class Analysis:
             "protocol_counts": dict(self.protocol_counts),
             "udp_5tuples": sorted(self.udp_5tuples.values(), key=lambda item: item["packets"], reverse=True),
             "rtp_streams": streams,
+            "ssrc_classification": streams,
+            "rtp_time_bins": sorted(self.rtp_time_bins.values(), key=lambda item: (item["epoch_sec"], item["direction"], item["likely_kind"])),
             "audio_streams": audio_streams,
             "video_streams": video_streams,
             "events_loaded": len(self.events),
+            "basic_webrtc_validation": basic_validation,
             "final_verdict": verdict,
             "fail_reasons": fail_reasons,
             "errors": self.errors,
         }
+
+    def basic_webrtc_validation(
+        self,
+        streams: list[dict[str, Any]],
+        media_udp: list[dict[str, Any]],
+    ) -> tuple[dict[str, bool], list[str]]:
+        protocol_counts = dict(self.protocol_counts)
+        lifecycle_ok = self.pcap_covers_full_lifecycle()
+        c2j_streams = [
+            stream for stream in streams if stream.get("direction") == "client_to_jvb" and int(stream.get("packets") or 0) > 0
+        ]
+        j2c_streams = [
+            stream for stream in streams if stream.get("direction") == "jvb_to_client" and int(stream.get("packets") or 0) > 0
+        ]
+        required_duration = min(max(30.0, self.span_sec * 0.5), self.span_sec * 0.9) if self.span_sec else 30.0
+        longest_c2j = max([float(stream.get("duration_sec") or 0) for stream in c2j_streams] or [0.0])
+        longest_j2c = max([float(stream.get("duration_sec") or 0) for stream in j2c_streams] or [0.0])
+        long_streams = [
+            stream
+            for stream in streams
+            if float(stream.get("duration_sec") or 0) >= 10.0 and int(stream.get("packets") or 0) >= 50
+        ]
+        major_gap_streams = [
+            stream
+            for stream in long_streams
+            if int(stream.get("sequence_gaps") or 0) > max(20, int(stream.get("packets") or 0) * 0.02)
+        ]
+        checks = {
+            "pcap_covers_full_lifecycle": lifecycle_ok,
+            "jvb_udp_flow_exists": bool(media_udp),
+            "stun_exists": int(protocol_counts.get("stun", 0)) > 0,
+            "dtls_exists": int(protocol_counts.get("dtls", 0)) > 0,
+            "rtp_srtp_like_exists": int(protocol_counts.get("rtp", 0)) > 0,
+            "rtcp_exists": int(protocol_counts.get("rtcp", 0)) > 0,
+            "bidirectional_rtp_exists": bool(c2j_streams and j2c_streams),
+            "persistent_media_flow": longest_c2j >= required_duration and longest_j2c >= required_duration,
+            "major_sequence_gaps_absent": bool(long_streams) and not major_gap_streams,
+        }
+        reasons = []
+        reason_text = {
+            "pcap_covers_full_lifecycle": "The PCAP does not cover capture start, meeting-ready, disconnect, and capture stop lifecycle evidence.",
+            "jvb_udp_flow_exists": "No UDP flow involving the configured JVB media port was found.",
+            "stun_exists": "No STUN/ICE traffic was found.",
+            "dtls_exists": "No DTLS handshake/application packets were found.",
+            "rtp_srtp_like_exists": "No RTP/SRTP-like packets were parsed from UDP payloads.",
+            "rtcp_exists": "No RTCP packets were found.",
+            "bidirectional_rtp_exists": "No bidirectional RTP/SRTP-like media streams were found.",
+            "persistent_media_flow": "RTP/SRTP-like media did not persist in both directions for the required capture span.",
+            "major_sequence_gaps_absent": "No long RTP stream without major sequence gaps was found.",
+        }
+        for key, passed in checks.items():
+            if not passed:
+                reasons.append(reason_text[key])
+        if major_gap_streams:
+            reasons.append(
+                "Major sequence gaps: "
+                + ", ".join(
+                    f"{stream.get('direction')} ssrc={stream.get('ssrc')} gaps={stream.get('sequence_gaps')}"
+                    for stream in major_gap_streams[:5]
+                )
+            )
+        return checks, reasons
+
+    def pcap_covers_full_lifecycle(self) -> bool:
+        if not self.events or self.first_epoch is None or self.last_epoch is None:
+            return False
+
+        capture_start = first_event_epoch(self.events, {"capture_started", "packet_capture_start"})
+        meeting_ready = first_event_epoch(self.events, {"meeting_join_ready"})
+        meeting_end = last_event_epoch(
+            self.events,
+            {"meeting_disconnected", "terminal_disconnect", "meeting_end"},
+        )
+        capture_stop = last_event_epoch(self.events, {"capture_stopped", "packet_capture_done"})
+        if None in (capture_start, meeting_ready, meeting_end, capture_stop):
+            return False
+        return self.first_epoch <= meeting_ready and self.last_epoch >= meeting_end and capture_start <= meeting_ready <= meeting_end <= capture_stop
 
 
 def epoch_to_iso(epoch: float | None) -> str | None:
     if epoch is None:
         return None
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def iso_to_epoch(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def record_epoch(record: dict[str, Any]) -> float | None:
+    data = record.get("details")
+    details = data if isinstance(data, dict) else {}
+    return iso_to_epoch(record.get("ts") or details.get("actual_utc") or details.get("capture_utc"))
+
+
+def record_event_type(record: dict[str, Any]) -> str:
+    return str(record.get("event_type") or record.get("event") or "")
+
+
+def first_event_epoch(events: list[dict[str, Any]], names: set[str]) -> float | None:
+    epochs = [epoch for record in events if record_event_type(record) in names for epoch in [record_epoch(record)] if epoch is not None]
+    return min(epochs) if epochs else None
+
+
+def last_event_epoch(events: list[dict[str, Any]], names: set[str]) -> float | None:
+    epochs = [epoch for record in events if record_event_type(record) in names for epoch in [record_epoch(record)] if epoch is not None]
+    return max(epochs) if epochs else None
+
+
+def likely_kind(direction: str, kind: str | None, payload_type: int) -> str:
+    if kind == "audio" or payload_type in {0, 8, 9, 111}:
+        return "remote_audio" if direction == "jvb_to_client" else "audio"
+    if kind == "video":
+        return "remote_video" if direction == "jvb_to_client" else "camera_video"
+    if 96 <= int(payload_type) <= 127:
+        return "remote_video" if direction == "jvb_to_client" else "camera_video"
+    return "unknown"
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -368,7 +525,23 @@ def analyze(args: argparse.Namespace) -> Analysis:
                 source="rtp-header+stats" if mapping else "rtp-header",
             )
             analysis.streams[key] = stream
-        stream.add(epoch, udp_len)
+        stream.add(epoch, udp_len, rtp["sequence_number"])
+        bin_kind = likely_kind(direction, stream.kind, rtp["payload_type"])
+        epoch_sec = int(epoch)
+        bin_key = (direction, bin_kind, epoch_sec)
+        bin_data = analysis.rtp_time_bins.setdefault(
+            bin_key,
+            {
+                "epoch_sec": epoch_sec,
+                "utc": epoch_to_iso(float(epoch_sec)),
+                "direction": direction,
+                "likely_kind": bin_kind,
+                "packets": 0,
+                "bytes": 0,
+            },
+        )
+        bin_data["packets"] += 1
+        bin_data["bytes"] += udp_len
 
     for tuple_data in analysis.udp_5tuples.values():
         tuple_data["first_utc"] = epoch_to_iso(tuple_data.pop("_first_epoch", None))
@@ -448,6 +621,9 @@ def render_markdown(result: dict[str, Any]) -> str:
     ]
     for key, value in sorted(result.get("protocol_counts", {}).items()):
         lines.append(f"- {key}: {value}")
+    lines.extend(["", "## Basic WebRTC Validation", ""])
+    for key, value in sorted(result.get("basic_webrtc_validation", {}).items()):
+        lines.append(f"- {'PASS' if value else 'FAIL'} `{key}`")
     lines.extend(["", "## Top UDP 5-Tuples", ""])
     for item in result.get("udp_5tuples", [])[:12]:
         lines.append(
@@ -459,13 +635,14 @@ def render_markdown(result: dict[str, Any]) -> str:
     if not streams:
         lines.append("No RTP-like streams were parsed from UDP payloads.")
     else:
-        lines.append("| Direction | SSRC | PT | Kind | Codec | Packets | Bytes | Duration s |")
-        lines.append("| --- | ---: | ---: | --- | --- | ---: | ---: | ---: |")
+        lines.append("| Direction | SSRC | PT | Likely kind | Codec | Packets | Bytes | Duration s | Mean bps | Gaps |")
+        lines.append("| --- | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |")
         for stream in streams:
             lines.append(
                 f"| {stream['direction']} | {stream['ssrc']} | {stream['payload_type']} | "
-                f"{stream.get('kind') or 'unknown'} | {stream.get('codec_mime_type') or 'unknown'} | "
-                f"{stream['packets']} | {stream['bytes']} | {stream['duration_sec']:.3f} |"
+                f"{stream.get('likely_kind') or stream.get('kind') or 'unknown'} | {stream.get('codec_mime_type') or 'unknown'} | "
+                f"{stream['packets']} | {stream['bytes']} | {stream['duration_sec']:.3f} | "
+                f"{stream.get('mean_bitrate_bps') or 0:.1f} | {stream.get('sequence_gaps') or 0} |"
             )
     if result.get("fail_reasons"):
         lines.extend(["", "## Fail / Inconclusive Reasons", ""])

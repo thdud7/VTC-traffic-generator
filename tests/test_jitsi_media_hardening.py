@@ -99,6 +99,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertIn(execution_id, first_remote["adapter_config"]["app_log_path"])
         self.assertIn(execution_id, first_remote["adapter_config"]["adapter_log_path"])
         self.assertIn(f"capture_upload_execution_id={execution_id}", inventory)
+        self.assertIn("capture_upload_experiment_name=icsi-jitsi-3bot-5min", inventory)
         self.assertEqual(first_manifest["config_sha256"], second_manifest["config_sha256"])
         self.assertNotEqual(first_remote["execution_id"], second_remote["execution_id"])
 
@@ -118,9 +119,13 @@ class JitsiMediaHardeningTests(unittest.TestCase):
     def test_upload_playbook_filters_current_execution_only(self):
         upload_playbook = Path("ansible/upload_captures.yml").read_text(encoding="utf-8")
         self.assertIn("capture_upload_include_pattern", upload_playbook)
-        self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
-        self.assertIn("{{ capture_upload_include_pattern }}.jitsi-only.pcapng", upload_playbook)
-        self.assertIn("{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_run_id }}/{{ inventory_hostname }}", upload_playbook)
+        self.assertIn("${include_pattern}.pcapng", upload_playbook)
+        self.assertIn("! -name \"*.jitsi-only.pcapng\"", upload_playbook)
+        self.assertIn("! -name \"*.filtered.pcapng\"", upload_playbook)
+        self.assertIn("{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_experiment_name }}/{{ capture_upload_run_id }}", upload_playbook)
+        self.assertIn("pcaps/raw/${experiment_name}_${run_id}_${bot_id}_raw.pcapng", upload_playbook)
+        self.assertIn("logs/readable/${experiment_name}_${run_id}_${bot_id}_successful_actions.log", upload_playbook)
+        self.assertIn("render_readable_events.py", upload_playbook)
         self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
         self.assertNotIn("{{ capture_upload_s3_uri }}/raw/{{ capture_upload_run_id }}", upload_playbook)
         self.assertNotIn("{{ capture_upload_s3_uri }}/analysis/{{ capture_upload_run_id }}", upload_playbook)
@@ -168,6 +173,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
                 result = run_experiment_module.upload_controller_artifacts(
                     {
                         "capture_upload_s3_uri": "s3://vtc-traffic-data/captures",
+                        "capture_upload_experiment_name": "icsi-jitsi-test",
                         "capture_upload_run_id": "run-1",
                         "run_manifest": manifest,
                         "controller_config": controller_config,
@@ -181,15 +187,13 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(calls[0][0][:3], ["aws", "s3", "sync"])
-        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/experiments/run-1/controller/")
+        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/experiments/icsi-jitsi-test/run-1/controller/")
         self.assertEqual(
             staged_files,
             [
-                "actions-run-1.txt",
-                "controller_config.json",
-                "events-run-1.jsonl",
-                "remote_config_bot1.json",
-                "run-manifest-run-1.json",
+                "configs",
+                "logs",
+                "metadata",
             ],
         )
 

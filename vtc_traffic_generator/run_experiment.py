@@ -16,8 +16,10 @@ from urllib.parse import urlparse
 
 try:
     from vtc_automation.event_log import resolve_git_sha
+    from tools import render_readable_events
 except ImportError:
     from vtc_traffic_generator.vtc_automation.event_log import resolve_git_sha
+    from vtc_traffic_generator.tools import render_readable_events
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -422,6 +424,10 @@ def append_capture_upload_inventory_vars(lines, experiment, capture_upload):
     if s3_uri:
         lines.append(f"capture_upload_s3_uri={quote_inventory_value(str(s3_uri).rstrip('/'))}")
 
+    experiment_name = capture_upload.get("experiment_name") or experiment.get("experiment_id") or experiment.get("run_id")
+    if experiment_name:
+        lines.append(f"capture_upload_experiment_name={quote_inventory_value(sanitize_log_id(experiment_name))}")
+
     run_id = capture_upload.get("run_id") or experiment.get("run_id")
     if run_id:
         lines.append(f"capture_upload_run_id={quote_inventory_value(run_id)}")
@@ -479,6 +485,7 @@ def prepare_experiment_metadata(experiment, experiment_path):
 
     capture_upload = experiment.get("capture_upload")
     if isinstance(capture_upload, dict) and capture_upload.get("s3_uri"):
+        capture_upload.setdefault("experiment_name", sanitize_log_id(experiment_id))
         capture_upload["run_id"] = execution_id
 
 
@@ -585,6 +592,9 @@ def generate(experiment_path, output_dir):
                 "minimum_media_ready_duration_sec": None,
                 "media_ready_required": True,
                 "packet_capture_required": True,
+                "s3_upload_experiment_name": experiment.get("capture_upload", {}).get("experiment_name")
+                if isinstance(experiment.get("capture_upload"), dict)
+                else None,
                 "s3_upload_run_id": experiment.get("capture_upload", {}).get("run_id")
                 if isinstance(experiment.get("capture_upload"), dict)
                 else None,
@@ -611,6 +621,7 @@ def generate(experiment_path, output_dir):
         "run_manifest": manifest_path,
         "capture_upload_configured": capture_upload_configured(experiment),
         "capture_upload_s3_uri": str(experiment.get("capture_upload", {}).get("s3_uri") or "").rstrip("/"),
+        "capture_upload_experiment_name": str(experiment.get("capture_upload", {}).get("experiment_name") or ""),
         "capture_upload_run_id": str(experiment.get("capture_upload", {}).get("run_id") or ""),
         "controller_action_log_path": controller_config.get("action_log_path"),
         "controller_event_log_path": controller_config.get("event_log_path"),
@@ -637,34 +648,79 @@ def run_local_controller(controller_config_path):
 
 def upload_controller_artifacts(generated):
     s3_uri = generated.get("capture_upload_s3_uri")
+    experiment_name = generated.get("capture_upload_experiment_name")
     run_id = generated.get("capture_upload_run_id")
-    if not s3_uri or not run_id:
+    if not s3_uri or not experiment_name or not run_id:
         return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
 
     with tempfile.TemporaryDirectory(prefix="vtc-controller-upload-") as tmpdir:
         staging_dir = Path(tmpdir)
-        artifact_paths = [
-            generated.get("run_manifest"),
-            generated.get("controller_config"),
-            *generated.get("remote_configs", []),
+        config_dir = staging_dir / "configs"
+        metadata_dir = staging_dir / "metadata"
+        source_log_dir = staging_dir / "logs" / "jsonl"
+        readable_dir = staging_dir / "logs" / "readable"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        source_log_dir.mkdir(parents=True, exist_ok=True)
+        readable_dir.mkdir(parents=True, exist_ok=True)
+
+        config_paths = [(generated.get("experiment"), f"{experiment_name}_{run_id}_experiment_config.json")]
+        config_paths.append((generated.get("controller_config"), f"{experiment_name}_{run_id}_controller_config.json"))
+        for remote_config in generated.get("remote_configs", []):
+            path = Path(remote_config)
+            bot_suffix = path.stem.replace("remote_config_", "")
+            config_paths.append((remote_config, f"{experiment_name}_{run_id}_{bot_suffix}_remote_config.json"))
+        log_paths = [
             generated.get("controller_action_log_path"),
             generated.get("controller_event_log_path"),
         ]
 
         staged_count = 0
-        for artifact_path in artifact_paths:
+        manifest_path = generated.get("run_manifest")
+        if manifest_path and Path(manifest_path).expanduser().is_file():
+            shutil.copy2(Path(manifest_path).expanduser(), metadata_dir / f"{experiment_name}_{run_id}_metadata.json")
+            staged_count += 1
+
+        for artifact_path, target_name in config_paths:
             if not artifact_path:
                 continue
             path = Path(artifact_path).expanduser()
             if not path.is_file():
                 continue
-            shutil.copy2(path, staging_dir / path.name)
+            shutil.copy2(path, config_dir / target_name)
+            staged_count += 1
+
+        readable_sources = []
+        for artifact_path in log_paths:
+            if not artifact_path:
+                continue
+            path = Path(artifact_path).expanduser()
+            if not path.is_file():
+                continue
+            if path.suffix == ".jsonl":
+                target_name = f"{experiment_name}_{run_id}_controller.jsonl"
+            else:
+                target_name = f"{experiment_name}_{run_id}_controller_actions.txt"
+            shutil.copy2(path, source_log_dir / target_name)
+            readable_sources.append(path)
+            staged_count += 1
+
+        if readable_sources:
+            readable_lines = render_readable_events.render(
+                render_readable_events.load_records(readable_sources),
+                experiment_name=experiment_name,
+                run_id=run_id,
+            )
+            (readable_dir / f"{experiment_name}_{run_id}_controller_successful_actions.log").write_text(
+                "\n".join(readable_lines) + ("\n" if readable_lines else ""),
+                encoding="utf-8",
+            )
             staged_count += 1
 
         if staged_count == 0:
             return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
 
-        destination = f"{s3_uri}/experiments/{run_id}/controller/"
+        destination = f"{s3_uri}/experiments/{experiment_name}/{run_id}/controller/"
         command = ["aws", "s3", "sync", str(staging_dir), destination]
         try:
             return subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
