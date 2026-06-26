@@ -928,13 +928,14 @@ def mic_state_is_fresh_on(scenario_state, bot_index, ttl_sec, now_ns=None):
 
 
 def mic_state_is_fresh_on_at(scenario_state, bot_index, ttl_sec, target_ns):
+    now_ns = time.monotonic_ns()
     with scenario_state["lock"]:
         is_on = scenario_state["states"][bot_index].get("mic") is True
         verified_at = int(scenario_state["mic_verified_at_monotonic_ns"][bot_index])
         active_speech = int(scenario_state["speaking"][bot_index]) > 0
     if not is_on or verified_at <= 0:
         return False
-    if active_speech:
+    if active_speech and target_ns <= now_ns + seconds_to_ns(0.05):
         return True
     return target_ns - verified_at <= seconds_to_ns(ttl_sec)
 

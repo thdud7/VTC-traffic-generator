@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -176,6 +177,7 @@ class PacketCaptureSession:
 
         self.stop_reason = reason
         if process.poll() is None:
+            self._emit_capture_tail_marker(reason)
             process.send_signal(signal.SIGTERM)
             try:
                 _, stderr = process.communicate(timeout=10)
@@ -215,6 +217,37 @@ class PacketCaptureSession:
                 ),
             },
         )
+
+    def _emit_capture_tail_marker(self, reason: str) -> None:
+        packet_capture = self.config.get("packet_capture", {})
+        if not isinstance(packet_capture, Mapping):
+            packet_capture = {}
+        if packet_capture.get("tail_marker_enabled", True) is False:
+            return
+
+        host = str(packet_capture.get("tail_marker_host") or "127.0.0.1")
+        port = int(packet_capture.get("tail_marker_port") or 9)
+        payload = (
+            f"vtc-capture-tail-marker "
+            f"{self.config.get('experiment_id') or ''} "
+            f"{self.config.get('execution_id') or ''} "
+            f"{self.config.get('bot_name') or get_bot_id(self.config)} "
+            f"{reason}"
+        ).encode("utf-8", errors="replace")[:512]
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(payload, (host, port))
+            emit_event(
+                self.config,
+                "packet_capture_tail_marker",
+                {"host": host, "port": port, "bytes": len(payload), "stop_reason": reason, "success": True},
+            )
+        except Exception as exc:
+            emit_event(
+                self.config,
+                "packet_capture_tail_marker",
+                {"host": host, "port": port, "stop_reason": reason, "success": False, "error": str(exc)},
+            )
 
     def _analyze(self) -> None:
         if not self.pcapng_path or not self.pcapng_path.exists():
