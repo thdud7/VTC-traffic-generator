@@ -45,7 +45,8 @@
       "max_duration_sec": 300,
       "time_scale": 1.0,
       "connect_timeout_sec": 180,
-      "connect_grace_sec": 5
+      "connect_grace_sec": 5,
+      "client_stop_timeout_sec": 90
     },
     "scenario": {
       "enabled": true,

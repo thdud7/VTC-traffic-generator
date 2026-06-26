@@ -94,6 +94,11 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
         self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
 
+    def test_controller_registers_graceful_session_stop_rpc(self):
+        generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
+        self.assertIn('server.register_function(stop_vtc_session, "stop_vtc_session")', generator_source)
+        self.assertIn("wait_for_clients_to_finish_sessions", generator_source)
+
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})
         self.assertFalse(adapter._trust_shortcut_state())

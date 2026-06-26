@@ -38,6 +38,7 @@ video_lock = threading.Lock()
 video_process = None
 video_supervisor_thread = None
 video_supervisor_stop = threading.Event()
+session_stop_requested = threading.Event()
 active_adapter_lock = threading.Lock()
 active_adapter = None
 active_loop = None
@@ -402,10 +403,44 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
     )
 
     print("ICSI replay complete, closing session now.")
+    request_clients_to_stop_sessions(vtc_clients)
+    wait_for_clients_to_finish_sessions(vtc_clients, float(icsi_config.get("client_stop_timeout_sec", 90)))
     for client in vtc_clients:
         uri = 'http://' + client.ip + ':' + str(client.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
             proxy.stop_video(client.video_pid)
+
+
+def request_clients_to_stop_sessions(vtc_clients):
+    for client in vtc_clients:
+        uri = 'http://' + client.ip + ':' + str(client.port)
+        try:
+            with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+                proxy.stop_vtc_session()
+        except Exception as exc:
+            emit_event(
+                config,
+                "client_stop_session_error",
+                {"client": client.ip, "port": client.port, "error": str(exc)},
+            )
+
+
+def wait_for_clients_to_finish_sessions(vtc_clients, timeout_sec):
+    deadline = time.time() + max(0, timeout_sec)
+    last_statuses = {}
+    while time.time() < deadline:
+        statuses = poll_client_connection_statuses(vtc_clients)
+        if statuses != last_statuses:
+            print("Client shutdown status: " + json.dumps(statuses, sort_keys=True))
+            last_statuses = statuses
+
+        if all(status.get("state") in {"done", "error"} for status in statuses.values()):
+            emit_event(config, "client_sessions_finished", {"statuses": statuses})
+            return True
+        time.sleep(1)
+
+    emit_event(config, "client_sessions_finish_timeout", {"statuses": last_statuses, "timeout_sec": timeout_sec})
+    return False
 
 
 def scenario_config():
@@ -658,6 +693,7 @@ def run_client(client_config):
     server.register_function(get_name, "get_name")
     server.register_function(get_connection_status, "get_connection_status")
     server.register_function(run_connect, "run_connect")
+    server.register_function(stop_vtc_session, "stop_vtc_session")
     server.register_function(stop_video, "stop_video")
 
     server.serve_forever()
@@ -1648,7 +1684,7 @@ async def connect_vtc_session(duration):
                 stage="meeting_running",
                 reason="media_ready_confirmed",
             )
-            await asyncio.sleep(duration * 60)
+            await wait_for_session_duration_or_stop(duration * 60)
             set_connection_status(
                 "leaving",
                 connected=True,
@@ -1750,11 +1786,28 @@ async def connect_vtc_session(duration):
                 active_loop = None
 
 def run_connect(duration):
+    session_stop_requested.clear()
     thread = threading.Thread(
         target=lambda: asyncio.run(connect_vtc_session(duration)),
         daemon=True,
     )
     thread.start()
+    return True
+
+
+async def wait_for_session_duration_or_stop(duration_sec):
+    deadline = time.time() + max(0, duration_sec)
+    while time.time() < deadline:
+        if session_stop_requested.is_set():
+            emit_event(config, "session_stop_requested", {"remaining_sec": max(0, deadline - time.time())})
+            return
+        await asyncio.sleep(min(1.0, max(0.0, deadline - time.time())))
+
+
+def stop_vtc_session():
+    session_stop_requested.set()
+    emit_event(config, "session_stop_request_received", {"success": True})
+    append_action_log(config, "session_stop_request_received", {"success": True})
     return True
 
 
