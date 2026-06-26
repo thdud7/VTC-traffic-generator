@@ -71,7 +71,8 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["packet_capture"]["filtered_pcapng_enabled"])
         self.assertEqual(remote_config["packet_capture"]["jvb_ip"], "172.31.32.200")
         self.assertEqual(remote_config["packet_capture"]["jvb_port"], 10000)
-        self.assertTrue(controller_config["behavior"]["random_actions"]["keep_camera_on"])
+        self.assertFalse(controller_config["behavior"]["scenario"]["keep_camera_on"])
+        self.assertFalse(controller_config["behavior"]["random_actions"]["keep_camera_on"])
 
     def test_generation_uses_execution_scoped_logs_and_stable_config_hash(self):
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:

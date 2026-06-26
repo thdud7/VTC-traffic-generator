@@ -68,7 +68,7 @@
       "screen_share_probability": 0.6,
       "camera_probability": 1.0,
       "mic_probability": 0.8,
-      "keep_camera_on": true
+      "keep_camera_on": false
     },
     "random_actions": {
       "enabled": true,
@@ -78,7 +78,7 @@
       "screen_share_probability": 0.6,
       "camera_probability": 1.0,
       "mic_probability": 0.8,
-      "keep_camera_on": true
+      "keep_camera_on": false
     }
   },
   "defaults": {
