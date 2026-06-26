@@ -68,6 +68,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["top"], 40)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["width"], 800)
         self.assertEqual(remote_config["adapter_config"]["window_geometry"]["height"], 720)
+        self.assertTrue(remote_config["packet_capture"]["filtered_pcapng_enabled"])
+        self.assertEqual(remote_config["packet_capture"]["jvb_ip"], "172.31.32.200")
+        self.assertEqual(remote_config["packet_capture"]["jvb_port"], 10000)
         self.assertTrue(controller_config["behavior"]["random_actions"]["keep_camera_on"])
 
     def test_generation_uses_execution_scoped_logs_and_stable_config_hash(self):
@@ -110,11 +113,29 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         upload_playbook = Path("ansible/upload_captures.yml").read_text(encoding="utf-8")
         self.assertIn("capture_upload_include_pattern", upload_playbook)
         self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
+        self.assertIn("{{ capture_upload_include_pattern }}.jitsi-only.pcapng", upload_playbook)
         self.assertIn("{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_run_id }}/{{ inventory_hostname }}", upload_playbook)
         self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
         self.assertNotIn("{{ capture_upload_s3_uri }}/raw/{{ capture_upload_run_id }}", upload_playbook)
         self.assertNotIn("{{ capture_upload_s3_uri }}/analysis/{{ capture_upload_run_id }}", upload_playbook)
         self.assertNotIn("{{ capture_upload_s3_uri }}/logs/{{ capture_upload_run_id }}", upload_playbook)
+
+    def test_packet_capture_builds_jitsi_only_filter(self):
+        session = PacketCaptureSession(
+            config={
+                "packet_capture": {
+                    "client_ip": "172.31.40.44",
+                    "jvb_ip": "172.31.32.200",
+                    "jvb_port": 10000,
+                }
+            },
+            enabled=True,
+        )
+
+        self.assertEqual(
+            session._filtered_pcapng_display_filter(session.config["packet_capture"]),
+            "ip.addr == 172.31.40.44 && ip.addr == 172.31.32.200 && udp.port == 10000",
+        )
 
     def test_controller_artifacts_upload_to_controller_log_prefix(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -113,6 +113,7 @@
       "output_dir": "/home/ubuntu/vtc_data/captures/local",
       "capture_filter": "not port 5900",
       "display_filter": null,
+      "filtered_pcapng_enabled": true,
       "dumpcap_path": "dumpcap",
       "tshark_path": "tshark"
     },

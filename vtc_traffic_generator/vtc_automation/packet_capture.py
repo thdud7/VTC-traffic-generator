@@ -42,6 +42,8 @@ class PacketCaptureSession:
         self.process: subprocess.Popen | None = None
         self.pcapng_path: Path | None = None
         self.analysis_path: Path | None = None
+        self.filtered_pcapng_path: Path | None = None
+        self.filtered_pcapng_filter: str | None = None
         self.media_analysis_json_path: Path | None = None
         self.media_analysis_md_path: Path | None = None
         self.metadata_path: Path | None = None
@@ -249,8 +251,9 @@ class PacketCaptureSession:
 
         result = subprocess.run(command, capture_output=True, text=True)
         self.analysis_path.write_text(result.stdout, encoding="utf-8")
+        filtered_result = self._write_filtered_pcapng(tshark_binary)
         media_result = self._analyze_media()
-        self._write_metadata(result)
+        self._write_metadata(result, filtered_result)
 
         emit_event(
             self.config,
@@ -258,15 +261,73 @@ class PacketCaptureSession:
             {
                 "pcapng_path": str(self.pcapng_path),
                 "analysis_path": str(self.analysis_path),
+                "filtered_pcapng_path": str(self.filtered_pcapng_path) if self.filtered_pcapng_path else None,
+                "filtered_pcapng_filter": self.filtered_pcapng_filter,
                 "media_analysis_json_path": str(self.media_analysis_json_path) if self.media_analysis_json_path else None,
                 "media_analysis_md_path": str(self.media_analysis_md_path) if self.media_analysis_md_path else None,
                 "display_filter": self.display_filter,
                 "returncode": result.returncode,
                 "stderr": result.stderr.strip(),
+                "filtered_returncode": filtered_result.returncode if filtered_result else None,
+                "filtered_stderr": filtered_result.stderr.strip() if filtered_result else None,
                 "media_returncode": media_result.returncode if media_result else None,
                 "media_stderr": media_result.stderr.strip() if media_result else None,
             },
         )
+
+    def _write_filtered_pcapng(self, tshark_binary: str) -> subprocess.CompletedProcess[str] | None:
+        if not self.pcapng_path:
+            return None
+
+        packet_capture = self.config.get("packet_capture", {})
+        if not isinstance(packet_capture, Mapping):
+            packet_capture = {}
+
+        if not bool(packet_capture.get("filtered_pcapng_enabled", False)):
+            return None
+
+        display_filter = self._filtered_pcapng_display_filter(packet_capture)
+        self.filtered_pcapng_filter = display_filter
+        self.filtered_pcapng_path = self.pcapng_path.with_suffix(".jitsi-only.pcapng")
+        command = [
+            tshark_binary,
+            "-r",
+            str(self.pcapng_path),
+            "-Y",
+            display_filter,
+            "-w",
+            str(self.filtered_pcapng_path),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        emit_event(
+            self.config,
+            "packet_filtered_capture_done" if result.returncode == 0 else "packet_filtered_capture_failed",
+            {
+                "pcapng_path": str(self.pcapng_path),
+                "filtered_pcapng_path": str(self.filtered_pcapng_path),
+                "filtered_pcapng_filter": display_filter,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            },
+        )
+        return result
+
+    def _filtered_pcapng_display_filter(self, packet_capture: Mapping[str, Any]) -> str:
+        configured_filter = packet_capture.get("filtered_pcapng_filter")
+        if configured_filter:
+            return str(configured_filter)
+
+        client_ip = str(packet_capture.get("client_ip") or "").strip()
+        jvb_ip = str(packet_capture.get("jvb_ip") or "").strip()
+        jvb_port = str(packet_capture.get("jvb_port") or "10000").strip()
+        terms = []
+        if client_ip:
+            terms.append(f"ip.addr == {client_ip}")
+        if jvb_ip:
+            terms.append(f"ip.addr == {jvb_ip}")
+        terms.append(f"udp.port == {jvb_port}")
+        return " && ".join(terms)
 
     def _analyze_media(self) -> subprocess.CompletedProcess[str] | None:
         if not self.pcapng_path:
@@ -317,7 +378,11 @@ class PacketCaptureSession:
         )
         return result
 
-    def _write_metadata(self, result: subprocess.CompletedProcess[str]) -> None:
+    def _write_metadata(
+        self,
+        result: subprocess.CompletedProcess[str],
+        filtered_result: subprocess.CompletedProcess[str] | None = None,
+    ) -> None:
         if not self.pcapng_path:
             return
 
@@ -326,6 +391,8 @@ class PacketCaptureSession:
         metadata = {
             "pcapng_path": str(self.pcapng_path),
             "analysis_path": str(self.analysis_path) if self.analysis_path else None,
+            "filtered_pcapng_path": str(self.filtered_pcapng_path) if self.filtered_pcapng_path else None,
+            "filtered_pcapng_filter": self.filtered_pcapng_filter,
             "media_analysis_json_path": str(self.media_analysis_json_path) if self.media_analysis_json_path else None,
             "media_analysis_md_path": str(self.media_analysis_md_path) if self.media_analysis_md_path else None,
             "bot_id": get_bot_id(self.config),
@@ -345,6 +412,8 @@ class PacketCaptureSession:
             ),
             "tshark_returncode": result.returncode,
             "tshark_stderr": result.stderr.strip(),
+            "filtered_pcapng_returncode": filtered_result.returncode if filtered_result else None,
+            "filtered_pcapng_stderr": filtered_result.stderr.strip() if filtered_result else None,
         }
         metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8")
 
