@@ -2002,7 +2002,7 @@ def wait_for_playback_segment_done(playback_segment_id, timeout_sec=5.0):
                 "playback_segment_id": segment_id,
                 "status": status.get("status"),
                 "updated_utc": status.get("updated_utc"),
-                "updated_monotonic_ns": status.get("updated_monotonic_ns"),
+                "updated_monotonic_ns": str(status.get("updated_monotonic_ns") or ""),
             }
         time.sleep(0.05)
     return {
