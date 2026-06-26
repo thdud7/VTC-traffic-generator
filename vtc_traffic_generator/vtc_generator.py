@@ -34,6 +34,8 @@ except ImportError:
 speech_lock = threading.Lock()
 speech_until = 0
 speech_thread_active = False
+playback_status_lock = threading.Lock()
+playback_status_by_segment = {}
 action_log_lock = threading.Lock()
 video_lock = threading.Lock()
 video_process = None
@@ -422,6 +424,10 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
     mic_state_cache_ttl_sec = float(icsi_config.get("mic_state_cache_ttl_sec", 10.0))
     post_speech_mic_off_probability = float(icsi_config.get("post_speech_mic_off_probability", 0.5))
     min_safe_gap_sec = float(icsi_config.get("min_safe_gap_for_post_speech_mic_off_sec", 6.0))
+    merge_same_bot_gap_sec = float(icsi_config.get("merge_same_bot_gap_ms", 250)) / 1000.0
+    post_speech_mic_guard_sec = float(icsi_config.get("post_speech_mic_guard_ms", 250)) / 1000.0
+    audio_warmup_enabled = bool(icsi_config.get("audio_warmup_enabled", True))
+    audio_warmup_duration_ms = int(icsi_config.get("audio_warmup_duration_ms", 500))
     random_seed = int(icsi_config.get("random_seed", 12345))
     rng = random.Random(random_seed)
 
@@ -430,9 +436,13 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
         max_duration_sec=max_duration_sec,
         scenario_offset_sec=scenario_offset_sec,
     )
+    playback_segments = build_icsi_playback_segments(utterances, merge_same_bot_gap_sec)
+    playback_segments_by_id = {segment["playback_segment_id"]: segment for segment in playback_segments}
     scenario_state = make_scenario_state(vtc_clients)
     scenario_state["random_mic_off_disallowed"] = True
     prewarm_strict_mics(vtc_clients, utterances, scenario_state, mic_pre_roll_sec, mic_action_timeout_sec)
+    if audio_warmup_enabled:
+        warmup_audio_pipelines(vtc_clients, audio_warmup_duration_ms, mic_action_timeout_sec)
     scenario_runtime_sec = min(max_duration_sec, icsi_policy.end_sec - scenario_offset_sec)
     scenario_thread = None
     scenario_stop = threading.Event()
@@ -458,6 +468,9 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
             "scenario_offset_sec": scenario_offset_sec,
             "max_duration_sec": max_duration_sec,
             "scheduled_utterance_count": len(utterances),
+            "playback_segment_count": len(playback_segments),
+            "merge_same_bot_gap_sec": merge_same_bot_gap_sec,
+            "post_speech_mic_guard_sec": post_speech_mic_guard_sec,
             "random_seed": random_seed,
         },
     )
@@ -469,6 +482,7 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
             "meeting_id": icsi_policy.meeting_id,
             "strict_timing": True,
             "scheduled_utterance_count": len(utterances),
+            "playback_segment_count": len(playback_segments),
         },
     )
 
@@ -477,8 +491,10 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
         prepare_t = max(0.0, utterance["scheduled_start_sec"] - mic_pre_roll_sec)
         scheduled_events.append((prepare_t, 0, "prepare_mic_on", utterance))
         scheduled_events.append((utterance["scheduled_start_sec"], 1, "speech_start", utterance))
-        if not utterance["clipped"]:
-            scheduled_events.append((utterance["scheduled_end_sec"], 2, "speech_end", utterance))
+    for segment in playback_segments:
+        if not segment["clipped"]:
+            decision_t = min(float(segment["playback_end_sec"]) + post_speech_mic_guard_sec, scenario_runtime_sec)
+            scheduled_events.append((decision_t, 2, "post_speech_mic_decision", segment))
     scheduled_events.sort(key=lambda item: (item[0], item[1], item[3]["speech_id"]))
 
     futures = []
@@ -508,7 +524,6 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
                 )
             elif event_type == "speech_start":
                 mark_pre_roll_inactive(scenario_state, utterance["bot_index"])
-                mark_speech_active(scenario_state, utterance["bot_index"], utterance["playback_duration_sec"])
                 mic_verified = mic_state_is_fresh_on(
                     scenario_state,
                     utterance["bot_index"],
@@ -532,16 +547,29 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
                 if not mic_verified:
                     emit_event(config, "speech_started_with_mic_unverified", request_details)
                     append_action_log(config, "speech_started_with_mic_unverified", request_details)
-                futures.append(
-                    executor.submit(
-                        send_start_speech_request,
-                        vtc_clients[utterance["bot_index"]],
-                        utterance,
-                        scenario_start_utc_dt,
-                        scenario_start_monotonic_ns,
+                if utterance.get("playback_segment_primary", True):
+                    playback_segment = playback_segments_by_id.get(utterance.get("playback_segment_id"), utterance)
+                    mark_speech_active(scenario_state, utterance["bot_index"], playback_segment["playback_duration_sec"])
+                    futures.append(
+                        executor.submit(
+                            send_start_speech_request,
+                            vtc_clients[utterance["bot_index"]],
+                            playback_segment,
+                            scenario_start_utc_dt,
+                            scenario_start_monotonic_ns,
+                        )
                     )
-                )
-            elif event_type == "speech_end":
+                else:
+                    merged_details = {
+                        **request_details,
+                        "success": True,
+                        "suppressed": True,
+                        "suppression_reason": "merged_into_playback_segment",
+                        "playback_segment_id": utterance.get("playback_segment_id"),
+                    }
+                    emit_event(config, "speech_start_response", merged_details)
+                    append_action_log(config, "speech_start_response", merged_details)
+            elif event_type == "post_speech_mic_decision":
                 futures.append(
                     handle_post_speech_mic_decision(
                         executor,
@@ -556,6 +584,8 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
                         mic_action_timeout_sec,
                         random_seed,
                         drift_ms,
+                        decision_scheduled_t_rel_sec=scheduled_t_rel_sec,
+                        post_speech_mic_guard_ms=int(post_speech_mic_guard_sec * 1000),
                     )
                 )
 
@@ -645,6 +675,51 @@ def prewarm_strict_mics(vtc_clients, utterances, scenario_state, mic_pre_roll_se
     emit_event(config, "strict_mic_prewarm_done", {"bot_indices": sorted(first_by_bot)})
 
 
+def warmup_audio_pipelines(vtc_clients, duration_ms, timeout_sec):
+    details = {
+        "duration_ms": int(duration_ms),
+        "client_count": len(vtc_clients),
+        "timeout_sec": timeout_sec,
+    }
+    emit_event(config, "audio_pipeline_warmup_start", details)
+    append_action_log(config, "audio_pipeline_warmup_start", details)
+    futures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(vtc_clients))) as executor:
+        for bot_index, client in enumerate(vtc_clients):
+            futures.append(executor.submit(call_audio_warmup, client, bot_index, duration_ms, timeout_sec))
+        wait_futures(futures, timeout=timeout_sec + 5)
+    emit_event(config, "audio_pipeline_warmup_done", details)
+    append_action_log(config, "audio_pipeline_warmup_done", details)
+
+
+def call_audio_warmup(client, bot_index, duration_ms, timeout_sec):
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    details = {
+        "bot_index": bot_index,
+        "client": uri,
+        "duration_ms": int(duration_ms),
+        "rpc_send_utc": utc_now_iso(),
+        "rpc_send_monotonic_ns": time.monotonic_ns(),
+    }
+    try:
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            success = bool(proxy.warmup_audio_pipeline(int(duration_ms)))
+    except Exception as exc:
+        success = False
+        details["failure_reason"] = str(exc)
+    details.update(
+        {
+            "success": success,
+            "rpc_response_utc": utc_now_iso(),
+            "rpc_response_monotonic_ns": time.monotonic_ns(),
+            "timeout_sec": timeout_sec,
+        }
+    )
+    emit_event(config, "audio_pipeline_warmup_result", details)
+    append_action_log(config, "audio_pipeline_warmup_result", details)
+    return success
+
+
 def build_icsi_strict_schedule(icsi_policy, max_duration_sec, scenario_offset_sec=0.0):
     utterances = []
     per_bot_counts: dict[int, int] = {}
@@ -693,6 +768,63 @@ def build_icsi_strict_schedule(icsi_policy, max_duration_sec, scenario_offset_se
         utterance["next_same_bot_start_sec"] = next_start_by_bot.get(utterance["bot_index"])
         next_start_by_bot[utterance["bot_index"]] = utterance["scheduled_start_sec"]
     return utterances
+
+
+def build_icsi_playback_segments(utterances, merge_gap_sec=0.0):
+    """Merge adjacent same-bot ICSI utterances into one physical audio output."""
+    merge_gap_sec = max(0.0, float(merge_gap_sec or 0.0))
+    segments = []
+    current = None
+    for utterance in utterances:
+        can_merge = False
+        if current is not None:
+            gap = float(utterance["scheduled_start_sec"]) - float(current["playback_end_sec"])
+            can_merge = (
+                utterance["bot_index"] == current["bot_index"]
+                and utterance["file_channel"] == current["file_channel"]
+                and gap <= merge_gap_sec
+                and gap >= -0.001
+                and not current.get("clipped")
+            )
+
+        if not can_merge:
+            segment = dict(utterance)
+            segment_id = f"{utterance['speech_id']}:segment:{len(segments)}"
+            segment.update(
+                {
+                    "playback_segment_id": segment_id,
+                    "playback_segment_primary": True,
+                    "merged_dialogue_acts": [],
+                    "merged_utterance_count": 0,
+                }
+            )
+            utterance["playback_segment_id"] = segment_id
+            utterance["playback_segment_primary"] = True
+            segments.append(segment)
+            current = segment
+        else:
+            utterance["playback_segment_id"] = current["playback_segment_id"]
+            utterance["playback_segment_primary"] = False
+            current["scheduled_end_sec"] = max(float(current["scheduled_end_sec"]), float(utterance["scheduled_end_sec"]))
+            current["playback_end_sec"] = max(float(current["playback_end_sec"]), float(utterance["playback_end_sec"]))
+            current["annotation_end_sec"] = max(float(current["annotation_end_sec"]), float(utterance["annotation_end_sec"]))
+            current["playback_duration_sec"] = max(
+                0.05,
+                float(current["playback_end_sec"]) - float(current["scheduled_start_sec"]),
+            )
+            current["clipped"] = bool(current.get("clipped") or utterance.get("clipped"))
+
+        current["merged_dialogue_acts"].append(dict(utterance))
+        current["merged_utterance_count"] = len(current["merged_dialogue_acts"])
+        utterance["playback_segment_start_sec"] = current["scheduled_start_sec"]
+        utterance["playback_segment_end_sec"] = current["playback_end_sec"]
+
+    next_start_by_bot: dict[int, float] = {}
+    for segment in reversed(segments):
+        segment["next_same_bot_start_sec"] = next_start_by_bot.get(segment["bot_index"])
+        next_start_by_bot[segment["bot_index"]] = segment["scheduled_start_sec"]
+
+    return segments
 
 
 def seconds_to_ns(value):
@@ -853,12 +985,11 @@ def submit_mic_prepare(
     )
 
 
-def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario_start_monotonic_ns):
-    uri = 'http://' + client.ip + ':' + str(client.port)
-    scheduled_t_rel_sec = utterance["scheduled_start_sec"]
+def icsi_utterance_metadata(utterance, scenario_start_utc_dt, scenario_start_monotonic_ns, segment=None):
+    segment = segment or utterance
+    scheduled_t_rel_sec = float(utterance["scheduled_start_sec"])
     scheduled_monotonic_ns = scenario_start_monotonic_ns + seconds_to_ns(scheduled_t_rel_sec)
-    send_ns = time.monotonic_ns()
-    metadata = {
+    return {
         "meeting_id": utterance["meeting_id"],
         "speech_id": utterance["speech_id"],
         "speaker_id": utterance["speaker_id"],
@@ -877,7 +1008,26 @@ def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario
         "icsi_participant": utterance["icsi_participant"],
         "icsi_channel": utterance["icsi_channel"],
         "clipped": utterance["clipped"],
+        "playback_segment_id": segment.get("playback_segment_id"),
+        "playback_segment_start_sec": segment.get("scheduled_start_sec"),
+        "playback_segment_end_sec": segment.get("playback_end_sec"),
+        "offset_from_segment_start_sec": float(utterance["scheduled_start_sec"]) - float(segment["scheduled_start_sec"]),
     }
+
+
+def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario_start_monotonic_ns):
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    scheduled_t_rel_sec = utterance["scheduled_start_sec"]
+    scheduled_monotonic_ns = scenario_start_monotonic_ns + seconds_to_ns(scheduled_t_rel_sec)
+    send_ns = time.monotonic_ns()
+    metadata = icsi_utterance_metadata(utterance, scenario_start_utc_dt, scenario_start_monotonic_ns, utterance)
+    merged_dialogue_acts = utterance.get("merged_dialogue_acts") or []
+    if merged_dialogue_acts:
+        metadata["merged_dialogue_acts"] = [
+            icsi_utterance_metadata(item, scenario_start_utc_dt, scenario_start_monotonic_ns, utterance)
+            for item in merged_dialogue_acts
+        ]
+        metadata["merged_utterance_count"] = len(merged_dialogue_acts)
     details = strict_speech_event_details(
         utterance,
         scenario_start_utc_dt,
@@ -936,16 +1086,29 @@ def handle_post_speech_mic_decision(
     mic_action_timeout_sec,
     random_seed,
     drift_ms,
+    decision_scheduled_t_rel_sec=None,
+    post_speech_mic_guard_ms=0,
 ):
+    decision_scheduled_t_rel_sec = (
+        float(decision_scheduled_t_rel_sec)
+        if decision_scheduled_t_rel_sec is not None
+        else float(utterance.get("playback_end_sec", utterance["scheduled_end_sec"]))
+    )
+    playback_wait = wait_for_client_playback_done(
+        vtc_clients[utterance["bot_index"]],
+        utterance.get("playback_segment_id") or utterance["speech_id"],
+        max(1.0, mic_action_timeout_sec),
+    )
     decision_off = rng.random() < post_speech_mic_off_probability
     next_start = utterance.get("next_same_bot_start_sec")
-    gap_to_next = None if next_start is None else float(next_start) - float(utterance["scheduled_end_sec"])
+    speech_end_sec = float(utterance.get("playback_end_sec", utterance["scheduled_end_sec"]))
+    gap_to_next = None if next_start is None else float(next_start) - speech_end_sec
     details = strict_speech_event_details(
         utterance,
         scenario_start_utc_dt,
         scenario_start_monotonic_ns,
-        utterance["scheduled_end_sec"],
-        scenario_start_monotonic_ns + seconds_to_ns(utterance["scheduled_end_sec"]),
+        decision_scheduled_t_rel_sec,
+        scenario_start_monotonic_ns + seconds_to_ns(decision_scheduled_t_rel_sec),
         drift_ms,
         {
             "random_seed": random_seed,
@@ -953,6 +1116,10 @@ def handle_post_speech_mic_decision(
             "post_speech_mic_off_probability": post_speech_mic_off_probability,
             "next_same_bot_start_sec": next_start,
             "gap_to_next_same_bot_sec": gap_to_next,
+            "playback_segment_id": utterance.get("playback_segment_id"),
+            "playback_segment_end_sec": speech_end_sec,
+            "post_speech_mic_guard_ms": int(post_speech_mic_guard_ms),
+            "playback_done_wait": playback_wait,
         },
     )
     emit_event(config, "post_speech_mic_decision", details)
@@ -963,6 +1130,8 @@ def handle_post_speech_mic_decision(
     suppression_reason = None
     if gap_to_next is not None and gap_to_next < min_safe_gap_sec:
         suppression_reason = "insufficient_gap_to_preserve_icsi_timing"
+    elif not playback_wait.get("completed"):
+        suppression_reason = "playback_done_not_confirmed"
     elif bot_is_speaking_or_in_pre_roll(scenario_state, utterance["bot_index"]):
         suppression_reason = "bot_speaking_or_in_mic_pre_roll"
     if suppression_reason:
@@ -994,6 +1163,35 @@ def handle_post_speech_mic_decision(
         scenario_state,
         mic_action_timeout_sec,
     )
+
+
+def wait_for_client_playback_done(client, playback_segment_id, timeout_sec):
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    details = {
+        "client": uri,
+        "playback_segment_id": playback_segment_id,
+        "timeout_sec": timeout_sec,
+        "rpc_send_utc": utc_now_iso(),
+        "rpc_send_monotonic_ns": time.monotonic_ns(),
+    }
+    try:
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            result = proxy.wait_for_playback_segment_done(str(playback_segment_id), float(timeout_sec))
+        if isinstance(result, dict):
+            details.update(result)
+        else:
+            details["completed"] = bool(result)
+    except Exception as exc:
+        details.update({"completed": False, "failure_reason": str(exc)})
+    details.update(
+        {
+            "rpc_response_utc": utc_now_iso(),
+            "rpc_response_monotonic_ns": time.monotonic_ns(),
+        }
+    )
+    emit_event(config, "post_speech_wait_playback_done_result", details)
+    append_action_log(config, "post_speech_wait_playback_done_result", details)
+    return details
 
 
 def bot_is_speaking_or_in_pre_roll(scenario_state, bot_index):
@@ -1364,6 +1562,8 @@ def run_client(client_config):
     server.register_function(stop_video, "stop_video")
     server.register_function(dialog_cycle, "dialog_cycle")
     server.register_function(start_speech, "start_speech")
+    server.register_function(warmup_audio_pipeline, "warmup_audio_pipeline")
+    server.register_function(wait_for_playback_segment_done, "wait_for_playback_segment_done")
     server.register_function(set_microphone, "set_microphone")
     server.register_function(set_camera, "set_camera")
     server.register_function(set_screen_share, "set_screen_share")
@@ -1730,6 +1930,8 @@ def start_speech(duration_sec, metadata=None):
             append_action_log(config, "audio_playback_failed", {"error": "invalid duration", **metadata})
             return False
         metadata["audio_file_path"] = audio_file_path
+        metadata["playback_segment_id"] = str(metadata.get("playback_segment_id") or metadata.get("speech_id") or time.monotonic_ns())
+        set_playback_segment_status(metadata["playback_segment_id"], "pending", metadata)
         emit_event(
             config,
             "speech_start",
@@ -1772,6 +1974,43 @@ def start_speech(duration_sec, metadata=None):
         thread.start()
 
     return True
+
+
+def set_playback_segment_status(playback_segment_id, status, details=None):
+    if not playback_segment_id:
+        return
+    with playback_status_lock:
+        playback_status_by_segment[str(playback_segment_id)] = {
+            "status": status,
+            "updated_utc": utc_now_iso(),
+            "updated_monotonic_ns": time.monotonic_ns(),
+            "details": dict(details or {}),
+        }
+
+
+def wait_for_playback_segment_done(playback_segment_id, timeout_sec=5.0):
+    segment_id = str(playback_segment_id)
+    deadline = time.time() + max(0.0, float(timeout_sec))
+    last_status = None
+    while time.time() <= deadline:
+        with playback_status_lock:
+            status = dict(playback_status_by_segment.get(segment_id, {}))
+        last_status = status
+        if status.get("status") in {"done", "failed"}:
+            return {
+                "completed": True,
+                "playback_segment_id": segment_id,
+                "status": status.get("status"),
+                "updated_utc": status.get("updated_utc"),
+                "updated_monotonic_ns": status.get("updated_monotonic_ns"),
+            }
+        time.sleep(0.05)
+    return {
+        "completed": False,
+        "playback_segment_id": segment_id,
+        "status": last_status.get("status") if isinstance(last_status, dict) else None,
+        "timeout_sec": float(timeout_sec),
+    }
 
 
 def speech_playback_worker(duration_sec, metadata):
@@ -2051,9 +2290,80 @@ def play_audio(audio_file_path):
         return False
 
 
+def warmup_audio_pipeline(duration_ms=500):
+    audio_devices = virtual_audio_config()
+    duration_sec = max(0.05, float(duration_ms) / 1000.0)
+    details = {
+        "duration_ms": int(duration_ms),
+        "duration_sec": duration_sec,
+        "sink": audio_devices["sink_name"],
+        "source": audio_devices["source_name"],
+    }
+    emit_event(config, "audio_pipeline_warmup_client_start", details)
+    append_action_log(config, "audio_pipeline_warmup_client_start", details)
+    ffmpeg_process = subprocess.Popen(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=mono",
+            "-t",
+            str(duration_sec),
+            "-f",
+            "wav",
+            "pipe:1",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    paplay_process = None
+    try:
+        paplay_process = subprocess.Popen(
+            ["paplay", "-d", audio_devices["sink_name"]],
+            stdin=ffmpeg_process.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        if ffmpeg_process.stdout:
+            ffmpeg_process.stdout.close()
+        paplay_stdout, paplay_stderr = paplay_process.communicate(timeout=max(5, duration_sec + 3))
+        ffmpeg_stderr = ffmpeg_process.stderr.read() if ffmpeg_process.stderr else b""
+        ffmpeg_process.wait(timeout=5)
+        success = ffmpeg_process.returncode == 0 and paplay_process.returncode == 0
+        result = {
+            **details,
+            "success": success,
+            "ffmpeg_returncode": ffmpeg_process.returncode,
+            "paplay_returncode": paplay_process.returncode,
+            "ffmpeg_stderr": ffmpeg_stderr.decode("utf-8", errors="replace").strip() if ffmpeg_stderr else "",
+            "paplay_stdout": paplay_stdout.decode("utf-8", errors="replace").strip() if paplay_stdout else "",
+            "paplay_stderr": paplay_stderr.decode("utf-8", errors="replace").strip() if paplay_stderr else "",
+        }
+        emit_event(config, "audio_pipeline_warmup_client_done", result)
+        append_action_log(config, "audio_pipeline_warmup_client_done", result)
+        return success
+    except Exception as exc:
+        result = {**details, "success": False, "failure_reason": str(exc)}
+        emit_event(config, "audio_pipeline_warmup_client_done", result)
+        append_action_log(config, "audio_pipeline_warmup_client_done", result)
+        return False
+    finally:
+        if paplay_process is not None and paplay_process.poll() is None:
+            paplay_process.terminate()
+        if ffmpeg_process.poll() is None:
+            ffmpeg_process.terminate()
+
+
 def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
     metadata = dict(metadata or {})
     audio_devices = virtual_audio_config()
+    playback_segment_id = str(metadata.get("playback_segment_id") or metadata.get("speech_id") or "")
     playback_start_utc = utc_now_iso()
     playback_start_monotonic_ns = time.monotonic_ns()
     details = {
@@ -2067,8 +2377,10 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
         "actual_monotonic_ns": playback_start_monotonic_ns,
         "drift_ms": drift_from_scheduled_utc_ms(metadata.get("scheduled_utc"), playback_start_utc),
     }
+    if playback_segment_id:
+        set_playback_segment_status(playback_segment_id, "running", details)
     emit_event(config, "audio_playback_start", details)
-    emit_event(config, "speech_playback_start", details)
+    emit_segment_speech_playback_events("speech_playback_start", metadata, playback_start_utc, playback_start_monotonic_ns)
     append_action_log(config, "audio_playback_start", details)
     ffmpeg_process = subprocess.Popen(
         [
@@ -2128,14 +2440,62 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
         success = ffmpeg_process.returncode == 0 and paplay_process.returncode == 0
         event_name = "audio_playback_done" if success else "audio_playback_failed"
         emit_event(config, event_name, done_details)
-        emit_event(config, "speech_playback_end", {**done_details, "success": success})
+        emit_segment_speech_playback_events(
+            "speech_playback_end",
+            metadata,
+            playback_start_utc,
+            playback_start_monotonic_ns,
+            success=success,
+        )
         append_action_log(config, event_name, done_details)
+        if playback_segment_id:
+            set_playback_segment_status(playback_segment_id, "done" if success else "failed", done_details)
         return success
     finally:
         if paplay_process is not None and paplay_process.poll() is None:
             paplay_process.terminate()
         if ffmpeg_process.poll() is None:
             ffmpeg_process.terminate()
+
+
+def emit_segment_speech_playback_events(event_name, metadata, segment_actual_utc, segment_actual_monotonic_ns, success=None):
+    dialogue_acts = metadata.get("merged_dialogue_acts")
+    if not isinstance(dialogue_acts, list) or not dialogue_acts:
+        dialogue_acts = [metadata]
+
+    for act in dialogue_acts:
+        act_details = dict(act)
+        offset_sec = float(act_details.get("offset_from_segment_start_sec") or 0.0)
+        if event_name == "speech_playback_start":
+            actual_utc = add_seconds_to_utc_iso(segment_actual_utc, offset_sec)
+            actual_monotonic_ns = segment_actual_monotonic_ns + seconds_to_ns(offset_sec)
+            act_details.update(
+                {
+                    "actual_utc": actual_utc,
+                    "actual_monotonic_ns": actual_monotonic_ns,
+                    "drift_ms": drift_from_scheduled_utc_ms(act_details.get("scheduled_utc"), actual_utc),
+                    "merged_playback": len(dialogue_acts) > 1,
+                }
+            )
+        else:
+            expected_end_offset = offset_sec + float(act_details.get("duration_sec") or 0.0)
+            actual_utc = add_seconds_to_utc_iso(segment_actual_utc, expected_end_offset)
+            actual_monotonic_ns = segment_actual_monotonic_ns + seconds_to_ns(expected_end_offset)
+            scheduled_end_utc = add_seconds_to_utc_iso(
+                act_details.get("scheduled_utc"),
+                act_details.get("duration_sec", 0.0),
+            )
+            act_details.update(
+                {
+                    "actual_utc": actual_utc,
+                    "actual_monotonic_ns": actual_monotonic_ns,
+                    "scheduled_end_utc": scheduled_end_utc,
+                    "end_drift_ms": drift_from_scheduled_utc_ms(scheduled_end_utc, actual_utc),
+                    "success": success,
+                    "merged_playback": len(dialogue_acts) > 1,
+                }
+            )
+        emit_event(config, event_name, act_details)
 
 
 def video_stream_config():

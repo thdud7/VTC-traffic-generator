@@ -71,6 +71,10 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertTrue(remote_config["packet_capture"]["filtered_pcapng_enabled"])
         self.assertEqual(remote_config["packet_capture"]["jvb_ip"], "172.31.32.200")
         self.assertEqual(remote_config["packet_capture"]["jvb_port"], 10000)
+        self.assertEqual(remote_config["capture"]["tail_after_disconnect_sec"], 10)
+        self.assertTrue(controller_config["behavior"]["icsi"]["audio_warmup_enabled"])
+        self.assertEqual(controller_config["behavior"]["icsi"]["merge_same_bot_gap_ms"], 250)
+        self.assertEqual(controller_config["behavior"]["icsi"]["post_speech_mic_guard_ms"], 250)
         self.assertFalse(controller_config["behavior"]["scenario"]["keep_camera_on"])
         self.assertFalse(controller_config["behavior"]["random_actions"]["keep_camera_on"])
 
@@ -191,6 +195,8 @@ class JitsiMediaHardeningTests(unittest.TestCase):
     def test_controller_registers_graceful_session_stop_rpc(self):
         generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
         self.assertIn('server.register_function(stop_vtc_session, "stop_vtc_session")', generator_source)
+        self.assertIn('server.register_function(warmup_audio_pipeline, "warmup_audio_pipeline")', generator_source)
+        self.assertIn('server.register_function(wait_for_playback_segment_done, "wait_for_playback_segment_done")', generator_source)
         self.assertIn("wait_for_clients_to_finish_sessions", generator_source)
 
     def test_strict_icsi_schedule_clips_cutoff_utterances(self):
@@ -237,6 +243,82 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(schedule[1]["playback_duration_sec"], 0.5)
         self.assertIs(schedule[1]["next_same_bot_start_sec"], None)
         self.assertEqual(schedule[0]["next_same_bot_start_sec"], 179.5)
+
+    def test_strict_icsi_playback_segments_merge_same_bot_short_gaps(self):
+        utterances = [
+            {
+                "speech_id": "speech-1",
+                "meeting_id": "Bdb001",
+                "icsi_meeting_id": "Bdb001",
+                "speaker_id": "me011",
+                "icsi_participant": "me011",
+                "bot_index": 0,
+                "channel": "chan0",
+                "icsi_channel": "chan0",
+                "file_channel": "chan0",
+                "dialogue_act_type": "s",
+                "annotation_start_sec": 10.0,
+                "annotation_end_sec": 11.0,
+                "scheduled_start_sec": 10.0,
+                "scheduled_end_sec": 11.0,
+                "playback_end_sec": 11.0,
+                "playback_duration_sec": 1.0,
+                "audio_start_sec": 10.0,
+                "clipped": False,
+                "next_same_bot_start_sec": 11.1,
+            },
+            {
+                "speech_id": "speech-2",
+                "meeting_id": "Bdb001",
+                "icsi_meeting_id": "Bdb001",
+                "speaker_id": "me011",
+                "icsi_participant": "me011",
+                "bot_index": 0,
+                "channel": "chan0",
+                "icsi_channel": "chan0",
+                "file_channel": "chan0",
+                "dialogue_act_type": "s",
+                "annotation_start_sec": 11.1,
+                "annotation_end_sec": 11.8,
+                "scheduled_start_sec": 11.1,
+                "scheduled_end_sec": 11.8,
+                "playback_end_sec": 11.8,
+                "playback_duration_sec": 0.7,
+                "audio_start_sec": 11.1,
+                "clipped": False,
+                "next_same_bot_start_sec": None,
+            },
+            {
+                "speech_id": "speech-3",
+                "meeting_id": "Bdb001",
+                "icsi_meeting_id": "Bdb001",
+                "speaker_id": "me012",
+                "icsi_participant": "me012",
+                "bot_index": 1,
+                "channel": "chan1",
+                "icsi_channel": "chan1",
+                "file_channel": "chan1",
+                "dialogue_act_type": "s",
+                "annotation_start_sec": 12.0,
+                "annotation_end_sec": 13.0,
+                "scheduled_start_sec": 12.0,
+                "scheduled_end_sec": 13.0,
+                "playback_end_sec": 13.0,
+                "playback_duration_sec": 1.0,
+                "audio_start_sec": 12.0,
+                "clipped": False,
+                "next_same_bot_start_sec": None,
+            },
+        ]
+
+        segments = generator_module.build_icsi_playback_segments(utterances, merge_gap_sec=0.25)
+
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["merged_utterance_count"], 2)
+        self.assertAlmostEqual(segments[0]["playback_duration_sec"], 1.8)
+        self.assertTrue(utterances[0]["playback_segment_primary"])
+        self.assertFalse(utterances[1]["playback_segment_primary"])
+        self.assertNotEqual(segments[0]["playback_segment_id"], segments[1]["playback_segment_id"])
 
     def test_random_mic_off_is_not_selected_during_speech_or_preroll(self):
         state = generator_module.make_scenario_state([object()])

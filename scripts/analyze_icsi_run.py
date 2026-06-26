@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import statistics
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +126,116 @@ def summarize_values(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def parse_utc(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def seconds_between(start: Any, end: Any) -> float | None:
+    start_dt = parse_utc(start)
+    end_dt = parse_utc(end)
+    if start_dt is None or end_dt is None:
+        return None
+    return (end_dt - start_dt).total_seconds()
+
+
+def compute_playback_overlaps(events: list[dict[str, Any]]) -> dict[str, Any]:
+    starts: dict[tuple[str, str], dict[str, Any]] = {}
+    intervals: list[dict[str, Any]] = []
+    for record in events:
+        etype = event_type(record)
+        data = details(record)
+        segment_id = str(data.get("playback_segment_id") or data.get("speech_id") or "")
+        if not segment_id:
+            continue
+        bot_id = str(record.get("bot_id") or data.get("bot_name") or data.get("bot_index") or "unknown")
+        key = (bot_id, segment_id)
+        if etype == "audio_playback_start":
+            starts[key] = record
+        elif etype in {"audio_playback_done", "audio_playback_failed"} and key in starts:
+            start_data = details(starts[key])
+            start_dt = parse_utc(start_data.get("actual_utc") or starts[key].get("ts"))
+            end_dt = parse_utc(data.get("actual_utc") or record.get("ts"))
+            if start_dt and end_dt:
+                intervals.append(
+                    {
+                        "bot_id": bot_id,
+                        "playback_segment_id": segment_id,
+                        "start_utc": start_dt.isoformat().replace("+00:00", "Z"),
+                        "end_utc": end_dt.isoformat().replace("+00:00", "Z"),
+                        "duration_sec": max(0.0, (end_dt - start_dt).total_seconds()),
+                        "status": "done" if etype == "audio_playback_done" else "failed",
+                    }
+                )
+
+    overlaps: list[dict[str, Any]] = []
+    for bot_id in sorted({item["bot_id"] for item in intervals}):
+        bot_intervals = sorted(
+            [item for item in intervals if item["bot_id"] == bot_id],
+            key=lambda item: item["start_utc"],
+        )
+        previous = None
+        for interval in bot_intervals:
+            if previous is not None:
+                overlap_sec = seconds_between(interval["start_utc"], previous["end_utc"])
+                if overlap_sec is not None and overlap_sec > 0:
+                    overlaps.append(
+                        {
+                            "bot_id": bot_id,
+                            "previous_segment_id": previous["playback_segment_id"],
+                            "segment_id": interval["playback_segment_id"],
+                            "overlap_sec": overlap_sec,
+                        }
+                    )
+            if previous is None or interval["end_utc"] > previous["end_utc"]:
+                previous = interval
+
+    max_overlap_sec = max([item["overlap_sec"] for item in overlaps] or [0.0])
+    return {
+        "interval_count": len(intervals),
+        "overlap_count": len(overlaps),
+        "max_overlap_ms": max_overlap_sec * 1000.0,
+        "overlaps": overlaps,
+        "intervals": intervals,
+    }
+
+
+def summarize_capture_lifecycle(events: list[dict[str, Any]], expected_tail_sec: float) -> dict[str, Any]:
+    lifecycle: dict[str, dict[str, Any]] = {}
+    for record in events:
+        bot_id = str(record.get("bot_id") or details(record).get("bot_index") or "unknown")
+        if bot_id in {"controller", "unknown"}:
+            continue
+        item = lifecycle.setdefault(bot_id, {"bot_id": bot_id})
+        etype = event_type(record)
+        ts = record.get("ts")
+        if etype in {"packet_capture_start", "capture_started"}:
+            item.setdefault("capture_start_utc", ts)
+        elif etype in {"packet_capture_done", "capture_stopped"}:
+            item["capture_stop_utc"] = ts
+        elif etype == "meeting_join_ready":
+            item.setdefault("meeting_ready_utc", ts)
+        elif etype == "meeting_disconnected":
+            item["meeting_disconnected_utc"] = ts
+
+    for item in lifecycle.values():
+        item["capture_duration_sec"] = seconds_between(item.get("capture_start_utc"), item.get("capture_stop_utc"))
+        start_delta = seconds_between(item.get("capture_start_utc"), item.get("meeting_ready_utc"))
+        stop_delta = seconds_between(item.get("meeting_disconnected_utc"), item.get("capture_stop_utc"))
+        item["capture_started_before_meeting_ready"] = start_delta is not None and start_delta >= 0
+        item["capture_stopped_after_meeting_disconnected"] = stop_delta is not None and stop_delta >= 0
+        item["post_disconnect_capture_tail_sec"] = stop_delta
+        item["expected_tail_sec"] = expected_tail_sec
+    return lifecycle
+
+
 def media_summary(run_dir: Path, min_media_duration_sec: float) -> dict[str, Any]:
     pcaps = sorted(run_dir.rglob("*.pcapng"))
     media_jsons = sorted(run_dir.rglob("*.media-analysis.json"))
@@ -155,6 +267,8 @@ def media_summary(run_dir: Path, min_media_duration_sec: float) -> dict[str, Any
         per_bot[path.parent.name] = {
             "packet_count": data.get("packet_count"),
             "packet_span_sec": data.get("packet_span_sec"),
+            "capture_start_utc": data.get("capture_start_utc"),
+            "capture_end_utc": data.get("capture_end_utc"),
             "protocol_counts": data.get("protocol_counts"),
             "client_to_jvb_packets": sum(int(item.get("packets", 0)) for item in c2j),
             "jvb_to_client_packets": sum(int(item.get("packets", 0)) for item in j2c),
@@ -236,6 +350,8 @@ def analyze(run_dir: Path, min_media_duration_sec: float) -> tuple[dict[str, Any
         and details(record).get("success") is False
     ]
     media = media_summary(run_dir, min_media_duration_sec)
+    playback_overlap = compute_playback_overlaps(events)
+    capture_lifecycle = summarize_capture_lifecycle(events, expected_tail_sec=10.0)
     teardown_ok = len(by_type.get("meeting_disconnected", [])) >= 3
 
     speech_summary = summarize_values(start_drifts)
@@ -253,6 +369,12 @@ def analyze(run_dir: Path, min_media_duration_sec: float) -> tuple[dict[str, Any
         "pcapng_for_every_client": media["pcapng_count"] >= 3,
         "media_analysis_for_every_client": media["media_analysis_count"] >= 3,
         "media_duration_ok": bool(media["per_bot"]) and all(item.get("passes_media_duration") for item in media["per_bot"].values()),
+        "same_bot_audio_playback_overlap_zero": playback_overlap["max_overlap_ms"] <= 0.0,
+        "capture_lifecycle_present": len(capture_lifecycle) >= 3,
+        "capture_starts_before_meeting_ready": bool(capture_lifecycle)
+        and all(item.get("capture_started_before_meeting_ready") for item in capture_lifecycle.values()),
+        "capture_stops_after_disconnect": bool(capture_lifecycle)
+        and all(item.get("capture_stopped_after_meeting_disconnected") for item in capture_lifecycle.values()),
         "teardown_terminal": teardown_ok,
     }
     summary = {
@@ -271,6 +393,8 @@ def analyze(run_dir: Path, min_media_duration_sec: float) -> tuple[dict[str, Any
         "post_speech_mic_off_action_failure_count": len(off_attempt_failures),
         "camera_failure_count": len(camera_failures),
         "screen_share_failure_count": len(screen_failures),
+        "playback_overlap": playback_overlap,
+        "capture_lifecycle": capture_lifecycle,
         "teardown_terminal_success": teardown_ok,
         "pcap": media,
         "pass_checks": pass_checks,
@@ -298,6 +422,7 @@ def write_markdown(summary: dict[str, Any], passed: bool, output_path: Path) -> 
             f"- start drift: {summary['speech_start_drift']}",
             f"- end drift: {summary['speech_end_drift']}",
             f"- last non-clipped start drift ms: {summary['last_non_clipped_start_drift_ms']}",
+            f"- same-bot audio overlap max ms: {summary['playback_overlap']['max_overlap_ms']}",
             "",
             "## Microphone",
             f"- speech_started_with_mic_unverified: {summary['speech_started_with_mic_unverified_count']}",
@@ -311,9 +436,43 @@ def write_markdown(summary: dict[str, Any], passed: bool, output_path: Path) -> 
             f"- media analysis count: {summary['pcap']['media_analysis_count']}",
             f"- filtered pcapng count: {summary['pcap']['filtered_pcapng_count']}",
             "",
+            "## Capture Lifecycle",
+            "",
         ]
     )
+    for bot_id, lifecycle in sorted(summary.get("capture_lifecycle", {}).items()):
+        lines.append(
+            f"- {bot_id}: capture {lifecycle.get('capture_start_utc')} -> {lifecycle.get('capture_stop_utc')}, "
+            f"meeting ready {lifecycle.get('meeting_ready_utc')}, disconnected {lifecycle.get('meeting_disconnected_utc')}"
+        )
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_csv_outputs(summary: dict[str, Any], output_dir: Path) -> None:
+    intervals = summary.get("playback_overlap", {}).get("intervals", [])
+    with (output_dir / "playback_segments.csv").open("w", newline="", encoding="utf-8") as outfile:
+        fieldnames = ["bot_id", "playback_segment_id", "start_utc", "end_utc", "duration_sec", "status"]
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in intervals:
+            writer.writerow({key: item.get(key) for key in fieldnames})
+
+    with (output_dir / "capture_lifecycle.csv").open("w", newline="", encoding="utf-8") as outfile:
+        fieldnames = [
+            "bot_id",
+            "capture_start_utc",
+            "capture_stop_utc",
+            "meeting_ready_utc",
+            "meeting_disconnected_utc",
+            "capture_duration_sec",
+            "post_disconnect_capture_tail_sec",
+            "capture_started_before_meeting_ready",
+            "capture_stopped_after_meeting_disconnected",
+        ]
+        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in summary.get("capture_lifecycle", {}).values():
+            writer.writerow({key: item.get(key) for key in fieldnames})
 
 
 def main() -> int:
@@ -332,6 +491,7 @@ def main() -> int:
         encoding="utf-8",
     )
     write_markdown(summary, passed, output_dir / "analysis_summary.md")
+    write_csv_outputs(summary, output_dir)
     print(json.dumps({"passed": passed, "summary": summary}, sort_keys=True))
     return 0 if passed else 1
 
