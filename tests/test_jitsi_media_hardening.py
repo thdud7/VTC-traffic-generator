@@ -148,7 +148,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             "ip.addr == 172.31.40.44 && ip.addr == 172.31.32.200 && udp.port == 10000",
         )
 
-    def test_controller_artifacts_upload_to_controller_log_prefix(self):
+    def test_controller_artifacts_upload_to_run_root_prefix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             manifest = root / "run-manifest-run-1.json"
@@ -187,11 +187,12 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(calls[0][0][:3], ["aws", "s3", "sync"])
-        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/experiments/icsi-jitsi-test/run-1/controller/")
+        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/experiments/icsi-jitsi-test/run-1/")
         self.assertEqual(
             staged_files,
             [
                 "configs",
+                "dialogue_acts",
                 "logs",
                 "metadata",
             ],

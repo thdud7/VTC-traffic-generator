@@ -493,9 +493,8 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
         scheduled_events.append((prepare_t, 0, "prepare_mic_on", utterance))
         scheduled_events.append((utterance["scheduled_start_sec"], 1, "speech_start", utterance))
     for segment in playback_segments:
-        if not segment["clipped"]:
-            decision_t = min(float(segment["playback_end_sec"]) + post_speech_mic_guard_sec, scenario_runtime_sec)
-            scheduled_events.append((decision_t, 2, "post_speech_mic_decision", segment))
+        decision_t = min(float(segment["playback_end_sec"]) + post_speech_mic_guard_sec, scenario_runtime_sec)
+        scheduled_events.append((decision_t, 2, "post_speech_mic_decision", segment))
     scheduled_events.sort(key=lambda item: (item[0], item[1], item[3]["speech_id"]))
 
     futures = []
@@ -932,8 +931,11 @@ def mic_state_is_fresh_on_at(scenario_state, bot_index, ttl_sec, target_ns):
     with scenario_state["lock"]:
         is_on = scenario_state["states"][bot_index].get("mic") is True
         verified_at = int(scenario_state["mic_verified_at_monotonic_ns"][bot_index])
+        active_speech = int(scenario_state["speaking"][bot_index]) > 0
     if not is_on or verified_at <= 0:
         return False
+    if active_speech:
+        return True
     return target_ns - verified_at <= seconds_to_ns(ttl_sec)
 
 
@@ -1168,6 +1170,54 @@ def handle_post_speech_mic_decision(
     if playback_wait.get("completed"):
         guard_deadline_ns = playback_done_observed_ns + seconds_to_ns(float(post_speech_mic_guard_ms) / 1000.0)
         sleep_until_monotonic_ns(guard_deadline_ns)
+
+    if utterance.get("clipped"):
+        state_before = get_raw_scenario_state(scenario_state, utterance["bot_index"], "mic")
+        decision_utc = utc_now_iso()
+        details = strict_speech_event_details(
+            utterance,
+            scenario_start_utc_dt,
+            scenario_start_monotonic_ns,
+            decision_scheduled_t_rel_sec,
+            scenario_start_monotonic_ns + seconds_to_ns(decision_scheduled_t_rel_sec),
+            drift_ms,
+            {
+                "random_seed": random_seed,
+                "random_value": None,
+                "decision": "skipped_experiment_ended",
+                "random_decision": "skipped_experiment_ended",
+                "post_speech_mic_off_probability": post_speech_mic_off_probability,
+                "next_same_bot_start_sec": utterance.get("next_same_bot_start_sec"),
+                "next_same_bot_speech_start_sec": utterance.get("next_same_bot_start_sec"),
+                "gap_to_next_same_bot_sec": None,
+                "safe_gap_sec": None,
+                "playback_segment_id": utterance.get("playback_segment_id"),
+                "speech_ids": [item.get("speech_id") for item in utterance.get("merged_dialogue_acts", [])] or [utterance.get("speech_id")],
+                "playback_segment_end_sec": float(utterance.get("playback_end_sec", utterance["scheduled_end_sec"])),
+                "post_speech_mic_guard_ms": int(post_speech_mic_guard_ms),
+                "guard_ms": int(post_speech_mic_guard_ms),
+                "playback_done_wait": playback_wait,
+                "actual_playback_done_utc": playback_wait.get("updated_utc"),
+                "playback_done_observed_utc": playback_done_observed_utc,
+                "playback_done_observed_monotonic_ns": playback_done_observed_ns,
+                "decision_utc": decision_utc,
+                "requested_state": None,
+                "state_before": state_before,
+                "state_after": state_before,
+                "verified_state": state_before,
+                "suppressed": True,
+                "suppression_reason": "experiment_ended",
+                "success": True,
+                "failure_reason": None,
+            },
+        )
+        emit_event(config, "post_speech_mic_decision", details)
+        append_action_log(config, "post_speech_mic_decision", details)
+        emit_event(config, "post_speech_mic_suppressed", details)
+        append_action_log(config, "post_speech_mic_suppressed", details)
+        emit_event(config, "post_speech_mic_action_result", details)
+        append_action_log(config, "post_speech_mic_action_result", details)
+        return None
 
     random_value = rng.random()
     decision_off = random_value < post_speech_mic_off_probability

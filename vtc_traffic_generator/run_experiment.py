@@ -16,9 +16,11 @@ from urllib.parse import urlparse
 
 try:
     from vtc_automation.event_log import resolve_git_sha
+    from vtc_behavior.icsi import ICSIReplayPolicy
     from tools import render_readable_events
 except ImportError:
     from vtc_traffic_generator.vtc_automation.event_log import resolve_git_sha
+    from vtc_traffic_generator.vtc_behavior.icsi import ICSIReplayPolicy
     from vtc_traffic_generator.tools import render_readable_events
 
 
@@ -656,10 +658,12 @@ def upload_controller_artifacts(generated):
     with tempfile.TemporaryDirectory(prefix="vtc-controller-upload-") as tmpdir:
         staging_dir = Path(tmpdir)
         config_dir = staging_dir / "configs"
+        dialogue_acts_dir = staging_dir / "dialogue_acts"
         metadata_dir = staging_dir / "metadata"
         source_log_dir = staging_dir / "logs" / "jsonl"
         readable_dir = staging_dir / "logs" / "readable"
         config_dir.mkdir(parents=True, exist_ok=True)
+        dialogue_acts_dir.mkdir(parents=True, exist_ok=True)
         metadata_dir.mkdir(parents=True, exist_ok=True)
         source_log_dir.mkdir(parents=True, exist_ok=True)
         readable_dir.mkdir(parents=True, exist_ok=True)
@@ -689,6 +693,8 @@ def upload_controller_artifacts(generated):
                 continue
             shutil.copy2(path, config_dir / target_name)
             staged_count += 1
+
+        staged_count += stage_dialogue_acts(generated, dialogue_acts_dir)
 
         readable_sources = []
         for artifact_path in log_paths:
@@ -720,13 +726,48 @@ def upload_controller_artifacts(generated):
         if staged_count == 0:
             return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
 
-        destination = f"{s3_uri}/experiments/{experiment_name}/{run_id}/controller/"
+        destination = f"{s3_uri}/experiments/{experiment_name}/{run_id}/"
         command = ["aws", "s3", "sync", str(staging_dir), destination]
         try:
             return subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)
         except FileNotFoundError:
             print("Error: aws CLI is not installed or not on PATH.", file=sys.stderr)
             return subprocess.CompletedProcess(command, 127)
+
+
+def stage_dialogue_acts(generated, target_dir):
+    controller_config_path = generated.get("controller_config")
+    if not controller_config_path:
+        return 0
+
+    path = Path(controller_config_path).expanduser()
+    if not path.is_file():
+        return 0
+
+    try:
+        controller_config = load_json(path)
+        bot_count = len(controller_config.get("vtc_clients") or [])
+        if bot_count <= 0:
+            return 0
+        policy = ICSIReplayPolicy.from_config(controller_config, bot_count)
+    except Exception as exc:
+        print(f"Warning: failed to stage ICSI dialogue acts: {exc}", file=sys.stderr)
+        return 0
+
+    copied = 0
+    copied_keys = set()
+    for event in policy.events:
+        key = (event.bot_index, event.meeting_id, event.file_channel)
+        if key in copied_keys:
+            continue
+        copied_keys.add(key)
+        source = policy.dialogue_acts_dir / f"{event.meeting_id}.{event.file_channel}.dialogue-acts.xml"
+        if not source.is_file():
+            continue
+        target_name = f"bot{event.bot_index + 1}_{event.meeting_id}_{event.file_channel}_dialogue_acts.xml"
+        shutil.copy2(source, target_dir / target_name)
+        copied += 1
+    return copied
 
 
 def main():

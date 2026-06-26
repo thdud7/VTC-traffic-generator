@@ -170,8 +170,10 @@ class Analysis:
             "client_ip": self.client_ip,
             "jvb_ip": self.jvb_ip,
             "jvb_port": self.jvb_port,
-            "capture_start_utc": epoch_to_iso(self.first_epoch),
-            "capture_end_utc": epoch_to_iso(self.last_epoch),
+            "capture_start_utc": epoch_to_iso(self.pcap_first_epoch()),
+            "capture_end_utc": epoch_to_iso(self.pcap_last_epoch()),
+            "udp_capture_start_utc": epoch_to_iso(self.first_epoch),
+            "udp_capture_end_utc": epoch_to_iso(self.last_epoch),
             "packet_span_sec": self.span_sec,
             "packet_count": self.packet_count,
             "capinfos": self.capinfos,
@@ -252,7 +254,9 @@ class Analysis:
         return checks, reasons
 
     def pcap_covers_full_lifecycle(self) -> bool:
-        if not self.events or self.first_epoch is None or self.last_epoch is None:
+        pcap_first = self.pcap_first_epoch()
+        pcap_last = self.pcap_last_epoch()
+        if not self.events or pcap_first is None or pcap_last is None:
             return False
 
         capture_start = first_event_epoch(self.events, {"capture_started", "packet_capture_start"})
@@ -264,7 +268,13 @@ class Analysis:
         capture_stop = last_event_epoch(self.events, {"capture_stopped", "packet_capture_done"})
         if None in (capture_start, meeting_ready, meeting_end, capture_stop):
             return False
-        return self.first_epoch <= meeting_ready and self.last_epoch >= meeting_end and capture_start <= meeting_ready <= meeting_end <= capture_stop
+        return pcap_first <= meeting_ready and pcap_last >= meeting_end and capture_start <= meeting_ready <= meeting_end <= capture_stop
+
+    def pcap_first_epoch(self) -> float | None:
+        return capinfos_time_epoch(self.capinfos.get("First packet time")) or self.first_epoch
+
+    def pcap_last_epoch(self) -> float | None:
+        return capinfos_time_epoch(self.capinfos.get("Last packet time")) or self.last_epoch
 
 
 def epoch_to_iso(epoch: float | None) -> str | None:
@@ -283,6 +293,26 @@ def iso_to_epoch(value: Any) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).timestamp()
+
+
+def capinfos_time_epoch(value: Any) -> float | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if "." in text:
+        prefix, suffix = text.rsplit(".", 1)
+        digits = "".join(char for char in suffix if char.isdigit())
+        if digits:
+            text = f"{prefix}.{digits[:6].ljust(6, '0')}"
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return iso_to_epoch(value)
 
 
 def record_epoch(record: dict[str, Any]) -> float | None:
