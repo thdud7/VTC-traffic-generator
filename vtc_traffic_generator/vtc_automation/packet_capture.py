@@ -126,6 +126,16 @@ class PacketCaptureSession:
                     "pid": self.process.pid,
                 },
             )
+            emit_event(
+                self.config,
+                "capture_started",
+                {
+                    "pcapng_path": str(self.pcapng_path),
+                    "interface": self.interface,
+                    "capture_filter": self.capture_filter,
+                    "pid": self.process.pid,
+                },
+            )
         except Exception as exc:
             emit_event(
                 self.config,
@@ -187,6 +197,20 @@ class PacketCaptureSession:
                     else None
                 ),
                 "stderr": (stderr or "").strip(),
+            },
+        )
+        emit_event(
+            self.config,
+            "capture_stopped",
+            {
+                "pcapng_path": str(self.pcapng_path) if self.pcapng_path else None,
+                "returncode": process.returncode,
+                "stop_reason": reason,
+                "duration_monotonic_sec": (
+                    self.stopped_at_monotonic - self.started_at_monotonic
+                    if self.started_at_monotonic is not None and self.stopped_at_monotonic is not None
+                    else None
+                ),
             },
         )
 

@@ -13,10 +13,11 @@ import asyncio
 import concurrent.futures
 import threading
 from datetime import datetime, timezone
+from concurrent.futures import wait as wait_futures
 
 from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
-from vtc_automation.event_log import emit_event, get_service_name
+from vtc_automation.event_log import emit_event, get_service_name, utc_now_iso
 from vtc_automation.packet_capture import PacketCaptureSession
 
 try:
@@ -309,6 +310,9 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
         if configured_max_duration_sec is not None
         else icsi_policy.end_sec
     )
+    if bool(icsi_config.get("strict_timing", False)):
+        run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max_duration_sec)
+        return
 
     emit_event(
         config,
@@ -411,6 +415,569 @@ def run_icsi_replay_controller(vtc_clients, icsi_policy):
             proxy.stop_video(client.video_pid)
 
 
+def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max_duration_sec):
+    scenario_offset_sec = float(icsi_config.get("scenario_offset_sec", 0))
+    mic_pre_roll_sec = float(icsi_config.get("mic_pre_roll_sec", 4.0))
+    mic_action_timeout_sec = float(icsi_config.get("mic_action_timeout_sec", 3.0))
+    mic_state_cache_ttl_sec = float(icsi_config.get("mic_state_cache_ttl_sec", 10.0))
+    post_speech_mic_off_probability = float(icsi_config.get("post_speech_mic_off_probability", 0.5))
+    min_safe_gap_sec = float(icsi_config.get("min_safe_gap_for_post_speech_mic_off_sec", 6.0))
+    random_seed = int(icsi_config.get("random_seed", 12345))
+    rng = random.Random(random_seed)
+
+    utterances = build_icsi_strict_schedule(
+        icsi_policy,
+        max_duration_sec=max_duration_sec,
+        scenario_offset_sec=scenario_offset_sec,
+    )
+    scenario_state = make_scenario_state(vtc_clients)
+    scenario_state["random_mic_off_disallowed"] = True
+    scenario_runtime_sec = min(max_duration_sec, icsi_policy.end_sec - scenario_offset_sec)
+    scenario_thread = None
+    scenario_stop = threading.Event()
+    if is_random_scenario_enabled():
+        scenario_thread = threading.Thread(
+            target=random_scenario_worker,
+            args=(vtc_clients, scenario_runtime_sec, 1.0, scenario_stop, scenario_state),
+            daemon=True,
+        )
+        scenario_thread.start()
+
+    scenario_start_utc_dt = datetime.now(timezone.utc)
+    scenario_start_utc = scenario_start_utc_dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    scenario_start_monotonic_ns = time.monotonic_ns()
+    emit_event(
+        config,
+        "scenario_start",
+        {
+            **icsi_policy.summary(),
+            "strict_timing": True,
+            "scenario_start_utc": scenario_start_utc,
+            "scenario_start_monotonic_ns": scenario_start_monotonic_ns,
+            "scenario_offset_sec": scenario_offset_sec,
+            "max_duration_sec": max_duration_sec,
+            "scheduled_utterance_count": len(utterances),
+            "random_seed": random_seed,
+        },
+    )
+    append_action_log(
+        config,
+        "scenario_start",
+        {
+            "role": "controller",
+            "meeting_id": icsi_policy.meeting_id,
+            "strict_timing": True,
+            "scheduled_utterance_count": len(utterances),
+        },
+    )
+
+    scheduled_events = []
+    for utterance in utterances:
+        prepare_t = max(0.0, utterance["scheduled_start_sec"] - mic_pre_roll_sec)
+        scheduled_events.append((prepare_t, 0, "prepare_mic_on", utterance))
+        scheduled_events.append((utterance["scheduled_start_sec"], 1, "speech_start", utterance))
+        if not utterance["clipped"]:
+            scheduled_events.append((utterance["scheduled_end_sec"], 2, "speech_end", utterance))
+    scheduled_events.sort(key=lambda item: (item[0], item[1], item[3]["speech_id"]))
+
+    futures = []
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(8, len(vtc_clients) * 4))
+    try:
+        for scheduled_t_rel_sec, _, event_type, utterance in scheduled_events:
+            target_ns = scenario_start_monotonic_ns + seconds_to_ns(scheduled_t_rel_sec)
+            sleep_until_monotonic_ns(target_ns)
+            now_ns = time.monotonic_ns()
+            drift_ms = ns_to_ms(now_ns - target_ns)
+            if event_type == "prepare_mic_on":
+                mark_pre_roll_active(scenario_state, utterance["bot_index"], utterance["scheduled_start_sec"], scenario_start_monotonic_ns)
+                futures.append(
+                    submit_mic_prepare(
+                        executor,
+                        vtc_clients[utterance["bot_index"]],
+                        utterance,
+                        scenario_state,
+                        scenario_start_utc_dt,
+                        scenario_start_monotonic_ns,
+                        scheduled_t_rel_sec,
+                        target_ns,
+                        mic_state_cache_ttl_sec,
+                        mic_action_timeout_sec,
+                        drift_ms,
+                    )
+                )
+            elif event_type == "speech_start":
+                mark_pre_roll_inactive(scenario_state, utterance["bot_index"])
+                mark_speech_active(scenario_state, utterance["bot_index"], utterance["playback_duration_sec"])
+                mic_verified = mic_state_is_fresh_on(
+                    scenario_state,
+                    utterance["bot_index"],
+                    mic_state_cache_ttl_sec,
+                    now_ns,
+                )
+                request_details = strict_speech_event_details(
+                    utterance,
+                    scenario_start_utc_dt,
+                    scenario_start_monotonic_ns,
+                    scheduled_t_rel_sec,
+                    target_ns,
+                    drift_ms,
+                    {
+                        "mic_verified_before_start": mic_verified,
+                        "random_seed": random_seed,
+                    },
+                )
+                emit_event(config, "speech_start_request", request_details)
+                append_action_log(config, "speech_start_request", request_details)
+                if not mic_verified:
+                    emit_event(config, "speech_started_with_mic_unverified", request_details)
+                    append_action_log(config, "speech_started_with_mic_unverified", request_details)
+                futures.append(
+                    executor.submit(
+                        send_start_speech_request,
+                        vtc_clients[utterance["bot_index"]],
+                        utterance,
+                        scenario_start_utc_dt,
+                        scenario_start_monotonic_ns,
+                    )
+                )
+            elif event_type == "speech_end":
+                futures.append(
+                    handle_post_speech_mic_decision(
+                        executor,
+                        vtc_clients,
+                        utterance,
+                        scenario_state,
+                        scenario_start_utc_dt,
+                        scenario_start_monotonic_ns,
+                        rng,
+                        post_speech_mic_off_probability,
+                        min_safe_gap_sec,
+                        mic_action_timeout_sec,
+                        random_seed,
+                        drift_ms,
+                    )
+                )
+
+        sleep_until_monotonic_ns(scenario_start_monotonic_ns + seconds_to_ns(scenario_runtime_sec))
+        if futures:
+            wait_futures([future for future in futures if future is not None], timeout=mic_action_timeout_sec + 15)
+    finally:
+        scenario_stop.set()
+        if scenario_thread:
+            scenario_thread.join(timeout=10)
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            executor.shutdown(wait=False)
+
+    emit_event(
+        config,
+        "icsi_replay_done",
+        {"meeting_id": icsi_policy.meeting_id, "strict_timing": True},
+    )
+    append_action_log(
+        config,
+        "meeting_end",
+        {"role": "controller", "meeting_id": icsi_policy.meeting_id, "strict_timing": True},
+    )
+
+    print("ICSI replay complete, closing session now.")
+    request_clients_to_stop_sessions(vtc_clients)
+    wait_for_clients_to_finish_sessions(vtc_clients, float(icsi_config.get("client_stop_timeout_sec", 90)))
+    for client in vtc_clients:
+        uri = 'http://' + client.ip + ':' + str(client.port)
+        with xmlrpc.client.ServerProxy(uri) as proxy:
+            proxy.stop_video(client.video_pid)
+
+
+def build_icsi_strict_schedule(icsi_policy, max_duration_sec, scenario_offset_sec=0.0):
+    utterances = []
+    per_bot_counts: dict[int, int] = {}
+    for event in icsi_policy.events:
+        scheduled_start_sec = float(event.start_sec) - scenario_offset_sec
+        scheduled_end_sec = float(event.end_sec) - scenario_offset_sec
+        if scheduled_start_sec < 0:
+            continue
+        if scheduled_start_sec >= max_duration_sec:
+            break
+        clipped = scheduled_end_sec > max_duration_sec
+        playback_end_sec = min(scheduled_end_sec, max_duration_sec)
+        playback_duration_sec = max(0.05, playback_end_sec - scheduled_start_sec)
+        bot_count = per_bot_counts.get(event.bot_index, 0)
+        per_bot_counts[event.bot_index] = bot_count + 1
+        speech_id = (
+            f"{event.meeting_id}:{event.speaker_id}:{event.bot_index}:"
+            f"{scheduled_start_sec:.3f}:{scheduled_end_sec:.3f}:{bot_count}"
+        )
+        utterances.append(
+            {
+                "speech_id": speech_id,
+                "meeting_id": event.meeting_id,
+                "icsi_meeting_id": event.meeting_id,
+                "speaker_id": event.speaker_id,
+                "icsi_participant": event.speaker_id,
+                "bot_index": event.bot_index,
+                "channel": event.channel,
+                "icsi_channel": event.channel,
+                "file_channel": event.file_channel,
+                "dialogue_act_type": event.dialogue_act_type,
+                "annotation_start_sec": float(event.start_sec),
+                "annotation_end_sec": float(event.end_sec),
+                "scheduled_start_sec": scheduled_start_sec,
+                "scheduled_end_sec": scheduled_end_sec,
+                "playback_end_sec": playback_end_sec,
+                "playback_duration_sec": playback_duration_sec,
+                "audio_start_sec": float(event.start_sec),
+                "clipped": clipped,
+                "next_same_bot_start_sec": None,
+            }
+        )
+
+    next_start_by_bot: dict[int, float] = {}
+    for utterance in reversed(utterances):
+        utterance["next_same_bot_start_sec"] = next_start_by_bot.get(utterance["bot_index"])
+        next_start_by_bot[utterance["bot_index"]] = utterance["scheduled_start_sec"]
+    return utterances
+
+
+def seconds_to_ns(value):
+    return int(float(value) * 1_000_000_000)
+
+
+def ns_to_ms(value):
+    return float(value) / 1_000_000.0
+
+
+def sleep_until_monotonic_ns(target_ns):
+    while True:
+        remaining_ns = target_ns - time.monotonic_ns()
+        if remaining_ns <= 0:
+            return
+        time.sleep(min(remaining_ns / 1_000_000_000.0, 0.05))
+
+
+def scheduled_utc(scenario_start_utc_dt, scheduled_t_rel_sec):
+    return (
+        scenario_start_utc_dt.timestamp() + float(scheduled_t_rel_sec)
+    )
+
+
+def scheduled_utc_iso(scenario_start_utc_dt, scheduled_t_rel_sec):
+    return datetime.fromtimestamp(
+        scheduled_utc(scenario_start_utc_dt, scheduled_t_rel_sec),
+        timezone.utc,
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def strict_speech_event_details(
+    utterance,
+    scenario_start_utc_dt,
+    scenario_start_monotonic_ns,
+    scheduled_t_rel_sec,
+    scheduled_monotonic_ns,
+    drift_ms,
+    extra=None,
+):
+    return {
+        "meeting_id": utterance["meeting_id"],
+        "speech_id": utterance["speech_id"],
+        "bot_index": utterance["bot_index"],
+        "icsi_meeting_id": utterance["icsi_meeting_id"],
+        "icsi_participant": utterance["icsi_participant"],
+        "icsi_channel": utterance["icsi_channel"],
+        "scheduled_t_rel_sec": float(scheduled_t_rel_sec),
+        "scheduled_utc": scheduled_utc_iso(scenario_start_utc_dt, scheduled_t_rel_sec),
+        "scheduled_monotonic_ns": scheduled_monotonic_ns,
+        "actual_utc": utc_now_iso(),
+        "actual_monotonic_ns": time.monotonic_ns(),
+        "drift_ms": drift_ms,
+        "clipped": bool(utterance.get("clipped")),
+        "scenario_start_monotonic_ns": scenario_start_monotonic_ns,
+        **dict(extra or {}),
+    }
+
+
+def drift_from_scheduled_utc_ms(scheduled_utc_value, actual_utc_value):
+    if not scheduled_utc_value:
+        return None
+    try:
+        scheduled = datetime.fromisoformat(str(scheduled_utc_value).replace("Z", "+00:00"))
+        actual = datetime.fromisoformat(str(actual_utc_value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (actual - scheduled).total_seconds() * 1000.0
+
+
+def add_seconds_to_utc_iso(utc_value, seconds):
+    if not utc_value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(str(utc_value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return datetime.fromtimestamp(timestamp + float(seconds), timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def mark_pre_roll_active(scenario_state, bot_index, scheduled_start_sec, scenario_start_monotonic_ns):
+    with scenario_state["lock"]:
+        scenario_state["pre_roll_until_monotonic_ns"][bot_index] = (
+            scenario_start_monotonic_ns + seconds_to_ns(scheduled_start_sec)
+        )
+
+
+def mark_pre_roll_inactive(scenario_state, bot_index):
+    with scenario_state["lock"]:
+        scenario_state["pre_roll_until_monotonic_ns"][bot_index] = 0
+
+
+def mic_state_is_fresh_on(scenario_state, bot_index, ttl_sec, now_ns=None):
+    now_ns = now_ns or time.monotonic_ns()
+    with scenario_state["lock"]:
+        is_on = scenario_state["states"][bot_index].get("mic") is True
+        verified_at = int(scenario_state["mic_verified_at_monotonic_ns"][bot_index])
+    if not is_on or verified_at <= 0:
+        return False
+    return now_ns - verified_at <= seconds_to_ns(ttl_sec)
+
+
+def set_mic_verified_state(scenario_state, bot_index, enabled, verified):
+    with scenario_state["lock"]:
+        scenario_state["states"][bot_index]["mic"] = bool(enabled) if verified else scenario_state["states"][bot_index].get("mic")
+        scenario_state["mic_verified_at_monotonic_ns"][bot_index] = time.monotonic_ns() if verified and enabled else 0
+
+
+def submit_mic_prepare(
+    executor,
+    client,
+    utterance,
+    scenario_state,
+    scenario_start_utc_dt,
+    scenario_start_monotonic_ns,
+    prepare_t_rel_sec,
+    prepare_monotonic_ns,
+    mic_state_cache_ttl_sec,
+    mic_action_timeout_sec,
+    drift_ms,
+):
+    now_ns = time.monotonic_ns()
+    details = strict_speech_event_details(
+        utterance,
+        scenario_start_utc_dt,
+        scenario_start_monotonic_ns,
+        prepare_t_rel_sec,
+        prepare_monotonic_ns,
+        drift_ms,
+        {
+            "requested_state": True,
+            "mic_state_cache_ttl_sec": mic_state_cache_ttl_sec,
+        },
+    )
+    if mic_state_is_fresh_on(scenario_state, utterance["bot_index"], mic_state_cache_ttl_sec, now_ns):
+        details.update({"success": True, "suppressed": True, "suppression_reason": "mic_already_verified_on"})
+        emit_event(config, "speech_prepare_mic_on_result", details)
+        append_action_log(config, "speech_prepare_mic_on_result", details)
+        return None
+
+    emit_event(config, "speech_prepare_mic_on_start", details)
+    append_action_log(config, "speech_prepare_mic_on_start", details)
+    return executor.submit(
+        call_client_action_with_result,
+        client,
+        utterance["bot_index"],
+        "set_microphone",
+        True,
+        "speech_prepare_mic_on_result",
+        details,
+        scenario_state,
+        mic_action_timeout_sec,
+    )
+
+
+def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario_start_monotonic_ns):
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    scheduled_t_rel_sec = utterance["scheduled_start_sec"]
+    scheduled_monotonic_ns = scenario_start_monotonic_ns + seconds_to_ns(scheduled_t_rel_sec)
+    send_ns = time.monotonic_ns()
+    metadata = {
+        "meeting_id": utterance["meeting_id"],
+        "speech_id": utterance["speech_id"],
+        "speaker_id": utterance["speaker_id"],
+        "channel": utterance["channel"],
+        "file_channel": utterance["file_channel"],
+        "dialogue_act_type": utterance["dialogue_act_type"],
+        "icsi_start_sec": utterance["annotation_start_sec"],
+        "icsi_end_sec": utterance["annotation_end_sec"],
+        "duration_sec": utterance["playback_duration_sec"],
+        "audio_start_sec": utterance["audio_start_sec"],
+        "scheduled_t_rel_sec": scheduled_t_rel_sec,
+        "scheduled_utc": scheduled_utc_iso(scenario_start_utc_dt, scheduled_t_rel_sec),
+        "scheduled_monotonic_ns": scheduled_monotonic_ns,
+        "scenario_start_monotonic_ns": scenario_start_monotonic_ns,
+        "icsi_meeting_id": utterance["icsi_meeting_id"],
+        "icsi_participant": utterance["icsi_participant"],
+        "icsi_channel": utterance["icsi_channel"],
+        "clipped": utterance["clipped"],
+    }
+    details = strict_speech_event_details(
+        utterance,
+        scenario_start_utc_dt,
+        scenario_start_monotonic_ns,
+        scheduled_t_rel_sec,
+        scheduled_monotonic_ns,
+        ns_to_ms(send_ns - scheduled_monotonic_ns),
+        {
+            "rpc_send_utc": utc_now_iso(),
+            "rpc_send_monotonic_ns": send_ns,
+        },
+    )
+    try:
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            success = bool(proxy.start_speech(utterance["playback_duration_sec"], metadata))
+    except Exception as exc:
+        success = False
+        details["failure_reason"] = str(exc)
+    receive_ns = time.monotonic_ns()
+    details.update(
+        {
+            "success": success,
+            "rpc_response_utc": utc_now_iso(),
+            "rpc_response_monotonic_ns": receive_ns,
+            "rpc_latency_ms": ns_to_ms(receive_ns - send_ns),
+        }
+    )
+    emit_event(config, "speech_start_response", details)
+    append_action_log(config, "speech_start_response", details)
+    return success
+
+
+def handle_post_speech_mic_decision(
+    executor,
+    vtc_clients,
+    utterance,
+    scenario_state,
+    scenario_start_utc_dt,
+    scenario_start_monotonic_ns,
+    rng,
+    post_speech_mic_off_probability,
+    min_safe_gap_sec,
+    mic_action_timeout_sec,
+    random_seed,
+    drift_ms,
+):
+    decision_off = rng.random() < post_speech_mic_off_probability
+    next_start = utterance.get("next_same_bot_start_sec")
+    gap_to_next = None if next_start is None else float(next_start) - float(utterance["scheduled_end_sec"])
+    details = strict_speech_event_details(
+        utterance,
+        scenario_start_utc_dt,
+        scenario_start_monotonic_ns,
+        utterance["scheduled_end_sec"],
+        scenario_start_monotonic_ns + seconds_to_ns(utterance["scheduled_end_sec"]),
+        drift_ms,
+        {
+            "random_seed": random_seed,
+            "random_decision": "mic_off" if decision_off else "keep_on",
+            "post_speech_mic_off_probability": post_speech_mic_off_probability,
+            "next_same_bot_start_sec": next_start,
+            "gap_to_next_same_bot_sec": gap_to_next,
+        },
+    )
+    emit_event(config, "post_speech_mic_decision", details)
+    append_action_log(config, "post_speech_mic_decision", details)
+    if not decision_off:
+        return None
+
+    suppression_reason = None
+    if gap_to_next is not None and gap_to_next < min_safe_gap_sec:
+        suppression_reason = "insufficient_gap_to_preserve_icsi_timing"
+    elif bot_is_speaking_or_in_pre_roll(scenario_state, utterance["bot_index"]):
+        suppression_reason = "bot_speaking_or_in_mic_pre_roll"
+    if suppression_reason:
+        suppressed_details = {
+            **details,
+            "suppressed": True,
+            "suppression_reason": suppression_reason,
+            "success": False,
+        }
+        emit_event(config, "post_speech_mic_action_result", suppressed_details)
+        append_action_log(config, "post_speech_mic_action_result", suppressed_details)
+        return None
+
+    start_details = {
+        **details,
+        "requested_state": False,
+        "suppressed": False,
+    }
+    emit_event(config, "post_speech_mic_action_start", start_details)
+    append_action_log(config, "post_speech_mic_action_start", start_details)
+    return executor.submit(
+        call_client_action_with_result,
+        vtc_clients[utterance["bot_index"]],
+        utterance["bot_index"],
+        "set_microphone",
+        False,
+        "post_speech_mic_action_result",
+        start_details,
+        scenario_state,
+        mic_action_timeout_sec,
+    )
+
+
+def bot_is_speaking_or_in_pre_roll(scenario_state, bot_index):
+    now_ns = time.monotonic_ns()
+    with scenario_state["lock"]:
+        return (
+            scenario_state["speaking"][bot_index] > 0
+            or int(scenario_state["pre_roll_until_monotonic_ns"][bot_index]) > now_ns
+        )
+
+
+def call_client_action_with_result(
+    client,
+    bot_index,
+    method_name,
+    enabled,
+    result_event_name,
+    details,
+    scenario_state=None,
+    timeout_sec=None,
+):
+    start_ns = time.monotonic_ns()
+    uri = 'http://' + client.ip + ':' + str(client.port)
+    result_details = {
+        **dict(details or {}),
+        "bot_index": bot_index,
+        "client": uri,
+        "method": method_name,
+        "requested_state": bool(enabled),
+        "rpc_send_utc": utc_now_iso(),
+        "rpc_send_monotonic_ns": start_ns,
+    }
+    try:
+        with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
+            success = bool(getattr(proxy, method_name)(bool(enabled)))
+    except Exception as exc:
+        success = False
+        result_details["failure_reason"] = str(exc)
+    end_ns = time.monotonic_ns()
+    result_details.update(
+        {
+            "success": success,
+            "verified_state": bool(enabled) if success else None,
+            "state_after": bool(enabled) if success else None,
+            "rpc_response_utc": utc_now_iso(),
+            "rpc_response_monotonic_ns": end_ns,
+            "rpc_latency_ms": ns_to_ms(end_ns - start_ns),
+            "timeout_sec": timeout_sec,
+        }
+    )
+    if scenario_state is not None and method_name == "set_microphone":
+        set_mic_verified_state(scenario_state, bot_index, bool(enabled), success)
+    emit_event(config, result_event_name, result_details)
+    append_action_log(config, result_event_name, result_details)
+    return success
+
+
 def request_clients_to_stop_sessions(vtc_clients):
     for client in vtc_clients:
         uri = 'http://' + client.ip + ':' + str(client.port)
@@ -447,6 +1014,9 @@ def scenario_config():
     behavior = config.get("behavior", {})
     if not isinstance(behavior, dict):
         return {}
+    random_actions = behavior.get("random_actions")
+    if isinstance(random_actions, dict):
+        return random_actions
     scenario = behavior.get("scenario", {})
     if isinstance(scenario, dict):
         return scenario
@@ -496,7 +1066,21 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event, sce
             if stop_event.wait(min(interval, max(0, deadline - time.time()))):
                 break
 
+            emit_event(
+                config,
+                "random_action_candidates",
+                {
+                    "action_weights": dict(action_weights),
+                    "screen_owner": screen_owner,
+                    "nonblocking": True,
+                },
+            )
             action_name = choose_weighted_action(rng, action_weights)
+            emit_event(
+                config,
+                "random_action_selected",
+                {"action": action_name, "screen_owner": screen_owner, "nonblocking": True},
+            )
             if action_name == "screen_share":
                 if screen_owner is None:
                     bot_index = rng.randrange(0, len(vtc_clients))
@@ -516,7 +1100,9 @@ def random_scenario_worker(vtc_clients, runtime_sec, time_scale, stop_event, sce
             elif action_name == "mic":
                 choice = choose_mic_action(rng, scenario_state, len(vtc_clients))
                 if choice is None:
-                    append_action_log(config, "mic_action_skipped", {"reason": "all candidate bots are speaking"})
+                    details = {"reason": "all candidate bots are speaking or in mic pre-roll"}
+                    emit_event(config, "random_action_suppressed", details)
+                    append_action_log(config, "mic_action_skipped", details)
                     continue
                 bot_index, desired_state = choice
                 success = call_client_action(vtc_clients[bot_index], bot_index, "set_microphone", desired_state)
@@ -533,12 +1119,15 @@ def make_scenario_state(vtc_clients):
         "lock": threading.Lock(),
         "states": [
             {
-                "mic": True,
+                "mic": None,
                 "camera": True,
             }
             for _ in vtc_clients
         ],
         "speaking": [0 for _ in vtc_clients],
+        "pre_roll_until_monotonic_ns": [0 for _ in vtc_clients],
+        "mic_verified_at_monotonic_ns": [0 for _ in vtc_clients],
+        "random_mic_off_disallowed": False,
     }
 
 
@@ -580,10 +1169,15 @@ def set_scenario_state(scenario_state, bot_index, key, value):
 def choose_mic_action(rng, scenario_state, client_count):
     candidates = list(range(client_count))
     rng.shuffle(candidates)
+    now_ns = time.monotonic_ns()
     with scenario_state["lock"]:
         for bot_index in candidates:
             desired_state = not bool(scenario_state["states"][bot_index]["mic"])
-            if desired_state or scenario_state["speaking"][bot_index] == 0:
+            in_speech_or_pre_roll = (
+                scenario_state["speaking"][bot_index] > 0
+                or int(scenario_state["pre_roll_until_monotonic_ns"][bot_index]) > now_ns
+            )
+            if desired_state or not in_speech_or_pre_roll:
                 return bot_index, desired_state
     return None
 
@@ -1377,6 +1971,8 @@ def play_audio(audio_file_path):
 def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
     metadata = dict(metadata or {})
     audio_devices = virtual_audio_config()
+    playback_start_utc = utc_now_iso()
+    playback_start_monotonic_ns = time.monotonic_ns()
     details = {
         **metadata,
         "audio_file_path": str(audio_file_path),
@@ -1384,8 +1980,12 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
         "duration_sec": float(duration_sec),
         "sink": audio_devices["sink_name"],
         "source": audio_devices["source_name"],
+        "actual_utc": playback_start_utc,
+        "actual_monotonic_ns": playback_start_monotonic_ns,
+        "drift_ms": drift_from_scheduled_utc_ms(metadata.get("scheduled_utc"), playback_start_utc),
     }
     emit_event(config, "audio_playback_start", details)
+    emit_event(config, "speech_playback_start", details)
     append_action_log(config, "audio_playback_start", details)
     ffmpeg_process = subprocess.Popen(
         [
@@ -1435,10 +2035,17 @@ def play_audio_segment(audio_file_path, start_sec, duration_sec, metadata=None):
             "ffmpeg_stderr": ffmpeg_stderr.decode("utf-8", errors="replace").strip() if ffmpeg_stderr else "",
             "paplay_stdout": paplay_stdout.decode("utf-8", errors="replace").strip() if paplay_stdout else "",
             "paplay_stderr": paplay_stderr.decode("utf-8", errors="replace").strip() if paplay_stderr else "",
+            "actual_utc": utc_now_iso(),
+            "actual_monotonic_ns": time.monotonic_ns(),
         }
+        if not metadata.get("clipped"):
+            scheduled_end_utc = add_seconds_to_utc_iso(metadata.get("scheduled_utc"), metadata.get("duration_sec", duration_sec))
+            done_details["scheduled_end_utc"] = scheduled_end_utc
+            done_details["end_drift_ms"] = drift_from_scheduled_utc_ms(scheduled_end_utc, done_details["actual_utc"])
         success = ffmpeg_process.returncode == 0 and paplay_process.returncode == 0
         event_name = "audio_playback_done" if success else "audio_playback_failed"
         emit_event(config, event_name, done_details)
+        emit_event(config, "speech_playback_end", {**done_details, "success": success})
         append_action_log(config, event_name, done_details)
         return success
     finally:
@@ -1588,6 +2195,11 @@ def set_screen_share(enabled):
 
 def run_adapter_action(method_name, event_name, details=None):
     details = dict(details or {})
+    requested_state = details.get("enabled")
+    start_ns = time.monotonic_ns()
+    details.setdefault("requested_state", requested_state)
+    details.setdefault("rpc_received_utc", utc_now_iso())
+    details.setdefault("rpc_received_monotonic_ns", start_ns)
     with active_adapter_lock:
         adapter = active_adapter
         loop = active_loop
@@ -1603,12 +2215,29 @@ def run_adapter_action(method_name, event_name, details=None):
         future = asyncio.run_coroutine_threadsafe(coroutine(), loop)
         success = bool(future.result(timeout=float(config.get("adapter_action_timeout_sec", 20))))
         details["success"] = success
+        details["verified_state"] = bool(requested_state) if success and requested_state is not None else None
+        details["state_after"] = bool(requested_state) if success and requested_state is not None else None
+        details["latency_ms"] = ns_to_ms(time.monotonic_ns() - start_ns)
         emit_event(config, event_name, details)
+        if event_name.startswith("mic_"):
+            emit_event(config, "mic_state_change", {**details, "automation_method": method_name})
+        elif event_name.startswith("camera_"):
+            emit_event(config, "camera_state_change", {**details, "automation_method": method_name})
+        elif event_name.startswith("screen_share_"):
+            emit_event(config, "screen_share_state_change", {**details, "automation_method": method_name})
         append_action_log(config, event_name, details)
         return success
     except Exception as exc:
         details.update({"success": False, "error": str(exc)})
+        details["failure_reason"] = str(exc)
+        details["latency_ms"] = ns_to_ms(time.monotonic_ns() - start_ns)
         emit_event(config, event_name, details)
+        if event_name.startswith("mic_"):
+            emit_event(config, "mic_state_change", {**details, "automation_method": method_name})
+        elif event_name.startswith("camera_"):
+            emit_event(config, "camera_state_change", {**details, "automation_method": method_name})
+        elif event_name.startswith("screen_share_"):
+            emit_event(config, "screen_share_state_change", {**details, "automation_method": method_name})
         append_action_log(config, event_name, details)
         return False
 
@@ -1670,6 +2299,7 @@ async def connect_vtc_session(duration):
                 stage="adapter_join",
                 reason="join_start",
             )
+            emit_event(config, "meeting_join_start", {"vtc_url": config.get("vtc_url")}, service)
             await adapter.connect_to_meeting(
                 vtc_url=str(config["vtc_url"]),
                 display_name=adapter._display_name() if hasattr(adapter, "_display_name") else str(config.get("bot_name") or "bot"),
@@ -1684,6 +2314,7 @@ async def connect_vtc_session(duration):
                 stage="meeting_running",
                 reason="media_ready_confirmed",
             )
+            emit_event(config, "meeting_join_ready", {"vtc_url": config.get("vtc_url")}, service)
             await wait_for_session_duration_or_stop(duration * 60)
             set_connection_status(
                 "leaving",
@@ -1716,6 +2347,12 @@ async def connect_vtc_session(duration):
             result = await adapter.connect(duration)
 
         stop_reason = "success"
+        emit_event(
+            config,
+            "meeting_disconnected",
+            {"vtc_url": config.get("vtc_url"), "terminal_state": "done"},
+            service,
+        )
         set_connection_status(
             "done",
             connected=False,
@@ -1806,6 +2443,7 @@ async def wait_for_session_duration_or_stop(duration_sec):
 
 def stop_vtc_session():
     session_stop_requested.set()
+    emit_event(config, "stop_vtc_session_request", {"success": True})
     emit_event(config, "session_stop_request_received", {"success": True})
     append_action_log(config, "session_stop_request_received", {"success": True})
     return True
@@ -1818,7 +2456,11 @@ def postroll_seconds(key, default=10):
     packet_capture = config.get("packet_capture", {})
     if not isinstance(packet_capture, dict):
         packet_capture = {}
-    value = adapter_config.get(key, packet_capture.get(key, config.get(key, default)))
+    capture = config.get("capture", {})
+    if not isinstance(capture, dict):
+        capture = {}
+    capture_tail = capture.get("tail_after_disconnect_sec") if key == "success_postroll_sec" else None
+    value = adapter_config.get(key, packet_capture.get(key, capture_tail if capture_tail is not None else config.get(key, default)))
     try:
         return max(0.0, float(value))
     except (TypeError, ValueError):

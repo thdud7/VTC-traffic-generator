@@ -1476,16 +1476,32 @@ class JitsiElectronAdapter(ServiceAdapter):
         before_state: bool | None,
         after_state: bool | None,
         success: bool,
+        requested_state: bool | None = None,
     ) -> None:
+        if requested_state is None:
+            requested_state = {
+                "mic_on": True,
+                "mic_off": False,
+                "camera_on": True,
+                "camera_off": False,
+                "screen_share_start": True,
+                "screen_share_stop": False,
+            }.get(event_name)
         emit_event(
             self.config,
             event_name,
             {
                 "action": action,
+                "requested_state": requested_state,
                 "method": method,
+                "automation_method": method,
                 "before_state": before_state,
+                "state_before": before_state,
                 "after_state": after_state,
+                "state_after": after_state,
+                "verified_state": after_state if success else None,
                 "success": success,
+                "failure_reason": None if success else "requested state was not verified",
             },
             self.service_name,
         )

@@ -205,6 +205,8 @@ def build_remote_config(experiment, client):
         "adapter_config": adapter_config,
         "version": experiment.get("version", "VTC traffic generator X"),
     }
+    if isinstance(experiment.get("capture"), dict):
+        remote["capture"] = experiment["capture"]
 
     for optional_key in (
         "icsi_audio_root",

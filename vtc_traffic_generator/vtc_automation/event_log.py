@@ -49,6 +49,7 @@ def emit_event(
     record = {
         "ts": utc_now_iso(),
         "monotonic_ns": time.monotonic_ns(),
+        "run_id": str(config.get("execution_id") or config.get("run_id") or "unknown"),
         "experiment_id": str(config.get("experiment_id") or config.get("run_id") or "unknown"),
         "execution_id": str(config.get("execution_id") or config.get("run_id") or "unknown"),
         "bot_id": get_bot_id(config),
@@ -56,6 +57,7 @@ def emit_event(
         "role": role,
         "git_sha": str(config.get("git_sha") or ""),
         "config_sha256": str(config.get("config_sha256") or ""),
+        "event_type": event,
         "event": event,
         "details": dict(details or {}),
     }

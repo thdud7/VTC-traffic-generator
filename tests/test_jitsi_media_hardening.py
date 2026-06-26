@@ -4,12 +4,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import time
+from types import SimpleNamespace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
 import vtc_traffic_generator.run_experiment as run_experiment_module
+import vtc_traffic_generator.vtc_generator as generator_module
 from vtc_traffic_generator.run_experiment import generate, quote_inventory_value
 from vtc_traffic_generator.tools.analyze_media_capture import (
     classify_udp_payload,
@@ -151,6 +154,109 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
         self.assertIn('server.register_function(stop_vtc_session, "stop_vtc_session")', generator_source)
         self.assertIn("wait_for_clients_to_finish_sessions", generator_source)
+
+    def test_strict_icsi_schedule_clips_cutoff_utterances(self):
+        policy = SimpleNamespace(
+            events=[
+                SimpleNamespace(
+                    meeting_id="Bdb001",
+                    speaker_id="me011",
+                    bot_index=0,
+                    channel="chan0",
+                    start_sec=10.0,
+                    end_sec=12.0,
+                    dialogue_act_type="statement",
+                    file_channel="chan0",
+                ),
+                SimpleNamespace(
+                    meeting_id="Bdb001",
+                    speaker_id="me011",
+                    bot_index=0,
+                    channel="chan0",
+                    start_sec=179.5,
+                    end_sec=181.0,
+                    dialogue_act_type="statement",
+                    file_channel="chan0",
+                ),
+                SimpleNamespace(
+                    meeting_id="Bdb001",
+                    speaker_id="me011",
+                    bot_index=0,
+                    channel="chan0",
+                    start_sec=180.0,
+                    end_sec=181.0,
+                    dialogue_act_type="statement",
+                    file_channel="chan0",
+                ),
+            ]
+        )
+
+        schedule = generator_module.build_icsi_strict_schedule(policy, max_duration_sec=180, scenario_offset_sec=0)
+
+        self.assertEqual(len(schedule), 2)
+        self.assertFalse(schedule[0]["clipped"])
+        self.assertTrue(schedule[1]["clipped"])
+        self.assertEqual(schedule[1]["playback_duration_sec"], 0.5)
+        self.assertIs(schedule[1]["next_same_bot_start_sec"], None)
+        self.assertEqual(schedule[0]["next_same_bot_start_sec"], 179.5)
+
+    def test_random_mic_off_is_not_selected_during_speech_or_preroll(self):
+        state = generator_module.make_scenario_state([object()])
+        state["states"][0]["mic"] = True
+        state["speaking"][0] = 1
+        self.assertIsNone(generator_module.choose_mic_action(generator_module.random.Random(1), state, 1))
+
+        state["speaking"][0] = 0
+        state["pre_roll_until_monotonic_ns"][0] = time.monotonic_ns() + 1_000_000_000
+        self.assertIsNone(generator_module.choose_mic_action(generator_module.random.Random(1), state, 1))
+
+        state["states"][0]["mic"] = False
+        choice = generator_module.choose_mic_action(generator_module.random.Random(1), state, 1)
+        self.assertEqual(choice, (0, True))
+
+    def test_post_speech_mic_off_is_suppressed_for_short_same_bot_gap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generator_module.config = {
+                "role": "controller",
+                "event_log_path": str(Path(tmpdir) / "events.jsonl"),
+                "action_log_path": str(Path(tmpdir) / "actions.txt"),
+                "execution_id": "run-1",
+                "experiment_id": "exp-1",
+                "vtc_platform": "jitsi_electron",
+            }
+            utterance = {
+                "meeting_id": "Bdb001",
+                "speech_id": "speech-1",
+                "bot_index": 0,
+                "icsi_meeting_id": "Bdb001",
+                "icsi_participant": "me011",
+                "icsi_channel": "chan0",
+                "scheduled_end_sec": 10.0,
+                "scheduled_start_sec": 8.0,
+                "next_same_bot_start_sec": 12.0,
+                "clipped": False,
+            }
+            state = generator_module.make_scenario_state([object()])
+            executor = SimpleNamespace(submit=lambda *args, **kwargs: self.fail("mic off should be suppressed"))
+
+            result = generator_module.handle_post_speech_mic_decision(
+                executor,
+                [SimpleNamespace(ip="127.0.0.1", port=8001)],
+                utterance,
+                state,
+                generator_module.datetime.now(generator_module.timezone.utc),
+                generator_module.time.monotonic_ns(),
+                generator_module.random.Random(1),
+                1.0,
+                6.0,
+                3.0,
+                1,
+                0.0,
+            )
+
+            self.assertIsNone(result)
+            events = Path(generator_module.config["event_log_path"]).read_text(encoding="utf-8")
+            self.assertIn("insufficient_gap_to_preserve_icsi_timing", events)
 
     def test_adapter_does_not_trust_shortcuts_by_default(self):
         adapter = JitsiElectronAdapter({"adapter_config": {}})

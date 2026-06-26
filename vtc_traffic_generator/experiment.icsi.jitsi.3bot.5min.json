@@ -35,14 +35,27 @@
     "run_id": "icsi-jitsi-3bot-5min",
     "include_logs": true
   },
+  "capture": {
+    "tail_after_disconnect_sec": 5
+  },
   "behavior": {
     "mode": "icsi",
     "icsi": {
+      "enabled": true,
+      "strict_timing": true,
       "corpus_root": "/tmp/vtc-data/icsi",
       "meeting_id": "Bdb001",
       "min_speaker_duration_sec": 1.0,
       "min_utterance_duration_sec": 0.05,
       "max_duration_sec": 300,
+      "scenario_offset_sec": 0,
+      "mic_pre_roll_sec": 4.0,
+      "mic_action_timeout_sec": 3.0,
+      "mic_state_cache_ttl_sec": 10.0,
+      "post_speech_mic_off_probability": 0.5,
+      "random_seed": 12345,
+      "min_safe_gap_for_post_speech_mic_off_sec": 6.0,
+      "speech_start_tolerance_ms": 500,
       "time_scale": 1.0,
       "connect_timeout_sec": 180,
       "connect_grace_sec": 5,
@@ -50,6 +63,15 @@
     },
     "scenario": {
       "enabled": true,
+      "min_interval_sec": 20,
+      "max_interval_sec": 45,
+      "screen_share_probability": 0.6,
+      "camera_probability": 1.0,
+      "mic_probability": 0.8
+    },
+    "random_actions": {
+      "enabled": true,
+      "nonblocking": true,
       "min_interval_sec": 20,
       "max_interval_sec": 45,
       "screen_share_probability": 0.6,
@@ -130,7 +152,7 @@
       "media_ready_timeout_sec": 60,
       "media_ready_poll_interval_sec": 0.5,
       "failure_postroll_sec": 10,
-      "success_postroll_sec": 10,
+      "success_postroll_sec": 5,
       "meeting_window_wait_sec": 10,
       "coordinates_relative_to_window": true,
       "trust_shortcut_state": false,
