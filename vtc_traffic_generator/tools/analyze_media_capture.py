@@ -261,9 +261,9 @@ class Analysis:
 
         capture_start = first_event_epoch(self.events, {"capture_started", "packet_capture_start"})
         meeting_ready = first_event_epoch(self.events, {"meeting_join_ready"})
-        meeting_end = last_event_epoch(
+        meeting_end = last_event_epoch(self.events, {"meeting_disconnected"}) or last_event_epoch(
             self.events,
-            {"meeting_disconnected", "terminal_disconnect", "meeting_end"},
+            {"terminal_disconnect", "meeting_end"},
         )
         capture_stop = last_event_epoch(self.events, {"capture_stopped", "packet_capture_done"})
         if None in (capture_start, meeting_ready, meeting_end, capture_stop):

@@ -15,6 +15,7 @@ import vtc_traffic_generator.run_experiment as run_experiment_module
 import vtc_traffic_generator.vtc_generator as generator_module
 from vtc_traffic_generator.run_experiment import generate, quote_inventory_value
 from vtc_traffic_generator.tools.analyze_media_capture import (
+    Analysis,
     classify_udp_payload,
     load_stats_mappings,
     parse_rtp_header,
@@ -147,6 +148,30 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             session._filtered_pcapng_display_filter(session.config["packet_capture"]),
             "ip.addr == 172.31.40.44 && ip.addr == 172.31.32.200 && udp.port == 10000",
         )
+
+    def test_media_lifecycle_prefers_meeting_disconnected_over_terminal_cleanup(self):
+        analysis = Analysis(
+            Path("capture.pcapng"),
+            client_ip="172.31.40.44",
+            jvb_ip="172.31.32.200",
+            jvb_port=10000,
+            first_epoch=0.0,
+            last_epoch=20.0,
+        )
+        analysis.events = [
+            {"event_type": "packet_capture_start", "ts": "1970-01-01T00:00:01Z"},
+            {"event_type": "meeting_join_ready", "ts": "1970-01-01T00:00:02Z"},
+            {"event_type": "meeting_disconnected", "ts": "1970-01-01T00:00:12Z"},
+            {"event_type": "capture_stopped", "ts": "1970-01-01T00:00:15Z"},
+            {"event_type": "terminal_disconnect", "ts": "1970-01-01T00:00:25Z"},
+        ]
+
+        self.assertTrue(analysis.pcap_covers_full_lifecycle())
+
+    def test_post_speech_decisions_do_not_block_strict_timing_loop(self):
+        generator_source = Path("vtc_traffic_generator/vtc_generator.py").read_text(encoding="utf-8")
+        self.assertIn("executor.submit(\n                        handle_post_speech_mic_decision", generator_source)
+        self.assertNotIn("futures.append(\n                    handle_post_speech_mic_decision", generator_source)
 
     def test_controller_artifacts_upload_to_run_root_prefix(self):
         with tempfile.TemporaryDirectory() as tmpdir:

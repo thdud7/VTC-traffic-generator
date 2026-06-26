@@ -531,6 +531,13 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
                     mic_state_cache_ttl_sec,
                     now_ns,
                 )
+                if not mic_verified and mic_on_action_pending(scenario_state, utterance["bot_index"]):
+                    mic_verified = wait_for_mic_verified_on(
+                        scenario_state,
+                        utterance["bot_index"],
+                        mic_state_cache_ttl_sec,
+                        timeout_sec=0.25,
+                    )
                 request_details = strict_speech_event_details(
                     utterance,
                     scenario_start_utc_dt,
@@ -572,7 +579,8 @@ def run_strict_icsi_replay_controller(vtc_clients, icsi_policy, icsi_config, max
                     append_action_log(config, "speech_start_response", merged_details)
             elif event_type == "post_speech_mic_decision":
                 futures.append(
-                    handle_post_speech_mic_decision(
+                    executor.submit(
+                        handle_post_speech_mic_decision,
                         executor,
                         vtc_clients,
                         utterance,
@@ -938,6 +946,23 @@ def mic_state_is_fresh_on_at(scenario_state, bot_index, ttl_sec, target_ns):
     if active_speech and target_ns <= now_ns + seconds_to_ns(0.05):
         return True
     return target_ns - verified_at <= seconds_to_ns(ttl_sec)
+
+
+def mic_on_action_pending(scenario_state, bot_index):
+    with scenario_state["lock"]:
+        return scenario_state["mic_action_pending"][bot_index] is True
+
+
+def wait_for_mic_verified_on(scenario_state, bot_index, ttl_sec, timeout_sec):
+    deadline_ns = time.monotonic_ns() + seconds_to_ns(timeout_sec)
+    while time.monotonic_ns() < deadline_ns:
+        now_ns = time.monotonic_ns()
+        if mic_state_is_fresh_on(scenario_state, bot_index, ttl_sec, now_ns):
+            return True
+        if not mic_on_action_pending(scenario_state, bot_index):
+            return False
+        time.sleep(0.01)
+    return mic_state_is_fresh_on(scenario_state, bot_index, ttl_sec, time.monotonic_ns())
 
 
 def set_mic_verified_state(scenario_state, bot_index, enabled, verified):
@@ -1326,8 +1351,7 @@ def handle_post_speech_mic_decision(
     }
     emit_event(config, "post_speech_mic_action_start", start_details)
     append_action_log(config, "post_speech_mic_action_start", start_details)
-    return executor.submit(
-        call_client_action_with_result,
+    return call_client_action_with_result(
         vtc_clients[utterance["bot_index"]],
         utterance["bot_index"],
         "set_microphone",
