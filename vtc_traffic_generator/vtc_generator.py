@@ -1419,30 +1419,34 @@ def video_stream_config():
         virtual_video_config = {}
     video_device = config.get("video_device") or virtual_video_config.get("device") or "/dev/video5"
     width = int(virtual_video_config.get("width", 640))
+    height = int(virtual_video_config.get("height", 360))
     fps = int(virtual_video_config.get("fps", 15))
-    font_size = 50 if "270" in str(config.get("video_name", "")) else 200
-    y_position = "h-th-20" if "270" in str(config.get("video_name", "")) else "h-th-50"
-    return video_filepath, video_device, width, fps, font_size, y_position
+    source = str(virtual_video_config.get("source") or "file")
+    default_font_size = 50 if "270" in str(config.get("video_name", "")) else 200
+    font_size = int(virtual_video_config.get("font_size", default_font_size))
+    y_position = str(virtual_video_config.get("y_position") or ("h-th-20" if "270" in str(config.get("video_name", "")) else "h-th-50"))
+    return video_filepath, video_device, width, height, fps, font_size, y_position, source
 
 
 def build_video_stream_process():
     if ffmpeg is None:
         raise RuntimeError("Client video playback requires the ffmpeg-python package.")
 
-    video_filepath, video_device, width, fps, font_size, y_position = video_stream_config()
-    return (
-        ffmpeg
-        .input(video_filepath, re=None, stream_loop=-1)
-        .filter("fps", fps=fps)
-        .filter("scale", width, -2)
-        .filter("format", "yuv420p")
-        .drawtext(
-            text=config["bot_name"],
-            x="(w-text_w)/2",
-            y=y_position,
-            fontcolor="red",
-            fontsize=font_size,
+    video_filepath, video_device, width, height, fps, font_size, y_position, source = video_stream_config()
+    if source in {"testsrc", "testsrc2", "lavfi"}:
+        stream = ffmpeg.input(f"testsrc2=size={width}x{height}:rate={fps}", f="lavfi", re=None)
+    else:
+        stream = (
+            ffmpeg
+            .input(video_filepath, re=None, stream_loop=-1)
+            .filter("fps", fps=fps)
+            .filter("scale", width, -2)
         )
+
+    return (
+        stream
+        .filter("format", "yuv420p")
+        .drawtext(text=config["bot_name"], x="(w-text_w)/2", y=y_position, fontcolor="red", fontsize=font_size)
         .output(video_device, format="v4l2")
     )
 
@@ -1457,7 +1461,7 @@ def start_video_stream():
         if video_process is not None and video_process.poll() is None:
             return video_process.pid
 
-        video_filepath, video_device, width, fps, _, _ = video_stream_config()
+        video_filepath, video_device, width, height, fps, _, _, source = video_stream_config()
         print(f"Launching video playback: {video_filepath} -> {video_device}")
         process = build_video_stream_process().run_async(pipe_stdin=True)
         video_process = process
@@ -1470,7 +1474,9 @@ def start_video_stream():
             "video_device": video_device,
             "video_pid": process.pid,
             "width": width,
+            "height": height,
             "fps": fps,
+            "source": source,
         },
     )
     append_action_log(
@@ -1481,7 +1487,9 @@ def start_video_stream():
             "video_device": video_device,
             "video_pid": process.pid,
             "width": width,
+            "height": height,
             "fps": fps,
+            "source": source,
         },
     )
     return process.pid

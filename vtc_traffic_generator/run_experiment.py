@@ -133,7 +133,15 @@ def build_remote_config(experiment, client):
         "sink_description": str(client.get("sink_description", client["sink_name"])),
         "source_description": str(client.get("source_description", client["source_name"])),
     }
+    virtual_video_defaults = defaults.get("virtual_video", {})
+    if not isinstance(virtual_video_defaults, dict):
+        virtual_video_defaults = {}
+    client_virtual_video = client.get("virtual_video", {})
+    if not isinstance(client_virtual_video, dict):
+        client_virtual_video = {}
     virtual_video = {
+        **virtual_video_defaults,
+        **client_virtual_video,
         "device": client["video_device"],
     }
     adapter_config = {

@@ -28,6 +28,10 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
         self.assertEqual(remote_config["virtual_audio"]["sink_name"], "VTC_Speaker")
         self.assertEqual(remote_config["virtual_audio"]["source_name"], "VTC_Microphone")
+        self.assertEqual(remote_config["virtual_video"]["source"], "testsrc2")
+        self.assertEqual(remote_config["virtual_video"]["fps"], 10)
+        self.assertEqual(remote_config["virtual_video"]["width"], 640)
+        self.assertEqual(remote_config["virtual_video"]["height"], 360)
         self.assertEqual(remote_config["adapter_config"]["microphone_name"], "VTC_Microphone")
         self.assertFalse(remote_config["adapter_config"]["skip_device_selection"])
         self.assertFalse(remote_config["adapter_config"]["trust_shortcut_state"])

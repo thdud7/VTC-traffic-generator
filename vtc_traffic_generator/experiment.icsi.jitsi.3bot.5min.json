@@ -61,6 +61,14 @@
     "voice_name": "male_1-en-US-Wavenet-I",
     "video_path": "/home/ubuntu/vtc_data/video/camera",
     "video_name": "class_5_6.mov",
+    "virtual_video": {
+      "source": "testsrc2",
+      "width": 640,
+      "height": 360,
+      "fps": 10,
+      "font_size": 48,
+      "y_position": "h-th-24"
+    },
     "executable_path": "/home/ubuntu/service/jitsi-electron/run-jitsi.sh",
     "icsi_audio_root": "/tmp/vtc-data/icsi/ICSI/Signals",
     "audio_loopback_probe": {
