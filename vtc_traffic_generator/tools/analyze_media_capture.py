@@ -159,7 +159,10 @@ def epoch_to_iso(epoch: float | None) -> str | None:
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(command, 127, stdout="", stderr=str(exc))
 
 
 def load_stats_mappings(paths: Iterable[Path]) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:

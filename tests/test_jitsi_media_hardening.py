@@ -14,6 +14,7 @@ from vtc_traffic_generator.tools.analyze_media_capture import (
     classify_udp_payload,
     load_stats_mappings,
     parse_rtp_header,
+    run_command,
 )
 from vtc_traffic_generator.vtc_automation.adapters.jitsi_electron import JitsiElectronAdapter, MeetingProbeResult
 from vtc_traffic_generator.vtc_automation.live_media_probe import classify_udp_payload as classify_live_udp_payload
@@ -308,6 +309,11 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertEqual(parsed["payload_type"], 96)
         self.assertEqual(parsed["ssrc"], 0xAABBCCDD)
         self.assertEqual(classify_udp_payload(bytes(payload)), "rtp")
+
+    def test_media_analyzer_tolerates_missing_optional_commands(self):
+        result = run_command(["definitely-missing-vtc-command"])
+        self.assertEqual(result.returncode, 127)
+        self.assertIn("definitely-missing-vtc-command", result.stderr)
 
     def test_stats_mapping_uses_outbound_rtp_codec_relationship(self):
         with tempfile.TemporaryDirectory() as tmpdir:
