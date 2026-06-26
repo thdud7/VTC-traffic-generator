@@ -287,6 +287,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
                     "trust_screen_share_shortcut_state": True,
                     "use_cached_camera_state": True,
                     "use_cached_screen_share_state": True,
+                    "initial_mic_enabled": True,
+                    "initial_camera_enabled": True,
+                    "initial_screen_sharing": False,
                 }
             }
         )
@@ -299,6 +302,9 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         self.assertFalse(adapter._use_cached_control_state("mic"))
         self.assertTrue(adapter._use_cached_control_state("camera"))
         self.assertTrue(adapter._use_cached_control_state("screen_share"))
+        self.assertTrue(adapter.mic_enabled)
+        self.assertTrue(adapter.camera_enabled)
+        self.assertFalse(adapter.screen_sharing)
 
     def test_launch_command_appends_url_when_enabled(self):
         adapter = JitsiElectronAdapter(

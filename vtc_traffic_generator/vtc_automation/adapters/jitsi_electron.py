@@ -115,9 +115,9 @@ class JitsiElectronAdapter(ServiceAdapter):
         self.accessibility_dump_path = self.adapter_config.get("accessibility_dump_path")
         self.window_id = None
         self.process = None
-        self.mic_enabled = None
-        self.camera_enabled = None
-        self.screen_sharing = None
+        self.mic_enabled = self._initial_control_state("mic")
+        self.camera_enabled = self._initial_control_state("camera")
+        self.screen_sharing = self._initial_control_state("screen_share")
         self._meeting_probe_history: list[dict[str, Any]] = []
         self._meeting_joined_notified = False
         self._media_ready_notified = False
@@ -1267,6 +1267,16 @@ class JitsiElectronAdapter(ServiceAdapter):
         if isinstance(value, str):
             return value.lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    def _initial_control_state(self, control: str) -> bool | None:
+        key = {
+            "mic": "initial_mic_enabled",
+            "camera": "initial_camera_enabled",
+            "screen_share": "initial_screen_sharing",
+        }.get(control)
+        if not key or key not in self.adapter_config:
+            return None
+        return self._optional_bool(key, False)
 
     def _trust_shortcut_state(self, control: str | None = None) -> bool:
         if control:
