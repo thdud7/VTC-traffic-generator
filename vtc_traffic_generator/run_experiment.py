@@ -656,7 +656,7 @@ def upload_controller_artifacts(generated):
         if staged_count == 0:
             return subprocess.CompletedProcess(["aws", "s3", "sync"], 0)
 
-        destination = f"{s3_uri}/logs/{run_id}/controller/"
+        destination = f"{s3_uri}/experiments/{run_id}/controller/"
         command = ["aws", "s3", "sync", str(staging_dir), destination]
         try:
             return subprocess.run(command, cwd=str(PROJECT_ROOT), check=False)

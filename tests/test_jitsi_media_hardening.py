@@ -94,7 +94,11 @@ class JitsiMediaHardeningTests(unittest.TestCase):
         upload_playbook = Path("ansible/upload_captures.yml").read_text(encoding="utf-8")
         self.assertIn("capture_upload_include_pattern", upload_playbook)
         self.assertIn("{{ capture_upload_include_pattern }}.pcapng", upload_playbook)
+        self.assertIn("{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_run_id }}/{{ inventory_hostname }}", upload_playbook)
         self.assertNotIn("--include\n          - \"*.pcapng\"", upload_playbook)
+        self.assertNotIn("{{ capture_upload_s3_uri }}/raw/{{ capture_upload_run_id }}", upload_playbook)
+        self.assertNotIn("{{ capture_upload_s3_uri }}/analysis/{{ capture_upload_run_id }}", upload_playbook)
+        self.assertNotIn("{{ capture_upload_s3_uri }}/logs/{{ capture_upload_run_id }}", upload_playbook)
 
     def test_controller_artifacts_upload_to_controller_log_prefix(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -132,7 +136,7 @@ class JitsiMediaHardeningTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(calls[0][0][:3], ["aws", "s3", "sync"])
-        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/logs/run-1/controller/")
+        self.assertEqual(calls[0][0][4], "s3://vtc-traffic-data/captures/experiments/run-1/controller/")
         self.assertEqual(
             staged_files,
             [

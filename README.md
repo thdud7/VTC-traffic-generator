@@ -232,6 +232,11 @@ configs and the Ansible playbooks to update and start remote clients.
 
    `--upload-captures` runs `ansible/upload_captures.yml`. It expects
    `capture_upload.s3_uri` and `capture_upload.run_id` in the experiment JSON.
+   Uploaded artifacts are grouped by experiment under
+   `capture_upload.s3_uri/experiments/<run_id>/`. Each bot folder contains its
+   `.pcapng`, analysis, metadata, and logs together; controller configs and the
+   run manifest are uploaded under the same experiment folder's `controller/`
+   prefix.
    S3 prefixes do not need to be created ahead of time; S3 has object keys, not
    real directories, so `aws s3 sync` creates the needed prefixes when it uploads
    objects. The bucket itself must already exist, and each client EC2 needs AWS

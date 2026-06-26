@@ -21,6 +21,7 @@
     - name: Set current execution capture include pattern
       ansible.builtin.set_fact:
         capture_upload_include_pattern: "*{{ capture_upload_execution_id | default(capture_upload_run_id) }}*"
+        capture_upload_host_prefix: "{{ capture_upload_s3_uri }}/experiments/{{ capture_upload_run_id }}/{{ inventory_hostname }}"
 
     - name: Ensure capture output directory exists
       ansible.builtin.file:
@@ -35,7 +36,7 @@
           - s3
           - sync
           - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
-          - "{{ capture_upload_s3_uri }}/raw/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          - "{{ capture_upload_host_prefix }}/"
           - "--exclude"
           - "*"
           - "--include"
@@ -49,7 +50,7 @@
           - s3
           - sync
           - "{{ capture_output_dir | default('/tmp/vtc-captures') }}"
-          - "{{ capture_upload_s3_uri }}/analysis/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          - "{{ capture_upload_host_prefix }}/"
           - "--exclude"
           - "*"
           - "--include"
@@ -71,7 +72,7 @@
         set -euo pipefail
         diagnostics_dir="{{ adapter_log_path | default(client_log_path | default('/tmp/vtc-client/client.log')) | dirname }}/diagnostics/{{ capture_upload_execution_id | default(capture_upload_run_id) }}"
         if [ -d "$diagnostics_dir" ] && [ -n "$(find "$diagnostics_dir" -type f -print -quit)" ]; then
-          aws s3 sync "$diagnostics_dir" "{{ capture_upload_s3_uri }}/diagnostics/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          aws s3 sync "$diagnostics_dir" "{{ capture_upload_host_prefix }}/diagnostics/"
         fi
       args:
         executable: /bin/bash
@@ -96,7 +97,7 @@
         done
 
         if [ -n "$(find "$staging_dir" -maxdepth 1 -type f -print -quit)" ]; then
-          aws s3 sync "$staging_dir" "{{ capture_upload_s3_uri }}/logs/{{ capture_upload_run_id }}/{{ inventory_hostname }}/"
+          aws s3 sync "$staging_dir" "{{ capture_upload_host_prefix }}/"
         fi
       args:
         executable: /bin/bash
