@@ -125,6 +125,7 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         await self._dismiss_common_prompts()
         await self._fill_display_name(display_name)
         await self._ensure_prejoin_media_state()
+        await self._raise_if_join_blocked("pre_join")
         join_selector = await self._click_join_button()
         joined = await self.is_in_meeting()
         if not joined:
@@ -343,11 +344,40 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             "button[aria-label*='Ask to join']",
             "button:has-text('Join')",
         ]
-        selector = await self._click_optional(selectors, timeout=self._timeout_ms("join_timeout_sec", 45))
-        if selector:
-            return selector
+        deadline = asyncio.get_running_loop().time() + (self._timeout_ms("join_timeout_sec", 45) / 1000)
+        while asyncio.get_running_loop().time() < deadline:
+            await self._raise_if_join_blocked("join_button_wait")
+            selector = await self._click_optional(selectors, timeout=250)
+            if selector:
+                return selector
+            await asyncio.sleep(0.25)
         await self._collect_diagnostics_async("join_button_missing")
         raise RuntimeError("Google Meet join button was not visible")
+
+    async def _raise_if_join_blocked(self, stage: str):
+        reason = await self._blocked_join_reason(timeout=250)
+        if not reason:
+            return
+        await self._collect_diagnostics_async("meeting_join_blocked", {"stage": stage, "reason": reason})
+        emit_event(self.config, "meeting_join_blocked", {"stage": stage, "reason": reason}, self.service_name)
+        raise RuntimeError(f"Google Meet rejected the join attempt: {reason}")
+
+    async def _blocked_join_reason(self, timeout=1000):
+        blocked_states = [
+            ("text=/You can.t join this video call/i", "You can't join this video call"),
+            (
+                "text=/No one can join a meeting unless invited or admitted by the host/i",
+                "Meeting requires a host invitation or admission",
+            ),
+            ("text=/You can.t join/i", "You can't join"),
+        ]
+        for selector, reason in blocked_states:
+            try:
+                await self.page.locator(selector).first.wait_for(state="visible", timeout=timeout)
+                return reason
+            except PlaywrightTimeoutError:
+                continue
+        return None
 
     async def _set_keyboard_toggle(self, control: str, enabled: bool, shortcut: str, event_name: str):
         current = getattr(self, f"{control}_enabled")
@@ -406,6 +436,9 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return int(float(self.adapter_config().get(key, default_sec)) * 1000)
 
     def _display_name(self):
+        adapter_display_name = self.adapter_config().get("display_name")
+        if adapter_display_name:
+            return str(adapter_display_name)
         bot = self.config.get("bot")
         if isinstance(bot, Mapping) and bot.get("display_name"):
             return str(bot["display_name"])
