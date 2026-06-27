@@ -183,6 +183,16 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
     async def close(self):
         self.collect_browser_log("adapter_close")
         if self._use_gui_keyboard():
+            if self.browser:
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+            if self.playwright:
+                try:
+                    await self.playwright.stop()
+                except Exception:
+                    pass
             if self.browser_process and self.browser_process.poll() is None:
                 self.browser_process.terminate()
                 try:
@@ -295,6 +305,9 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         if self._use_gui_keyboard():
             return bool(self.joined and self.window_id)
 
+        return await self._is_in_meeting_dom()
+
+    async def _is_in_meeting_dom(self):
         if self.page is None:
             return False
         selector = await self._visible_optional(
@@ -583,6 +596,61 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             {"vtc_url": vtc_url, "automation_mode": "gui_keyboard"},
             self.service_name,
         )
+        if self.adapter_config().get("gui_cdp_join", True):
+            try:
+                await self._connect_to_meeting_gui_cdp(vtc_url, display_name)
+                return
+            except Exception as exc:
+                emit_event(
+                    self.config,
+                    "gui_cdp_join_failed",
+                    {"vtc_url": vtc_url, "error": str(exc)},
+                    self.service_name,
+                )
+                self._collect_gui_diagnostics("gui_cdp_join_failed", {"error": str(exc)})
+                if not self.adapter_config().get("gui_keyboard_join_fallback", True):
+                    raise
+
+        await self._connect_to_meeting_gui_keyboard_fallback(vtc_url, display_name)
+
+    async def _connect_to_meeting_gui_cdp(self, vtc_url: str, display_name: str):
+        page = await self._ensure_gui_cdp_page()
+        emit_event(self.config, "meeting_join_cdp_start", {"vtc_url": vtc_url}, self.service_name)
+        await page.goto(vtc_url, wait_until="domcontentloaded", timeout=self._timeout_ms("goto_timeout_sec", 60))
+        await page.wait_for_timeout(int(float(self.adapter_config().get("page_load_wait_sec", 4)) * 1000))
+        self._activate_window()
+        await self._dismiss_common_prompts()
+        await self._fill_display_name(display_name)
+        await self._ensure_prejoin_media_state()
+        await self._raise_if_join_blocked("pre_join")
+        join_selector = await self._click_join_button()
+        joined = await self._is_in_meeting_dom()
+        if not joined:
+            await self._collect_diagnostics_async("meeting_join_failed", {"join_selector": join_selector, "method": "cdp"})
+            emit_event(
+                self.config,
+                "meeting_join_failed",
+                {"vtc_url": vtc_url, "join_selector": join_selector, "method": "cdp"},
+                self.service_name,
+            )
+            raise RuntimeError("Google Meet join did not reach in-call state")
+
+        self.joined = True
+        window_title = self._window_title()
+        if not self._is_valid_meeting_window_title(window_title, vtc_url):
+            self._collect_gui_diagnostics("meeting_window_invalid_after_join", {"window_title": window_title, "method": "cdp"})
+            raise RuntimeError(f"Google Meet join did not land on a meeting window: {window_title}")
+        self._notify_callback("_meeting_joined_callback", vtc_url)
+        self._notify_callback("_media_ready_callback", vtc_url)
+        self._collect_gui_diagnostics("meeting_join_success", {"window_title": window_title, "method": "cdp"})
+        emit_event(
+            self.config,
+            "meeting_join_success",
+            {"vtc_url": vtc_url, "join_selector": join_selector, "window_title": window_title, "method": "cdp"},
+            self.service_name,
+        )
+
+    async def _connect_to_meeting_gui_keyboard_fallback(self, vtc_url: str, display_name: str):
         type_delay = str(int(float(self.adapter_config().get("type_delay_ms", 1))))
         self._activate_window()
         self._run_xdotool(["key", "ctrl+l"])
@@ -624,6 +692,43 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             self.service_name,
         )
 
+    async def _ensure_gui_cdp_page(self):
+        if self.page and not self.page.is_closed():
+            return self.page
+        from playwright.async_api import async_playwright
+
+        port = int(float(self.adapter_config().get("remote_debugging_port", 9222)))
+        endpoint = f"http://127.0.0.1:{port}"
+        deadline = time.time() + float(self.adapter_config().get("cdp_connect_timeout_sec", 10))
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                if self.playwright is None:
+                    self.playwright = await async_playwright().start()
+                self.browser = await self.playwright.chromium.connect_over_cdp(endpoint)
+                break
+            except Exception as exc:
+                last_error = exc
+                if self.playwright:
+                    try:
+                        await self.playwright.stop()
+                    except Exception:
+                        pass
+                    self.playwright = None
+                await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(f"Could not connect to Chromium CDP at {endpoint}: {last_error}")
+
+        contexts = self.browser.contexts if self.browser else []
+        if not contexts:
+            raise RuntimeError(f"Chromium CDP at {endpoint} had no browser contexts")
+        pages = [page for context in contexts for page in context.pages]
+        self.context = contexts[0]
+        self.page = pages[0] if pages else await self.context.new_page()
+        self.page.on("console", self._record_console)
+        self.page.on("pageerror", self._record_page_error)
+        return self.page
+
     def _build_gui_browser_command(self) -> list[str]:
         executable_path = (
             self.adapter_config().get("chromium_executable_path")
@@ -653,6 +758,11 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         if capture_source:
             args.append(f"--auto-select-desktop-capture-source={capture_source}")
         args.extend(str(arg) for arg in self.adapter_config().get("extra_browser_args", []))
+        debug_arg = "--remote-debugging-port"
+        if self.adapter_config().get("remote_debugging_port", 9222) and not any(
+            str(arg).split("=", 1)[0] == debug_arg for arg in args
+        ):
+            args.append(f"{debug_arg}={int(float(self.adapter_config().get('remote_debugging_port', 9222)))}")
         args.append(str(self.adapter_config().get("initial_browser_url", "about:blank")))
         return args
 
