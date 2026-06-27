@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,7 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         self.camera_enabled = bool(self.adapter_config().get("initial_camera_enabled", True))
         self.screen_sharing = bool(self.adapter_config().get("initial_screen_sharing", False))
         self.joined = False
+        self._chrome_fake_video_capture_file: Path | None = None
 
     def browser_args(self):
         adapter_config = self.adapter_config()
@@ -56,10 +58,8 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         capture_source = adapter_config.get("auto_select_desktop_capture_source")
         if capture_source:
             args.append(f"--auto-select-desktop-capture-source={capture_source}")
+        args.extend(self._fake_media_args())
         args.extend(str(arg) for arg in adapter_config.get("extra_browser_args", []))
-        banned = "--use-fake-device-for-media-stream"
-        if any(str(arg).split("=", 1)[0] == banned for arg in args):
-            raise ValueError(f"{banned} is forbidden for Google Meet collection")
         return args
 
     def launch_options(self):
@@ -758,6 +758,7 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             "--window-size=1280,720",
             "--lang=en-US",
         ]
+        args.extend(self._fake_media_args())
         if self.adapter_config().get("ignore_certificate_errors", True):
             args.append("--ignore-certificate-errors")
         if self.adapter_config().get("disable_gpu", True):
@@ -773,6 +774,106 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             args.append(f"{debug_arg}={int(float(self.adapter_config().get('remote_debugging_port', 9222)))}")
         args.append(str(self.adapter_config().get("initial_browser_url", "about:blank")))
         return args
+
+    def _fake_media_args(self) -> list[str]:
+        fake_video_file = self._fake_video_capture_file()
+        if not fake_video_file:
+            return []
+        return [
+            "--use-fake-device-for-media-stream",
+            f"--use-file-for-fake-video-capture={fake_video_file}",
+        ]
+
+    def _fake_video_capture_file(self) -> str | None:
+        adapter_config = self.adapter_config()
+        configured = adapter_config.get("fake_video_capture_file") or adapter_config.get("chrome_fake_video_capture_file")
+        if configured:
+            path = Path(str(configured)).expanduser()
+            if not path.is_file():
+                raise RuntimeError(f"Configured fake video capture file does not exist: {path}")
+            return str(path)
+        if not bool(adapter_config.get("use_chrome_fake_camera", False)):
+            return None
+        return str(self._prepare_chrome_fake_video_capture_file())
+
+    def _prepare_chrome_fake_video_capture_file(self) -> Path:
+        if self._chrome_fake_video_capture_file and self._chrome_fake_video_capture_file.is_file():
+            return self._chrome_fake_video_capture_file
+
+        source_path = Path(str(Path(str(self.config.get("video_path", ""))) / str(self.config.get("video_name", "")))).expanduser()
+        if not source_path.is_file():
+            raise RuntimeError(f"Google Meet fake camera source video does not exist: {source_path}")
+
+        virtual_video = self.config.get("virtual_video", {})
+        if not isinstance(virtual_video, Mapping):
+            virtual_video = {}
+        width = int(virtual_video.get("width", 640))
+        height = int(virtual_video.get("height", 360))
+        fps = int(virtual_video.get("fps", 10))
+        adapter_config = self.adapter_config()
+        duration_sec = float(adapter_config.get("fake_video_capture_duration_sec", 30))
+        output_dir = Path(str(adapter_config.get("fake_video_capture_dir") or "/home/ubuntu/vtc_data/video/fake_camera")).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        bot_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(self.config.get("bot_name") or "bot")).strip("-") or "bot"
+        source_hash = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()[:10]
+        output_path = output_dir / f"{bot_name}-{source_path.stem}-{width}x{height}-{fps}fps-{int(duration_sec)}s-{source_hash}.y4m"
+        if output_path.is_file() and output_path.stat().st_size > 0:
+            self._chrome_fake_video_capture_file = output_path
+            return output_path
+
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            raise RuntimeError("ffmpeg is required to prepare Chrome fake camera Y4M input")
+
+        emit_event(
+            self.config,
+            "fake_video_capture_prepare_start",
+            {
+                "source_path": str(source_path),
+                "output_path": str(output_path),
+                "duration_sec": duration_sec,
+                "width": width,
+                "height": height,
+                "fps": fps,
+            },
+            self.service_name,
+        )
+        command = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-t",
+            str(duration_sec),
+            "-i",
+            str(source_path),
+            "-an",
+            "-vf",
+            f"fps={fps},scale={width}:{height},format=yuv420p",
+            str(output_path),
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(60, int(duration_sec * 5)),
+            env=self._command_env(),
+        )
+        details = {
+            "command": command,
+            "returncode": result.returncode,
+            "stderr": result.stderr.strip()[:2000],
+            "output_path": str(output_path),
+            "size_bytes": output_path.stat().st_size if output_path.exists() else 0,
+        }
+        if result.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
+            emit_event(self.config, "fake_video_capture_prepare_failed", details, self.service_name)
+            raise RuntimeError(f"Failed to prepare Chrome fake camera Y4M input: {details['stderr']}")
+
+        emit_event(self.config, "fake_video_capture_prepare_success", details, self.service_name)
+        self._chrome_fake_video_capture_file = output_path
+        return output_path
 
     def _gui_user_data_dir(self) -> Path:
         configured = self.adapter_config().get("user_data_dir") or os.environ.get("VTC_MEET_CHROME_USER_DATA_DIR")

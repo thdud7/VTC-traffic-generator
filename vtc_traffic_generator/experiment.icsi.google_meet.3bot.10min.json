@@ -92,6 +92,8 @@
       "diagnostic_dir": "/tmp/vtc-{bot_name}/diagnostics",
       "display_backend": "xvfb",
       "failure_postroll_sec": 10,
+      "fake_video_capture_dir": "/home/ubuntu/vtc_data/video/fake_camera",
+      "fake_video_capture_duration_sec": 30,
       "gui_after_escape_wait_sec": 0.5,
       "gui_join_wait_sec": 15,
       "gui_prejoin_wait_sec": 10,
@@ -117,6 +119,7 @@
       "screen_share_target_select_wait_sec": 0.5,
       "success_postroll_sec": 10,
       "type_delay_ms": 1,
+      "use_chrome_fake_camera": true,
       "trust_camera_shortcut_state": true,
       "trust_mic_shortcut_state": true,
       "trust_screen_share_shortcut_state": true,
@@ -146,7 +149,8 @@
     "screen_share_window": {
       "enabled": true,
       "html_path": "/home/ubuntu/vtc_data/screen_share/share.html",
-      "title": "VTC Share Window"
+      "title": "VTC Share Window",
+      "unique_per_run": false
     },
     "video_name": "bot-placeholder.mp4",
     "video_path": "/home/ubuntu/vtc_data/media/google_meet/test/video",

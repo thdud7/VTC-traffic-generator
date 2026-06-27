@@ -441,7 +441,7 @@
           exit 0
         fi
 
-        browser="$(command -v xterm || command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || true)"
+        browser="$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v firefox || command -v xterm || true)"
         if [ -z "$browser" ]; then
           echo "No supported browser or xterm found for screen share window" >&2
           exit 1
@@ -451,9 +451,13 @@
           chromium|chromium-browser|google-chrome)
             nohup env DISPLAY={{ vtc_display | default(":99") }} "$browser" \
               --new-window \
+              --user-data-dir="/tmp/vtc-share-window-{{ inventory_hostname }}" \
               --no-first-run \
+              --no-default-browser-check \
               --disable-session-crashed-bubble \
               --disable-infobars \
+              --no-sandbox \
+              --disable-dev-shm-usage \
               "$target_url" > /tmp/vtc-screen-share-window.log 2>&1 &
             ;;
           firefox)

@@ -2891,6 +2891,18 @@ def video_stream_config():
     return video_filepath, video_device, width, height, fps, font_size, y_position, source
 
 
+def browser_fake_video_enabled():
+    adapter_config = config.get("adapter_config", {})
+    if not isinstance(adapter_config, dict):
+        adapter_config = {}
+    virtual_video_config = config.get("virtual_video", {})
+    if not isinstance(virtual_video_config, dict):
+        virtual_video_config = {}
+    return bool(adapter_config.get("use_chrome_fake_camera")) or str(
+        virtual_video_config.get("source") or ""
+    ).lower() in {"browser_fake", "chrome_fake"}
+
+
 def build_video_stream_process():
     if ffmpeg is None:
         raise RuntimeError("Client video playback requires the ffmpeg-python package.")
@@ -2919,6 +2931,8 @@ def start_video_stream():
 
     if not config.get("videoconference"):
         return False
+    if browser_fake_video_enabled():
+        return True
 
     with video_lock:
         if video_process is not None and video_process.poll() is None:
@@ -2973,6 +2987,8 @@ def ensure_video_supervisor():
 
     if not config.get("videoconference"):
         return False
+    if browser_fake_video_enabled():
+        return True
 
     with video_lock:
         if video_supervisor_thread is not None and video_supervisor_thread.is_alive():
