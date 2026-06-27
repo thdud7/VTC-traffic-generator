@@ -7,7 +7,6 @@ Projects Agency (DARPA). The views, opinions and/or findings expressed are
 those of the author and should not be interpreted as representing the official
 views or policies of the Department of Defense or the U.S. Government.
 
-## English
 
 ### 1. Project Overview
 
@@ -189,8 +188,6 @@ The expected local ICSI shape is:
     <meeting-id>/
       <speaker-id>.wav
 ```
-
-## 한국어
 
 ### 1. 전체 프로젝트 설명
 
@@ -374,7 +371,7 @@ s3://vtc-traffic-data/icsi
 
 ### Jitsi Meet / Jitsi Electron
 
-#### English: How to run a Jitsi experiment from the controller
+#### How to run a Jitsi experiment from the controller
 
 Run the following commands on the controller EC2 instance. Replace the public
 DNS and key path with the current controller connection information.
@@ -458,7 +455,7 @@ For more Jitsi-specific validation rules, packet acceptance criteria, and
 maintenance commands, see
 [`docs/jitsi_electron_collection.md`](docs/jitsi_electron_collection.md).
 
-#### 한국어: controller에서 Jitsi 실험 실행 방법
+#### controller에서 Jitsi 실험 실행 방법
 
 아래 명령은 controller EC2 안에서 실행합니다. public DNS와 key 경로는 현재
 controller 접속 정보에 맞게 바꿔야 합니다.
@@ -540,16 +537,6 @@ Jitsi 전용 검증 기준, 패킷 acceptance rule, S3 후처리 pcap 정리 명
 [`docs/jitsi_electron_collection.md`](docs/jitsi_electron_collection.md)를
 참고합니다.
 
-### Add future service guides below this section
-
-New service-specific README sections, such as Google Meet, Webex, Zoom, Teams,
-or BigBlueButton, should be added below the Jitsi section using the same
-bilingual structure:
-
-```text
-### <Service Name>
-#### English: How to run ...
-#### 한국어: ... 실행 방법
 ```
 
 ## Copyright
