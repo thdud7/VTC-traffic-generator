@@ -429,6 +429,19 @@
         escaped_title="$(printf '%s' "$title" | sed 's/[][(){}.^$*+?|\\]/\\&/g')"
         title_regex="^${escaped_title}$"
 
+        if ! pgrep -x openbox >/dev/null 2>&1 || ! DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null 2>&1; then
+          pkill -x openbox >/dev/null 2>&1 || true
+          nohup setsid env DISPLAY={{ vtc_display | default(":99") }} openbox --replace > /tmp/vtc-openbox.log 2>&1 &
+          for _ in $(seq 1 20); do
+            if pgrep -x openbox >/dev/null 2>&1 && DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+        fi
+        pgrep -x openbox >/dev/null
+        DISPLAY={{ vtc_display | default(":99") }} wmctrl -m >/dev/null
+
         if pgrep -af xterm | grep -F -- "-T $title" >/dev/null 2>&1; then
           existing_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
           test "$existing_count" -eq 1
@@ -475,7 +488,14 @@
         sleep 2
         DISPLAY={{ vtc_display | default(":99") }} wmctrl -r "$title" -e 0,0,40,400,600 || true
         DISPLAY={{ vtc_display | default(":99") }} wmctrl -r "$title" -b remove,above || true
-        window_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
+        window_count=0
+        for _ in $(seq 1 20); do
+          window_count="$(DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name "$title_regex" 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$window_count" -eq 1 ]; then
+            break
+          fi
+          sleep 0.5
+        done
         if [ "$window_count" -ne 1 ]; then
           echo "Expected exactly one screen share window titled '$title', found $window_count" >&2
           DISPLAY={{ vtc_display | default(":99") }} xdotool search --onlyvisible --name '.*' getwindowname %@ >&2 || true
