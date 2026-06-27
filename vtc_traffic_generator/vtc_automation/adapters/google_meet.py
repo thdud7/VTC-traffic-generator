@@ -623,7 +623,10 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         await self._fill_display_name(display_name)
         await self._ensure_prejoin_media_state()
         await self._raise_if_join_blocked("pre_join")
-        join_selector = await self._click_join_button()
+        if await self._is_in_meeting_dom():
+            join_selector = "cdp:already_in_meeting"
+        else:
+            join_selector = await self._click_join_button()
         joined = await self._is_in_meeting_dom()
         if not joined:
             await self._collect_diagnostics_async("meeting_join_failed", {"join_selector": join_selector, "method": "cdp"})
@@ -677,11 +680,16 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             window_title = self._window_title()
             self._collect_gui_diagnostics("meeting_window_missing_after_join", {"window_title": window_title})
             raise RuntimeError(f"Google Meet window was not found after join: {window_title}")
-        self.joined = True
         window_title = self._window_title()
         if not self._is_valid_meeting_window_title(window_title, vtc_url):
             self._collect_gui_diagnostics("meeting_window_invalid_after_join", {"window_title": window_title})
             raise RuntimeError(f"Google Meet join did not land on a meeting window: {window_title}")
+        if self.page:
+            await self._raise_if_join_blocked("keyboard_join")
+            if not await self._is_in_meeting_dom():
+                self._collect_gui_diagnostics("meeting_join_failed_after_keyboard", {"window_title": window_title})
+                raise RuntimeError("Google Meet keyboard join did not reach in-call state")
+        self.joined = True
         self._notify_callback("_meeting_joined_callback", vtc_url)
         self._notify_callback("_media_ready_callback", vtc_url)
         self._collect_gui_diagnostics("meeting_join_success", {"window_title": window_title})
