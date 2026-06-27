@@ -13,7 +13,7 @@
   },
   "capture_upload": {
     "include_logs": true,
-    "run_id": "icsi-google-meet-3bot-5min",
+    "run_id": "icsi-google-meet-3bot-10min",
     "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/captures"
   },
   "clients": [
@@ -160,8 +160,8 @@
     },
     "voice_name": "male_1-en-US-Wavenet-I"
   },
-  "duration": 5,
-  "experiment_id": "icsi-google-meet-3bot-5min",
+  "duration": 10,
+  "experiment_id": "icsi-google-meet-3bot-10min",
   "icsi_data": {
     "audio_s3_uri": "s3://vtc-traffic-data/icsi",
     "local_root": "/tmp/vtc-data/icsi",
@@ -181,7 +181,7 @@
     "url": "https://github.com/thdud7/VTC-traffic-generator.git",
     "version": "meet"
   },
-  "run_id": "icsi-google-meet-3bot-5min",
+  "run_id": "icsi-google-meet-3bot-10min",
   "service": "google_meet",
   "vtc_url": "${VTC_MEET_URL}",
   "videoconference": true,
@@ -194,7 +194,7 @@
       "connect_timeout_sec": 180,
       "corpus_root": "/tmp/vtc-data/icsi",
       "enabled": true,
-      "max_duration_sec": 300,
+      "max_duration_sec": 600,
       "meeting_id": "Bdb001",
       "merge_same_bot_gap_ms": 500,
       "mic_action_coalesce_window_ms": 1500,
@@ -214,20 +214,20 @@
       "camera_probability": 1.0,
       "enabled": true,
       "keep_camera_on": false,
-      "max_interval_sec": 45,
+      "max_interval_sec": 35,
       "mic_probability": 0.8,
-      "min_interval_sec": 20,
+      "min_interval_sec": 15,
       "nonblocking": true,
-      "screen_share_probability": 0.6
+      "screen_share_probability": 0.85
     },
     "scenario": {
       "camera_probability": 1.0,
       "enabled": true,
       "keep_camera_on": false,
-      "max_interval_sec": 45,
+      "max_interval_sec": 35,
       "mic_probability": 0.8,
-      "min_interval_sec": 20,
-      "screen_share_probability": 0.6
+      "min_interval_sec": 15,
+      "screen_share_probability": 0.85
     }
   }
 }

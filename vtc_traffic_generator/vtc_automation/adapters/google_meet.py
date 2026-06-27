@@ -218,14 +218,19 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             self._activate_window()
             self._run_xdotool(["key", shortcut])
             await asyncio.sleep(float(self.adapter_config().get("screen_share_wait_sec", 2)))
+            target_selector = await self._select_screen_share_target_gui_keyboard()
             self.screen_sharing = True
             emit_event(
                 self.config,
                 "screenshare_start",
-                {"selector": f"keyboard:{shortcut}", "confirm_selector": "browser-auto-select", "success": True},
+                {
+                    "selector": f"keyboard:{shortcut}",
+                    "confirm_selector": target_selector,
+                    "success": bool(target_selector),
+                },
                 self.service_name,
             )
-            return True
+            return bool(target_selector)
 
         if self.screen_sharing:
             return True
@@ -718,6 +723,32 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             self._run_xdotool(["windowsize", str(self.window_id), str(int(width)), str(int(height))], check=False)
         self._run_xdotool(["windowmove", str(self.window_id), str(int(left)), str(int(top))], check=False)
         self._activate_window()
+
+    async def _select_screen_share_target_gui_keyboard(self) -> str | None:
+        target_title = str(self.adapter_config().get("screen_share_target") or "VTC Share Window")
+        coordinates = self.adapter_config().get("screen_share_target_coordinates")
+        if isinstance(coordinates, Mapping):
+            x = int(coordinates.get("x", 455))
+            y = int(coordinates.get("y", 295))
+        else:
+            # Chromium's native desktop picker is outside the page DOM. With the
+            # fixed 1280x720 Meet window, the first "Chromium Tab" entry lands here.
+            x = int(self.adapter_config().get("screen_share_target_x", 455))
+            y = int(self.adapter_config().get("screen_share_target_y", 295))
+        self._run_xdotool(["mousemove", str(x), str(y), "click", "1"], check=False)
+        await asyncio.sleep(float(self.adapter_config().get("screen_share_target_select_wait_sec", 0.5)))
+        confirm_key = str(self.adapter_config().get("screen_share_confirm_key", "Return"))
+        self._run_xdotool(["key", confirm_key], check=False)
+        await asyncio.sleep(float(self.adapter_config().get("screen_share_post_confirm_wait_sec", 2)))
+        self._collect_gui_diagnostics(
+            "screen_share_target_selected",
+            {
+                "target_title": target_title,
+                "coordinates": {"x": x, "y": y},
+                "confirm_key": confirm_key,
+            },
+        )
+        return f"xdotool:{target_title}@{x},{y}+{confirm_key}"
 
     def _activate_window(self):
         if not self.window_id:
