@@ -1,0 +1,218 @@
+{
+  "ansible": {
+    "ssh_private_key_file": "${VTC_SSH_PRIVATE_KEY}",
+    "user": "${VTC_ANSIBLE_USER}"
+  },
+  "base_c2_port": 8001,
+  "base_display": "99",
+  "base_video_device": 5,
+  "branch": "meet",
+  "capture": {
+    "require_full_run_coverage": true,
+    "tail_after_disconnect_sec": 10
+  },
+  "capture_upload": {
+    "include_logs": true,
+    "run_id": "icsi-google-meet-3bot-5min",
+    "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/captures"
+  },
+  "clients": [
+    {
+      "bot_id": "bot1",
+      "c2_host": "172.31.40.44",
+      "c2_port": 8001,
+      "display": ":99",
+      "host": "ec2-15-164-217-62.ap-northeast-2.compute.amazonaws.com",
+      "microphone_name": "VTC_Microphone",
+      "private_ip": "172.31.40.44",
+      "public_dns": "ec2-15-164-217-62.ap-northeast-2.compute.amazonaws.com",
+      "public_ip": "15.164.217.62",
+      "region": "ap-northeast-2",
+      "role": "bot",
+      "rpc_host": "172.31.40.44",
+      "sink_description": "VTC_Speaker",
+      "sink_name": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "source_name": "VTC_Microphone",
+      "video_device": "/dev/video5",
+      "voice_name": "male_1-en-US-Wavenet-I"
+    },
+    {
+      "bot_id": "bot2",
+      "c2_host": "172.31.36.50",
+      "c2_port": 8001,
+      "display": ":99",
+      "host": "ec2-3-34-97-190.ap-northeast-2.compute.amazonaws.com",
+      "microphone_name": "VTC_Microphone",
+      "private_ip": "172.31.36.50",
+      "public_dns": "ec2-3-34-97-190.ap-northeast-2.compute.amazonaws.com",
+      "public_ip": "3.34.97.190",
+      "region": "ap-northeast-2",
+      "role": "bot",
+      "rpc_host": "172.31.36.50",
+      "sink_description": "VTC_Speaker",
+      "sink_name": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "source_name": "VTC_Microphone",
+      "video_device": "/dev/video5",
+      "voice_name": "female_2-en-US-Wavenet-E"
+    },
+    {
+      "bot_id": "bot3",
+      "c2_host": "172.31.36.99",
+      "c2_port": 8001,
+      "display": ":99",
+      "host": "ec2-13-209-72-146.ap-northeast-2.compute.amazonaws.com",
+      "microphone_name": "VTC_Microphone",
+      "private_ip": "172.31.36.99",
+      "public_dns": "ec2-13-209-72-146.ap-northeast-2.compute.amazonaws.com",
+      "public_ip": "13.209.72.146",
+      "region": "ap-northeast-2",
+      "role": "bot",
+      "rpc_host": "172.31.36.99",
+      "sink_description": "VTC_Speaker",
+      "sink_name": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "source_name": "VTC_Microphone",
+      "video_device": "/dev/video5",
+      "voice_name": "male_3-en-GB-Wavenet-D"
+    }
+  ],
+  "controller": {
+    "private_ip": "172.31.37.160",
+    "public_dns": "ec2-13-125-247-23.ap-northeast-2.compute.amazonaws.com",
+    "public_ip": "13.125.247.23",
+    "region": "ap-northeast-2",
+    "role": "controller"
+  },
+  "defaults": {
+    "adapter_config": {
+      "camera_name": "VTC Bot Camera",
+      "diagnostic_dir": "/tmp/vtc-{bot_name}/diagnostics",
+      "display_backend": "xvfb",
+      "failure_postroll_sec": 10,
+      "ignore_certificate_errors": true,
+      "initial_camera_enabled": true,
+      "initial_mic_enabled": true,
+      "joined_wait_sec": 45,
+      "join_timeout_sec": 60,
+      "locale": "en-US",
+      "microphone_name": "VTC_Microphone",
+      "page_load_wait_sec": 5,
+      "prejoin_camera_off": false,
+      "prejoin_mic_off": false,
+      "success_postroll_sec": 10,
+      "trust_camera_shortcut_state": true,
+      "trust_mic_shortcut_state": true,
+      "trust_screen_share_shortcut_state": true,
+      "viewport": {
+        "height": 720,
+        "width": 1280
+      }
+    },
+    "audio_loopback_probe": {
+      "duration_sec": 2.5,
+      "enabled": true,
+      "peak_threshold_db": -50.0,
+      "required": true
+    },
+    "audio_path": "/home/ubuntu/project/VTC-traffic-generator/VTC_AV/VTC_audio_tracks",
+    "icsi_audio_root": "/tmp/vtc-data/icsi/ICSI/Signals",
+    "packet_capture": {
+      "capture_filter": "not port 5900",
+      "display_filter": null,
+      "dumpcap_path": "dumpcap",
+      "enabled": true,
+      "filtered_pcapng_enabled": false,
+      "interface": "any",
+      "output_dir": "/home/ubuntu/vtc_data/captures/local",
+      "tshark_path": "tshark"
+    },
+    "screen_share_window": {
+      "enabled": true,
+      "html_path": "/home/ubuntu/vtc_data/screen_share/share.html",
+      "title": "VTC Share Window"
+    },
+    "video_name": "bot-placeholder.mp4",
+    "video_path": "/home/ubuntu/vtc_data/media/google_meet/test/video",
+    "virtual_video": {
+      "font_size": 48,
+      "fps": 10,
+      "height": 360,
+      "source": "file",
+      "width": 640,
+      "y_position": "h-th-24"
+    },
+    "voice_name": "male_1-en-US-Wavenet-I"
+  },
+  "duration": 5,
+  "experiment_id": "icsi-google-meet-3bot-5min",
+  "icsi_data": {
+    "audio_s3_uri": "s3://vtc-traffic-data/icsi",
+    "local_root": "/tmp/vtc-data/icsi",
+    "meeting_id": "Bdb001",
+    "s3_uri": "s3://vtc-traffic-data/datasets/icsi/v1"
+  },
+  "media_manifest": {
+    "local_path": "vtc_traffic_generator/media.google_meet.test.example.json",
+    "media_profile": "test",
+    "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/media/google_meet/test/manifest.json"
+  },
+  "media_profile": "test",
+  "meet_url": "${VTC_MEET_URL}",
+  "repo": {
+    "dir": "/home/ubuntu/project/VTC-traffic-generator",
+    "python": "python3",
+    "url": "https://github.com/thdud7/VTC-traffic-generator.git",
+    "version": "meet"
+  },
+  "run_id": "icsi-google-meet-3bot-5min",
+  "service": "google_meet",
+  "vtc_url": "${VTC_MEET_URL}",
+  "videoconference": true,
+  "behavior": {
+    "icsi": {
+      "audio_warmup_duration_ms": 500,
+      "audio_warmup_enabled": true,
+      "client_stop_timeout_sec": 180,
+      "connect_grace_sec": 5,
+      "connect_timeout_sec": 180,
+      "corpus_root": "/tmp/vtc-data/icsi",
+      "enabled": true,
+      "max_duration_sec": 300,
+      "meeting_id": "Bdb001",
+      "merge_same_bot_gap_ms": 500,
+      "mic_action_coalesce_window_ms": 1500,
+      "mic_action_timeout_sec": 3.0,
+      "mic_pre_roll_sec": 4.0,
+      "mic_state_cache_ttl_sec": 10.0,
+      "min_safe_gap_for_post_speech_mic_off_sec": 6.0,
+      "post_speech_mic_guard_ms": 250,
+      "post_speech_mic_off_probability": 0.5,
+      "random_seed": 12345,
+      "scenario_offset_sec": 0,
+      "strict_timing": true,
+      "time_scale": 1.0
+    },
+    "mode": "icsi",
+    "random_actions": {
+      "camera_probability": 1.0,
+      "enabled": true,
+      "keep_camera_on": false,
+      "max_interval_sec": 45,
+      "mic_probability": 0.8,
+      "min_interval_sec": 20,
+      "nonblocking": true,
+      "screen_share_probability": 0.6
+    },
+    "scenario": {
+      "camera_probability": 1.0,
+      "enabled": true,
+      "keep_camera_on": false,
+      "max_interval_sec": 45,
+      "mic_probability": 0.8,
+      "min_interval_sec": 20,
+      "screen_share_probability": 0.6
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "bots": {
+    "bot1": {
+      "bot_id": "bot1",
+      "local_cache_path": "/home/ubuntu/vtc_data/media/google_meet/test/video/bot1-test.mp4",
+      "media_profile": "test",
+      "media_type": "video",
+      "platform": "google_meet",
+      "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/media/google_meet/test/video/bot1/bot1-test.mp4"
+    },
+    "bot2": {
+      "bot_id": "bot2",
+      "local_cache_path": "/home/ubuntu/vtc_data/media/google_meet/test/video/bot2-test.mp4",
+      "media_profile": "test",
+      "media_type": "video",
+      "platform": "google_meet",
+      "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/media/google_meet/test/video/bot2/bot2-test.mp4"
+    },
+    "bot3": {
+      "bot_id": "bot3",
+      "local_cache_path": "/home/ubuntu/vtc_data/media/google_meet/test/video/bot3-test.mp4",
+      "media_profile": "test",
+      "media_type": "video",
+      "platform": "google_meet",
+      "s3_uri": "s3://${VTC_S3_BUCKET}/${VTC_S3_PREFIX}/media/google_meet/test/video/bot3/bot3-test.mp4"
+    }
+  },
+  "local_cache_root": "/home/ubuntu/vtc_data/media/google_meet/test/video",
+  "media_profile": "test",
+  "media_type": "video",
+  "platform": "google_meet",
+  "version": 1
+}

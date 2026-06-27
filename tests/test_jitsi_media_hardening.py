@@ -23,8 +23,10 @@ from vtc_traffic_generator.tools.analyze_media_capture import (
     run_command,
 )
 from vtc_traffic_generator.vtc_automation.adapters.jitsi_electron import JitsiElectronAdapter, MeetingProbeResult
+from vtc_traffic_generator.vtc_automation.adapters.google_meet import GoogleMeetAdapter
 from vtc_traffic_generator.vtc_automation.live_media_probe import classify_udp_payload as classify_live_udp_payload
 from vtc_traffic_generator.vtc_automation.packet_capture import PacketCaptureSession
+from vtc_traffic_generator.vtc_media import load_manifest, validate_selected_bots
 
 
 class JitsiMediaHardeningTests(unittest.TestCase):
@@ -149,6 +151,39 @@ class JitsiMediaHardeningTests(unittest.TestCase):
             session._filtered_pcapng_display_filter(session.config["packet_capture"]),
             "ip.addr == 172.31.40.44 && ip.addr == 172.31.32.200 && udp.port == 10000",
         )
+
+    def test_google_meet_generation_uses_selected_bot_media_and_private_rpc_hosts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generated = generate("vtc_traffic_generator/experiment.icsi.google_meet.3bot.5min.json", tmpdir)
+            remote_config = json.loads(Path(generated["remote_configs"][0]).read_text())
+            controller_config = json.loads(Path(generated["controller_config"]).read_text())
+            inventory = Path(generated["inventory"]).read_text(encoding="utf-8")
+
+        self.assertEqual(controller_config["vtc_platform"], "google_meet")
+        self.assertEqual(controller_config["vtc_clients"][0][0], "172.31.40.44")
+        self.assertEqual(remote_config["service"], "google_meet")
+        self.assertEqual(remote_config["bot_id"], "bot1")
+        self.assertEqual(remote_config["bot"]["display_name"], "Bot 1")
+        self.assertTrue(remote_config["media"]["video"]["s3_uri"].endswith("/media/google_meet/test/video/bot1/bot1-test.mp4"))
+        self.assertEqual(remote_config["video_name"], "bot1-test.mp4")
+        self.assertEqual(remote_config["virtual_video"]["source"], "file")
+        self.assertIn("public_dns=ec2-15-164-217-62.ap-northeast-2.compute.amazonaws.com", inventory)
+        self.assertIn("private_ip=172.31.40.44", inventory)
+        self.assertIn("rpc_host=172.31.40.44", inventory)
+
+    def test_media_manifest_validates_only_selected_bots(self):
+        manifest = load_manifest("vtc_traffic_generator/media.google_meet.test.example.json")
+
+        validate_selected_bots(manifest, [{"bot_id": "bot1"}, {"bot_id": "bot2"}, {"bot_id": "bot3"}])
+        with self.assertRaisesRegex(ValueError, "bot_id=bot4"):
+            validate_selected_bots(manifest, [{"bot_id": "bot4"}])
+
+    def test_google_meet_browser_args_do_not_use_fake_media_device(self):
+        adapter = GoogleMeetAdapter({"adapter_config": {}})
+        args = adapter.browser_args()
+
+        self.assertIn("--use-fake-ui-for-media-stream", args)
+        self.assertNotIn("--use-fake-device-for-media-stream", args)
 
     def test_media_lifecycle_prefers_meeting_disconnected_over_terminal_cleanup(self):
         analysis = Analysis(

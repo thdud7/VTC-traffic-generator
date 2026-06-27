@@ -5,6 +5,7 @@ import signal
 import sys
 import time
 import json
+import hashlib
 import socketserver
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
@@ -19,6 +20,7 @@ from vtc_behavior import ICSIReplayPolicy
 from vtc_automation.adapters import get_adapter
 from vtc_automation.event_log import emit_event, get_service_name, utc_now_iso
 from vtc_automation.packet_capture import PacketCaptureSession
+from vtc_media import load_manifest, select_video_entry
 
 try:
     import ffmpeg
@@ -1833,6 +1835,7 @@ def run_client(client_config):
 # Check for v4l2 kernel mod
 def initialize_vtc_client():
     print("Initializing VTC client")
+    ensure_configured_video_media()
     if pulsectl is None:
         raise RuntimeError("Client mode requires the pulsectl Python package.")
 
@@ -2747,6 +2750,129 @@ def emit_segment_speech_playback_events(event_name, metadata, segment_actual_utc
                 }
             )
         emit_event(config, event_name, act_details)
+
+
+def ensure_configured_video_media():
+    media = config.get("media")
+    if not isinstance(media, dict):
+        return False
+
+    video_entry = media.get("video")
+    if not isinstance(video_entry, dict):
+        video_entry = resolve_video_entry_from_manifest(media)
+        if video_entry:
+            media["video"] = video_entry
+    if not isinstance(video_entry, dict) or not video_entry:
+        return False
+
+    s3_uri = video_entry.get("s3_uri")
+    local_cache_path = video_entry.get("local_cache_path")
+    if not s3_uri or not local_cache_path:
+        raise RuntimeError(
+            "media.video requires s3_uri and local_cache_path "
+            f"for bot_id={config.get('bot_id') or config.get('bot_name')}"
+        )
+
+    cache_path = Path(str(local_cache_path)).expanduser()
+    if not media_cache_valid(cache_path, video_entry):
+        download_media_object(str(s3_uri), cache_path, video_entry)
+
+    if not media_cache_valid(cache_path, video_entry):
+        raise RuntimeError(f"Downloaded media failed validation: {cache_path}")
+
+    config["video_path"] = str(cache_path.parent)
+    config["video_name"] = cache_path.name
+    virtual_video = config.setdefault("virtual_video", {})
+    if isinstance(virtual_video, dict):
+        virtual_video["source"] = "file"
+
+    emit_event(
+        config,
+        "media_video_ready",
+        {
+            "bot_id": config.get("bot_id") or config.get("bot_name"),
+            "s3_uri": str(s3_uri),
+            "local_cache_path": str(cache_path),
+            "size_bytes": cache_path.stat().st_size,
+            "sha256": video_entry.get("sha256"),
+        },
+    )
+    append_action_log(
+        config,
+        "media_video_ready",
+        {"s3_uri": str(s3_uri), "local_cache_path": str(cache_path)},
+    )
+    return True
+
+
+def resolve_video_entry_from_manifest(media):
+    manifest_config = media.get("manifest")
+    if not isinstance(manifest_config, dict):
+        return None
+
+    manifest_path = manifest_config.get("local_path") or manifest_config.get("path") or manifest_config.get("local_cache_path")
+    manifest_s3_uri = manifest_config.get("s3_uri")
+    if not manifest_path and manifest_s3_uri:
+        manifest_path = str(Path("/tmp/vtc-media-manifests") / Path(str(manifest_s3_uri)).name)
+        download_media_object(str(manifest_s3_uri), Path(manifest_path), {"media_type": "manifest"})
+
+    if not manifest_path:
+        return None
+
+    manifest = load_manifest(manifest_path)
+    bot_id = str(config.get("bot_id") or config.get("bot_name") or "")
+    return select_video_entry(manifest, bot_id)
+
+
+def media_cache_valid(path, media_entry):
+    path = Path(path).expanduser()
+    if not path.is_file():
+        return False
+    expected_size = media_entry.get("size_bytes")
+    if expected_size not in (None, "") and path.stat().st_size != int(expected_size):
+        return False
+    expected_sha256 = str(media_entry.get("sha256") or "").strip().lower()
+    if expected_sha256 and sha256_file(path) != expected_sha256:
+        return False
+    return True
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as infile:
+        for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_media_object(s3_uri, destination, media_entry):
+    destination = Path(destination).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    emit_event(
+        config,
+        "media_download_start",
+        {
+            "s3_uri": s3_uri,
+            "local_cache_path": str(destination),
+            "media_type": media_entry.get("media_type", "video"),
+        },
+    )
+    command = ["aws", "s3", "cp", s3_uri, str(destination)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    details = {
+        "s3_uri": s3_uri,
+        "local_cache_path": str(destination),
+        "returncode": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+    if result.returncode == 0:
+        emit_event(config, "media_download_success", details)
+        append_action_log(config, "media_download_success", details)
+        return True
+    emit_event(config, "media_download_failed", details)
+    append_action_log(config, "media_download_failed", details)
+    raise RuntimeError(f"Failed to download media from {s3_uri}: {result.stderr.strip()}")
 
 
 def video_stream_config():

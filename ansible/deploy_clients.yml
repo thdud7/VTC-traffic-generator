@@ -52,8 +52,35 @@
           - xvfb
           - openbox
           - xterm
+          - jq
+          - v4l-utils
         state: present
         update_cache: true
+
+    - name: Install Chromium browser when missing
+      become: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if command -v google-chrome >/dev/null 2>&1 \
+          || command -v chromium >/dev/null 2>&1 \
+          || command -v chromium-browser >/dev/null 2>&1; then
+          exit 0
+        fi
+        apt-get update
+        apt-get install -y chromium-browser || snap install chromium
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Install Playwright Python runtime when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if ! {{ python_bin | default('python3') }} -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("playwright") else 1)'; then
+          {{ python_bin | default('python3') }} -m pip install --user --break-system-packages playwright
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     - name: Install AWS CLI when missing
       become: true
@@ -459,11 +486,12 @@
       ansible.builtin.stat:
         path: "{{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }}"
       register: jitsi_launcher
+      when: jitsi_electron_launcher is defined
 
     - name: Fail if Jitsi Electron launcher is missing
       ansible.builtin.fail:
         msg: "Missing {{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }} on {{ inventory_hostname }}"
-      when: not jitsi_launcher.stat.exists
+      when: jitsi_electron_launcher is defined and not jitsi_launcher.stat.exists
 
     - name: Copy generated client config
       ansible.builtin.copy:

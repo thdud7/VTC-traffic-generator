@@ -91,7 +91,7 @@
           cp "{{ action_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_actions.txt"
         fi
         if [ -n "{{ app_log_path | default('') }}" ] && [ -f "{{ app_log_path | default('') }}" ]; then
-          cp "{{ app_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_jitsi_electron.log"
+          cp "{{ app_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_app.log"
         fi
         if [ -n "{{ adapter_log_path | default('') }}" ] && [ -f "{{ adapter_log_path | default('') }}" ]; then
           cp "{{ adapter_log_path | default('') }}" "$staging_dir/logs/jsonl/${experiment_name}_${run_id}_${bot_id}_adapter.log"

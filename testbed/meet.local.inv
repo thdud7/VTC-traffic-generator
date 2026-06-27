@@ -1,0 +1,11 @@
+[controllers]
+controller ansible_host=ec2-13-125-247-23.ap-northeast-2.compute.amazonaws.com role=controller public_dns=ec2-13-125-247-23.ap-northeast-2.compute.amazonaws.com public_ip=13.125.247.23 private_ip=172.31.37.160 region=ap-northeast-2
+
+[vtc_clients]
+bot1 ansible_host=ec2-15-164-217-62.ap-northeast-2.compute.amazonaws.com role=bot bot_id=bot1 public_dns=ec2-15-164-217-62.ap-northeast-2.compute.amazonaws.com public_ip=15.164.217.62 private_ip=172.31.40.44 rpc_host=172.31.40.44 c2_port=8001 region=ap-northeast-2
+bot2 ansible_host=ec2-3-34-97-190.ap-northeast-2.compute.amazonaws.com role=bot bot_id=bot2 public_dns=ec2-3-34-97-190.ap-northeast-2.compute.amazonaws.com public_ip=3.34.97.190 private_ip=172.31.36.50 rpc_host=172.31.36.50 c2_port=8001 region=ap-northeast-2
+bot3 ansible_host=ec2-13-209-72-146.ap-northeast-2.compute.amazonaws.com role=bot bot_id=bot3 public_dns=ec2-13-209-72-146.ap-northeast-2.compute.amazonaws.com public_ip=13.209.72.146 private_ip=172.31.36.99 rpc_host=172.31.36.99 c2_port=8001 region=ap-northeast-2
+
+[all:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=~/.ssh/bootstrap.pem

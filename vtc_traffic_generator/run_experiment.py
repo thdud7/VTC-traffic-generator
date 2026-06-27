@@ -17,10 +17,12 @@ from urllib.parse import urlparse
 try:
     from vtc_automation.event_log import resolve_git_sha
     from vtc_behavior.icsi import ICSIReplayPolicy
+    from vtc_media import display_name_for_bot, expand_env, load_manifest, select_video_entry, validate_selected_bots
     from tools import render_readable_events
 except ImportError:
     from vtc_traffic_generator.vtc_automation.event_log import resolve_git_sha
     from vtc_traffic_generator.vtc_behavior.icsi import ICSIReplayPolicy
+    from vtc_traffic_generator.vtc_media import display_name_for_bot, expand_env, load_manifest, select_video_entry, validate_selected_bots
     from vtc_traffic_generator.tools import render_readable_events
 
 
@@ -33,7 +35,7 @@ DEFAULT_UPLOAD_PLAYBOOK = PROJECT_ROOT / "ansible" / "upload_captures.yml"
 
 def load_json(path):
     with Path(path).expanduser().open("r", encoding="utf-8") as infile:
-        return json.load(infile)
+        return expand_env(json.load(infile))
 
 
 def write_json(path, data):
@@ -64,9 +66,10 @@ def normalize_clients(experiment):
             raise ValueError(f"clients[{index}] must be an object")
 
         bot_number = index + 1
-        name = str(client.get("name") or client.get("bot_name") or f"bot{bot_number}")
+        name = str(client.get("name") or client.get("bot_name") or client.get("bot_id") or f"bot{bot_number}")
+        bot_id = str(client.get("bot_id") or name)
         host = require(client.get("host") or client.get("ansible_host"), f"clients[{index}].host")
-        c2_host = str(client.get("c2_host") or client.get("private_ip") or host)
+        c2_host = str(client.get("c2_host") or client.get("rpc_host") or client.get("private_ip") or host)
         c2_port = int(client.get("c2_port", base_port))
         display = str(client.get("display", f":{base_display + index}"))
         video_device = str(client.get("video_device", f"/dev/video{base_video_device}"))
@@ -77,6 +80,7 @@ def normalize_clients(experiment):
             {
                 **client,
                 "name": name,
+                "bot_id": bot_id,
                 "host": str(host),
                 "c2_host": c2_host,
                 "c2_port": c2_port,
@@ -136,6 +140,7 @@ def build_remote_config(experiment, client):
         raise ValueError(f"{client['name']}.adapter_config must be an object when provided")
 
     bot_name = client["name"]
+    bot_id = client.get("bot_id") or bot_name
     run_log_id = experiment_run_log_id(experiment)
     virtual_audio = {
         "sink_name": client["sink_name"],
@@ -161,7 +166,7 @@ def build_remote_config(experiment, client):
         "display_name": str(client.get("display_name", bot_name)),
         "microphone_name": str(client.get("microphone_name", client["source_name"])),
         "event_log_path": str(client.get("event_log_path", f"/tmp/vtc-{bot_name}/events-{run_log_id}.jsonl")),
-        "app_log_path": str(client.get("app_log_path", f"/tmp/vtc-{bot_name}/jitsi-electron-{run_log_id}.log")),
+        "app_log_path": str(client.get("app_log_path", f"/tmp/vtc-{bot_name}/{service}-{run_log_id}.log")),
         "adapter_log_path": str(client.get("adapter_log_path", f"/tmp/vtc-{bot_name}/adapter-{run_log_id}.log")),
         "diagnostic_dir": str(client.get("diagnostic_dir", f"/tmp/vtc-{bot_name}/diagnostics/{run_log_id}")),
         "restart_existing": bool(client.get("restart_existing", False)),
@@ -195,9 +200,10 @@ def build_remote_config(experiment, client):
         "config_sha256": experiment.get("config_sha256"),
         "vtc_url": require(experiment.get("vtc_url") or experiment.get("room_url"), "vtc_url"),
         "c2_port": client["c2_port"],
+        "bot_id": bot_id,
         "bot_name": bot_name,
         "bot": {
-            "display_name": str(client.get("display_name", bot_name)),
+            "display_name": str(client.get("display_name", display_name_for_bot(str(bot_id)))),
         },
         "action_log_path": str(
             client.get("action_log_path", f"/tmp/vtc-{bot_name}/actions-{run_log_id}.txt")
@@ -213,6 +219,16 @@ def build_remote_config(experiment, client):
         "adapter_config": adapter_config,
         "version": experiment.get("version", "VTC traffic generator X"),
     }
+    media_config = media_config_for_client(experiment, client)
+    if media_config:
+        remote["media"] = media_config
+        video_entry = media_config.get("video", {})
+        if isinstance(video_entry, dict) and video_entry.get("local_cache_path"):
+            cache_path = Path(str(video_entry["local_cache_path"])).expanduser()
+            remote["video_path"] = str(cache_path.parent)
+            remote["video_name"] = cache_path.name
+            remote.setdefault("virtual_video", {})
+            remote["virtual_video"]["source"] = "file"
     if isinstance(experiment.get("capture"), dict):
         remote["capture"] = experiment["capture"]
 
@@ -303,7 +319,10 @@ def render_inventory(experiment, clients, output_dir):
         run_log_id = experiment_run_log_id(experiment)
         action_log_path = str(client.get("action_log_path", f"/tmp/vtc-{client['name']}/actions-{run_log_id}.txt"))
         event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events-{run_log_id}.jsonl"))
-        app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron-{run_log_id}.log"))
+        service_name = experiment.get("service") or experiment.get("vtc_platform")
+        app_log_path = str(
+            client.get("app_log_path", f"/tmp/vtc-{client['name']}/{service_name}-{run_log_id}.log")
+        )
         adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter-{run_log_id}.log"))
         screen_share_window = resolve_screen_share_window(experiment, client, defaults)
         screen_share_window_enabled = bool(screen_share_window.get("enabled", False))
@@ -322,6 +341,9 @@ def render_inventory(experiment, clients, output_dir):
         parts = [
             client["name"],
             f"ansible_host={quote_inventory_value(client['host'])}",
+            f"role={quote_inventory_value(client.get('role', 'bot'))}",
+            f"bot_id={quote_inventory_value(client.get('bot_id', client['name']))}",
+            f"rpc_host={quote_inventory_value(client.get('rpc_host') or client.get('c2_host') or client.get('private_ip') or client['host'])}",
             f"c2_port={quote_inventory_value(client['c2_port'])}",
             f"vtc_display={quote_inventory_value(client['display'])}",
             f"video_device={quote_inventory_value(client['video_device'])}",
@@ -346,6 +368,9 @@ def render_inventory(experiment, clients, output_dir):
             f"screen_share_run_id={quote_inventory_value(screen_share_run_id)}",
             f"screen_share_marker_color={quote_inventory_value(screen_share_marker_color)}",
         ]
+        for hostvar in ("public_dns", "public_ip", "private_ip", "instance_id", "region"):
+            if client.get(hostvar):
+                parts.append(f"{hostvar}={quote_inventory_value(client[hostvar])}")
         if launcher_path:
             parts.append(f"jitsi_electron_launcher={quote_inventory_value(launcher_path)}")
         if user:
@@ -470,6 +495,53 @@ def capture_upload_configured(experiment):
     return isinstance(capture_upload, dict) and bool(capture_upload.get("s3_uri"))
 
 
+def prepare_media_manifest(experiment, clients):
+    media_manifest_config = experiment.get("media_manifest")
+    if media_manifest_config is None:
+        return None
+    if not isinstance(media_manifest_config, dict):
+        raise ValueError("experiment.media_manifest must be an object when provided")
+
+    local_path = media_manifest_config.get("local_path") or media_manifest_config.get("path")
+    loaded_manifest = None
+    if local_path:
+        loaded_manifest = load_manifest(local_path)
+        validate_selected_bots(loaded_manifest, clients)
+        experiment["_media_manifest"] = loaded_manifest
+        return loaded_manifest
+
+    s3_uri = media_manifest_config.get("s3_uri")
+    if not s3_uri:
+        raise ValueError("experiment.media_manifest requires local_path/path or s3_uri")
+
+    # Remote S3 manifests are validated on the client after download. Keep enough
+    # metadata in generated configs so selected bot validation remains explicit.
+    experiment["_media_manifest"] = None
+    return None
+
+
+def media_config_for_client(experiment, client):
+    media_manifest_config = experiment.get("media_manifest")
+    loaded_manifest = experiment.get("_media_manifest")
+    if not isinstance(media_manifest_config, dict):
+        return None
+
+    bot_id = str(client.get("bot_id") or client.get("name"))
+    result = {
+        "manifest": {
+            key: value
+            for key, value in media_manifest_config.items()
+            if key in {"s3_uri", "local_path", "path", "local_cache_path"}
+        },
+        "media_profile": str(experiment.get("media_profile") or media_manifest_config.get("media_profile") or ""),
+    }
+    if loaded_manifest:
+        result["manifest"]["platform"] = loaded_manifest.get("platform")
+        result["manifest"]["media_profile"] = loaded_manifest.get("media_profile")
+        result["video"] = select_video_entry(loaded_manifest, bot_id)
+    return result
+
+
 def prepare_experiment_metadata(experiment, experiment_path):
     experiment_id = str(
         experiment.get("experiment_id")
@@ -563,6 +635,7 @@ def generate(experiment_path, output_dir):
     prepare_experiment_metadata(experiment, experiment_path)
     experiment_run_log_id(experiment)
     clients = normalize_clients(experiment)
+    prepare_media_manifest(experiment, clients)
     output_dir = Path(output_dir).expanduser().resolve()
 
     controller_config = build_controller_config(experiment, clients)

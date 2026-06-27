@@ -119,3 +119,17 @@ dmypy.json
 
 # Generated VTC experiment configs
 generated/
+
+# VTC runtime artifacts and local media caches
+artifacts/
+vtc_data/
+.vtc-media-cache/
+.vtc-browser-profiles/
+*.pcap
+*.pcapng
+*.analysis.txt
+*.media-analysis.json
+*.media-analysis.md
+*.metadata.json
+*.preflight.json
+*.preflight.txt
