@@ -471,6 +471,8 @@
               --disable-infobars \
               --no-sandbox \
               --disable-dev-shm-usage \
+              --disable-gpu \
+              --disable-gpu-compositing \
               "$target_url" > /tmp/vtc-screen-share-window.log 2>&1 &
             ;;
           firefox)
