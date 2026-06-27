@@ -177,6 +177,7 @@ def build_remote_config(experiment, client):
             "screen_share_target",
             str(screen_share_window.get("title") or f"VTC Share Window - {bot_name}"),
         )
+        adapter_config.setdefault("screen_share_url", str(screen_share_window.get("url") or ""))
 
     executable_path = client.get("executable_path") or defaults.get("executable_path")
     if executable_path:
@@ -216,6 +217,7 @@ def build_remote_config(experiment, client):
         "virtual_audio": virtual_audio,
         "virtual_video": virtual_video,
         "packet_capture": packet_capture or {"enabled": False},
+        "screen_share_window": screen_share_window,
         "adapter_config": adapter_config,
         "version": experiment.get("version", "VTC traffic generator X"),
     }
@@ -335,6 +337,7 @@ def render_inventory(experiment, clients, output_dir):
             screen_share_window.get("url")
             or f"file://{screen_share_window_html_path}"
         )
+        screen_share_window_launch_external = bool(screen_share_window.get("launch_external", True))
         screen_share_nonce = str(screen_share_window.get("nonce", ""))
         screen_share_run_id = str(screen_share_window.get("run_id", experiment.get("run_id", "")))
         screen_share_marker_color = str(screen_share_window.get("marker_color", "#111111"))
@@ -364,6 +367,7 @@ def render_inventory(experiment, clients, output_dir):
             f"screen_share_window_title={quote_inventory_value(screen_share_window_title)}",
             f"screen_share_window_html_path={quote_inventory_value(screen_share_window_html_path)}",
             f"screen_share_window_url={quote_inventory_value(screen_share_window_url)}",
+            f"screen_share_window_launch_external={quote_inventory_value(str(screen_share_window_launch_external).lower())}",
             f"screen_share_nonce={quote_inventory_value(screen_share_nonce)}",
             f"screen_share_run_id={quote_inventory_value(screen_share_run_id)}",
             f"screen_share_marker_color={quote_inventory_value(screen_share_marker_color)}",

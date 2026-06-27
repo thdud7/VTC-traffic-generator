@@ -40,6 +40,7 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         self.screen_sharing = bool(self.adapter_config().get("initial_screen_sharing", False))
         self.joined = False
         self._chrome_fake_video_capture_file: Path | None = None
+        self.screen_share_page = None
 
     def browser_args(self):
         adapter_config = self.adapter_config()
@@ -615,9 +616,12 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
 
     async def _connect_to_meeting_gui_cdp(self, vtc_url: str, display_name: str):
         page = await self._ensure_gui_cdp_page()
+        await self._ensure_gui_screen_share_tab()
+        await page.bring_to_front()
         emit_event(self.config, "meeting_join_cdp_start", {"vtc_url": vtc_url}, self.service_name)
         await page.goto(vtc_url, wait_until="domcontentloaded", timeout=self._timeout_ms("goto_timeout_sec", 60))
         await page.wait_for_timeout(int(float(self.adapter_config().get("page_load_wait_sec", 4)) * 1000))
+        await page.bring_to_front()
         self._activate_window()
         await self._dismiss_common_prompts()
         await self._fill_display_name(display_name)
@@ -736,6 +740,66 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         self.page.on("console", self._record_console)
         self.page.on("pageerror", self._record_page_error)
         return self.page
+
+    def _screen_share_window_config(self) -> Mapping[str, Any]:
+        configured = self.config.get("screen_share_window")
+        return configured if isinstance(configured, Mapping) else {}
+
+    def _screen_share_tab_url(self) -> str | None:
+        adapter_config = self.adapter_config()
+        configured_url = adapter_config.get("screen_share_url")
+        if configured_url:
+            return str(configured_url)
+        screen_share_window = self._screen_share_window_config()
+        if screen_share_window.get("url"):
+            return str(screen_share_window["url"])
+        html_path = screen_share_window.get("html_path")
+        if html_path:
+            return f"file://{html_path}"
+        return None
+
+    async def _ensure_gui_screen_share_tab(self) -> None:
+        screen_share_window = self._screen_share_window_config()
+        adapter_config = self.adapter_config()
+        if not bool(screen_share_window.get("enabled", False)):
+            return
+        if not bool(screen_share_window.get("open_in_meet_browser", adapter_config.get("open_screen_share_tab", False))):
+            return
+        if not self.context:
+            return
+        target_url = self._screen_share_tab_url()
+        if not target_url:
+            return
+        target_title = str(screen_share_window.get("title") or adapter_config.get("screen_share_target") or "VTC Share Window")
+        for candidate in self.context.pages:
+            try:
+                candidate_title = await candidate.title()
+            except Exception:
+                candidate_title = ""
+            if candidate.url == target_url or candidate_title == target_title:
+                self.screen_share_page = candidate
+                emit_event(
+                    self.config,
+                    "screen_share_tab_ready",
+                    {"url": candidate.url, "title": candidate_title, "reused": True},
+                    self.service_name,
+                )
+                return
+
+        share_page = await self.context.new_page()
+        self.screen_share_page = share_page
+        await share_page.goto(target_url, wait_until="domcontentloaded", timeout=self._timeout_ms("screen_share_tab_goto_timeout_sec", 30))
+        await share_page.wait_for_timeout(int(float(adapter_config.get("screen_share_tab_ready_wait_sec", 0.5)) * 1000))
+        try:
+            actual_title = await share_page.title()
+        except Exception:
+            actual_title = ""
+        emit_event(
+            self.config,
+            "screen_share_tab_ready",
+            {"url": target_url, "title": actual_title, "reused": False},
+            self.service_name,
+        )
 
     def _build_gui_browser_command(self) -> list[str]:
         executable_path = (

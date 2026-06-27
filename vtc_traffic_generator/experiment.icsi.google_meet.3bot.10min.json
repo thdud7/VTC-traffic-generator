@@ -149,6 +149,8 @@
     "screen_share_window": {
       "enabled": true,
       "html_path": "/home/ubuntu/vtc_data/screen_share/share.html",
+      "launch_external": false,
+      "open_in_meet_browser": true,
       "title": "VTC Share Window",
       "unique_per_run": false
     },

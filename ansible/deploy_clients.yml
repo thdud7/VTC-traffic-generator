@@ -506,7 +506,9 @@
       args:
         executable: /bin/bash
       changed_when: false
-      when: screen_share_window_enabled | default(false) | bool
+      when:
+        - screen_share_window_enabled | default(false) | bool
+        - screen_share_window_launch_external | default(true) | bool
 
     - name: Verify Jitsi Electron launcher exists
       ansible.builtin.stat:
