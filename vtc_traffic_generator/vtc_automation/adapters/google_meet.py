@@ -591,7 +591,10 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         emit_event(self.config, "meeting_url_entered", {"method": "keyboard", "vtc_url": vtc_url}, self.service_name)
 
         await asyncio.sleep(float(self.adapter_config().get("gui_prejoin_wait_sec", self.adapter_config().get("page_load_wait_sec", 10))))
-        self._activate_meeting_window(vtc_url)
+        if not self._activate_meeting_window(vtc_url):
+            window_title = self._window_title()
+            self._collect_gui_diagnostics("meeting_window_missing_after_url", {"window_title": window_title})
+            raise RuntimeError(f"Google Meet window was not found after URL entry: {window_title}")
         self._run_xdotool(["key", "Escape"], check=False)
         emit_event(self.config, "meet_popup_dismissed", {"method": "keyboard", "shortcut": "Escape"}, self.service_name)
 
@@ -602,9 +605,15 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         emit_event(self.config, "join_meeting_clicked", {"method": "keyboard", "shortcut": "Return"}, self.service_name)
 
         await asyncio.sleep(float(self.adapter_config().get("gui_join_wait_sec", self.adapter_config().get("joined_wait_sec", 15))))
-        self._activate_meeting_window(vtc_url)
+        if not self._activate_meeting_window(vtc_url):
+            window_title = self._window_title()
+            self._collect_gui_diagnostics("meeting_window_missing_after_join", {"window_title": window_title})
+            raise RuntimeError(f"Google Meet window was not found after join: {window_title}")
         self.joined = True
         window_title = self._window_title()
+        if not self._is_valid_meeting_window_title(window_title, vtc_url):
+            self._collect_gui_diagnostics("meeting_window_invalid_after_join", {"window_title": window_title})
+            raise RuntimeError(f"Google Meet join did not land on a meeting window: {window_title}")
         self._notify_callback("_meeting_joined_callback", vtc_url)
         self._notify_callback("_media_ready_callback", vtc_url)
         self._collect_gui_diagnostics("meeting_join_success", {"window_title": window_title})
@@ -683,7 +692,6 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             ["search", "--onlyvisible", "--class", "google-chrome"],
             ["search", "--onlyvisible", "--name", "Chromium"],
             ["search", "--onlyvisible", "--name", "Google Chrome"],
-            ["search", "--onlyvisible", "--name", "Meet"],
         ]
         if configured:
             if isinstance(configured, str):
@@ -694,9 +702,10 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return searches
 
     def _activate_meeting_window(self, vtc_url: str) -> bool:
+        meeting_code = vtc_url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
         patterns = [
             str(self.adapter_config().get("meeting_window_regex") or ""),
-            "Meet",
+            re.escape(meeting_code) if meeting_code else "",
             re.escape(vtc_url.split("#", 1)[0]),
         ]
         deadline = time.time() + float(self.adapter_config().get("meeting_window_wait_sec", 5))
@@ -710,6 +719,17 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             time.sleep(0.25)
         self._activate_window()
         return False
+
+    def _is_valid_meeting_window_title(self, title: str | None, vtc_url: str) -> bool:
+        if not title:
+            return False
+        normalized = title.lower()
+        if "about:blank" in normalized:
+            return False
+        if "vtc share window" in normalized:
+            return False
+        meeting_code = vtc_url.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0].lower()
+        return bool(meeting_code and meeting_code in normalized) or "meet" in normalized
 
     def _position_gui_window(self) -> None:
         geometry = self.adapter_config().get("window_geometry")
