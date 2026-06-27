@@ -28,10 +28,16 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         self.browser = None
         self.context = None
         self.page = None
+        self.browser_process: subprocess.Popen[str] | None = None
+        self.window_id: str | None = None
+        self.display = str(self.adapter_config().get("display") or os.environ.get("DISPLAY") or ":99")
+        self.action_timeout_sec = int(float(self.adapter_config().get("action_timeout_sec", 10)))
+        self.launch_timeout_sec = float(self.adapter_config().get("launch_timeout_sec", 20))
         self.browser_log: list[dict[str, Any]] = []
         self.mic_enabled = bool(self.adapter_config().get("initial_mic_enabled", True))
         self.camera_enabled = bool(self.adapter_config().get("initial_camera_enabled", True))
         self.screen_sharing = bool(self.adapter_config().get("initial_screen_sharing", False))
+        self.joined = False
 
     def browser_args(self):
         adapter_config = self.adapter_config()
@@ -78,6 +84,9 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return {key: value for key, value in options.items() if value is not None}
 
     async def launch(self):
+        if self._use_gui_keyboard():
+            return await self._launch_gui_keyboard()
+
         from playwright.async_api import async_playwright
 
         self.run_sanity_checks()
@@ -116,6 +125,9 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             await self.close()
 
     async def connect_to_meeting(self, vtc_url: str, display_name: str):
+        if self._use_gui_keyboard():
+            return await self._connect_to_meeting_gui_keyboard(vtc_url, display_name)
+
         if self.page is None:
             raise RuntimeError("Google Meet browser page is not launched")
 
@@ -138,6 +150,19 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         emit_event(self.config, "meeting_join_success", {"vtc_url": vtc_url, "join_selector": join_selector}, self.service_name)
 
     async def leave(self):
+        if self._use_gui_keyboard():
+            emit_event(self.config, "meeting_leave_start", {}, self.service_name)
+            selector = None
+            if self.window_id:
+                self._activate_window()
+                shortcut = str(self.adapter_config().get("leave_shortcut", "ctrl+w"))
+                self._run_xdotool(["key", shortcut], check=False)
+                selector = f"keyboard:{shortcut}"
+                await asyncio.sleep(float(self.adapter_config().get("leave_wait_sec", 1)))
+            self.joined = False
+            emit_event(self.config, "meeting_leave_success", {"selector": selector, "success": bool(selector)}, self.service_name)
+            return bool(selector)
+
         emit_event(self.config, "meeting_leave_start", {}, self.service_name)
         selector = await self._click_optional(
             [
@@ -157,6 +182,15 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
 
     async def close(self):
         self.collect_browser_log("adapter_close")
+        if self._use_gui_keyboard():
+            if self.browser_process and self.browser_process.poll() is None:
+                self.browser_process.terminate()
+                try:
+                    self.browser_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.browser_process.kill()
+                    self.browser_process.wait(timeout=3)
+            return
         if self.context:
             await self.context.close()
         elif self.browser:
@@ -177,6 +211,22 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return await self._set_keyboard_toggle("camera", False, "Control+E", "camera_off")
 
     async def start_screen_share(self):
+        if self._use_gui_keyboard():
+            if self.screen_sharing:
+                return True
+            shortcut = str(self.adapter_config().get("screen_share_shortcut", "ctrl+alt+t"))
+            self._activate_window()
+            self._run_xdotool(["key", shortcut])
+            await asyncio.sleep(float(self.adapter_config().get("screen_share_wait_sec", 2)))
+            self.screen_sharing = True
+            emit_event(
+                self.config,
+                "screenshare_start",
+                {"selector": f"keyboard:{shortcut}", "confirm_selector": "browser-auto-select", "success": True},
+                self.service_name,
+            )
+            return True
+
         if self.screen_sharing:
             return True
         selector = await self._click_optional(
@@ -207,6 +257,23 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return True
 
     async def stop_screen_share(self):
+        if self._use_gui_keyboard():
+            if not self.screen_sharing and self.adapter_config().get("trust_screen_share_shortcut_state", True):
+                emit_event(
+                    self.config,
+                    "screenshare_stop",
+                    {"selector": "cached", "success": True},
+                    self.service_name,
+                )
+                return True
+            shortcut = str(self.adapter_config().get("screen_share_shortcut", "ctrl+alt+t"))
+            self._activate_window()
+            self._run_xdotool(["key", shortcut], check=False)
+            await asyncio.sleep(float(self.adapter_config().get("screen_share_wait_sec", 2)))
+            self.screen_sharing = False
+            emit_event(self.config, "screenshare_stop", {"selector": f"keyboard:{shortcut}", "success": True}, self.service_name)
+            return True
+
         selector = await self._click_optional(
             [
                 "button[aria-label*='Stop sharing']",
@@ -220,6 +287,9 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         return True
 
     async def is_in_meeting(self):
+        if self._use_gui_keyboard():
+            return bool(self.joined and self.window_id)
+
         if self.page is None:
             return False
         selector = await self._visible_optional(
@@ -269,13 +339,27 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
             "audio_ok": audio_ok,
             "video_ok": video_ok,
             "ffmpeg_ok": ffmpeg_ok,
+            "gui_keyboard_ok": True,
             "checks": checks,
         }
+        if self._use_gui_keyboard():
+            executable_path = (
+                adapter_config.get("chromium_executable_path")
+                or adapter_config.get("executable_path")
+                or self._find_browser_executable()
+            )
+            gui_keyboard_ok = shutil.which("xdotool") is not None and bool(executable_path)
+            details["gui_keyboard_ok"] = gui_keyboard_ok
+            details["xdotool_path"] = shutil.which("xdotool")
+            details["chromium_executable_path"] = executable_path
         emit_event(self.config, "meet_sanity_check", details, self.service_name)
-        if not (audio_ok and video_ok and ffmpeg_ok):
+        if not (audio_ok and video_ok and ffmpeg_ok and details["gui_keyboard_ok"]):
             raise RuntimeError("Google Meet sanity check failed: " + json.dumps(details, sort_keys=True))
 
     def collect_diagnostics(self, reason: str, details: Mapping[str, Any] | None = None):
+        if self._use_gui_keyboard():
+            self._collect_gui_diagnostics(reason, details)
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -285,6 +369,8 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
 
     async def _collect_diagnostics_async(self, reason: str, details: Mapping[str, Any] | None = None):
         if self.page is None:
+            if self._use_gui_keyboard():
+                self._collect_gui_diagnostics(reason, details)
             return
         diagnostic_dir = Path(str(self.adapter_config().get("diagnostic_dir") or f"/tmp/vtc-{self.config.get('bot_name', 'bot')}/diagnostics"))
         diagnostic_dir.mkdir(parents=True, exist_ok=True)
@@ -384,6 +470,19 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         if current == enabled and self.adapter_config().get(f"trust_{control}_shortcut_state", True):
             emit_event(self.config, event_name, {"enabled": enabled, "method": "cached", "success": True}, self.service_name)
             return True
+        if self._use_gui_keyboard():
+            xdotool_shortcut = self._xdotool_shortcut(shortcut)
+            self._activate_window()
+            self._run_xdotool(["key", xdotool_shortcut])
+            await asyncio.sleep(float(self.adapter_config().get("state_change_wait_sec", 0.25)))
+            setattr(self, f"{control}_enabled", enabled)
+            emit_event(
+                self.config,
+                event_name,
+                {"enabled": enabled, "method": "keyboard", "shortcut": xdotool_shortcut, "success": True},
+                self.service_name,
+            )
+            return True
         if self.page is None:
             return False
         await self.page.keyboard.press(shortcut)
@@ -431,6 +530,293 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
                     continue
             await asyncio.sleep(0.25)
         return None
+
+    def _use_gui_keyboard(self) -> bool:
+        mode = str(self.adapter_config().get("automation_mode", "playwright")).lower().replace("-", "_")
+        return mode in {"gui", "gui_keyboard", "keyboard", "xdotool"}
+
+    async def _launch_gui_keyboard(self):
+        self.run_sanity_checks()
+        emit_event(self.config, "adapter_launch_start", {"browser": "chromium", "automation_mode": "gui_keyboard"}, self.service_name)
+        command = self._build_gui_browser_command()
+        app_log_path = Path(str(self.adapter_config().get("app_log_path") or f"/tmp/vtc-{self.config.get('bot_name', 'bot')}/google-meet.log"))
+        app_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with app_log_path.open("a", encoding="utf-8") as app_log:
+            app_log.write(f"\n--- launch {time.time()} ---\n")
+            app_log.write("command=" + json.dumps(command) + "\n")
+            self.browser_process = subprocess.Popen(
+                command,
+                stdout=app_log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                env=self._command_env(),
+                start_new_session=True,
+            )
+        self.window_id = self._wait_for_gui_window()
+        self._position_gui_window()
+        emit_event(
+            self.config,
+            "adapter_launch_done",
+            {
+                "automation_mode": "gui_keyboard",
+                "window_id": self.window_id,
+                "app_log_path": str(app_log_path),
+                "persistent_profile": True,
+            },
+            self.service_name,
+        )
+        return True
+
+    async def _connect_to_meeting_gui_keyboard(self, vtc_url: str, display_name: str):
+        if not self.window_id:
+            raise RuntimeError("Google Meet Chromium window is not launched")
+
+        emit_event(
+            self.config,
+            "meeting_join_start",
+            {"vtc_url": vtc_url, "automation_mode": "gui_keyboard"},
+            self.service_name,
+        )
+        type_delay = str(int(float(self.adapter_config().get("type_delay_ms", 1))))
+        self._activate_window()
+        self._run_xdotool(["key", "ctrl+l"])
+        self._run_xdotool(["type", "--delay", type_delay, vtc_url])
+        self._run_xdotool(["key", "Return"])
+        emit_event(self.config, "meeting_url_entered", {"method": "keyboard", "vtc_url": vtc_url}, self.service_name)
+
+        await asyncio.sleep(float(self.adapter_config().get("gui_prejoin_wait_sec", self.adapter_config().get("page_load_wait_sec", 10))))
+        self._activate_meeting_window(vtc_url)
+        self._run_xdotool(["key", "Escape"], check=False)
+        emit_event(self.config, "meet_popup_dismissed", {"method": "keyboard", "shortcut": "Escape"}, self.service_name)
+
+        await asyncio.sleep(float(self.adapter_config().get("gui_after_escape_wait_sec", 0.5)))
+        self._run_xdotool(["type", "--delay", type_delay, display_name])
+        emit_event(self.config, "display_name_entered", {"display_name": display_name, "method": "keyboard"}, self.service_name)
+        self._run_xdotool(["key", "Return"])
+        emit_event(self.config, "join_meeting_clicked", {"method": "keyboard", "shortcut": "Return"}, self.service_name)
+
+        await asyncio.sleep(float(self.adapter_config().get("gui_join_wait_sec", self.adapter_config().get("joined_wait_sec", 15))))
+        self._activate_meeting_window(vtc_url)
+        self.joined = True
+        window_title = self._window_title()
+        self._notify_callback("_meeting_joined_callback", vtc_url)
+        self._notify_callback("_media_ready_callback", vtc_url)
+        self._collect_gui_diagnostics("meeting_join_success", {"window_title": window_title})
+        emit_event(
+            self.config,
+            "meeting_join_success",
+            {"vtc_url": vtc_url, "join_selector": "keyboard:Return", "window_title": window_title},
+            self.service_name,
+        )
+
+    def _build_gui_browser_command(self) -> list[str]:
+        executable_path = (
+            self.adapter_config().get("chromium_executable_path")
+            or self.adapter_config().get("executable_path")
+            or self._find_browser_executable()
+        )
+        if not executable_path:
+            raise RuntimeError("Chromium executable not found for Google Meet GUI automation")
+
+        args = [
+            str(executable_path),
+            f"--user-data-dir={self._gui_user_data_dir()}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--use-fake-ui-for-media-stream",
+            "--autoplay-policy=no-user-gesture-required",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--window-size=1280,720",
+            "--lang=en-US",
+        ]
+        if self.adapter_config().get("ignore_certificate_errors", True):
+            args.append("--ignore-certificate-errors")
+        if self.adapter_config().get("disable_gpu", True):
+            args.extend(["--disable-gpu", "--disable-gpu-compositing"])
+        capture_source = self.adapter_config().get("auto_select_desktop_capture_source") or self.adapter_config().get("screen_share_target")
+        if capture_source:
+            args.append(f"--auto-select-desktop-capture-source={capture_source}")
+        args.extend(str(arg) for arg in self.adapter_config().get("extra_browser_args", []))
+        args.append(str(self.adapter_config().get("initial_browser_url", "about:blank")))
+        return args
+
+    def _gui_user_data_dir(self) -> Path:
+        configured = self.adapter_config().get("user_data_dir") or os.environ.get("VTC_MEET_CHROME_USER_DATA_DIR")
+        if configured and "${" not in str(configured):
+            path = Path(str(configured)).expanduser()
+        else:
+            bot_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(self.config.get("bot_name") or "bot")).strip("-") or "bot"
+            run_id = str(self.config.get("execution_id") or self.config.get("run_id") or int(time.time()))
+            safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", run_id).strip("-") or "run"
+            path = Path(f"/tmp/vtc-{bot_name}/chrome-google-meet-{safe_run_id}")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _wait_for_gui_window(self) -> str:
+        deadline = time.time() + self.launch_timeout_sec
+        last_error = ""
+        while time.time() < deadline:
+            if self.browser_process and self.browser_process.poll() is not None:
+                raise RuntimeError(f"Chromium exited before a window appeared with code {self.browser_process.returncode}")
+            for args in self._window_searches():
+                result = self._run_xdotool(args, check=False, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    window_id = result.stdout.strip().splitlines()[-1]
+                    self.window_id = window_id
+                    self._activate_window()
+                    return window_id
+                last_error = result.stderr or result.stdout
+            time.sleep(0.5)
+        raise RuntimeError(f"Timed out waiting for Google Meet Chromium window. Last output: {last_error}")
+
+    def _window_searches(self) -> list[list[str]]:
+        configured = self.adapter_config().get("window_title_regex")
+        searches = [
+            ["search", "--onlyvisible", "--class", "chromium"],
+            ["search", "--onlyvisible", "--class", "google-chrome"],
+            ["search", "--onlyvisible", "--name", "Chromium"],
+            ["search", "--onlyvisible", "--name", "Google Chrome"],
+            ["search", "--onlyvisible", "--name", "Meet"],
+        ]
+        if configured:
+            if isinstance(configured, str):
+                configured_patterns = [configured]
+            else:
+                configured_patterns = [str(item) for item in configured]
+            searches = [["search", "--onlyvisible", "--name", pattern] for pattern in configured_patterns] + searches
+        return searches
+
+    def _activate_meeting_window(self, vtc_url: str) -> bool:
+        patterns = [
+            str(self.adapter_config().get("meeting_window_regex") or ""),
+            "Meet",
+            re.escape(vtc_url.split("#", 1)[0]),
+        ]
+        deadline = time.time() + float(self.adapter_config().get("meeting_window_wait_sec", 5))
+        while time.time() < deadline:
+            for pattern in [item for item in patterns if item]:
+                result = self._run_xdotool(["search", "--onlyvisible", "--name", pattern], check=False, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    self.window_id = result.stdout.strip().splitlines()[-1]
+                    self._activate_window()
+                    return True
+            time.sleep(0.25)
+        self._activate_window()
+        return False
+
+    def _position_gui_window(self) -> None:
+        geometry = self.adapter_config().get("window_geometry")
+        if not isinstance(geometry, Mapping) or not self.window_id:
+            return
+        width = geometry.get("width")
+        height = geometry.get("height")
+        left = geometry.get("left", 0)
+        top = geometry.get("top", 0)
+        if width and height:
+            self._run_xdotool(["windowsize", str(self.window_id), str(int(width)), str(int(height))], check=False)
+        self._run_xdotool(["windowmove", str(self.window_id), str(int(left)), str(int(top))], check=False)
+        self._activate_window()
+
+    def _activate_window(self):
+        if not self.window_id:
+            return
+        self._run_xdotool(["windowraise", str(self.window_id)], check=False)
+        self._run_xdotool(["windowactivate", "--sync", str(self.window_id)], check=False)
+
+    def _window_title(self) -> str | None:
+        if not self.window_id:
+            return None
+        result = self._run_xdotool(["getwindowname", str(self.window_id)], check=False, timeout=2)
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
+
+    def _collect_gui_diagnostics(self, reason: str, details: Mapping[str, Any] | None = None):
+        diagnostic_dir = Path(str(self.adapter_config().get("diagnostic_dir") or f"/tmp/vtc-{self.config.get('bot_name', 'bot')}/diagnostics"))
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        safe_reason = re.sub(r"[^A-Za-z0-9_.-]+", "-", reason).strip("-") or "diagnostic"
+        base = diagnostic_dir / f"{int(time.time())}-{safe_reason}"
+        screenshot_path = base.with_suffix(".png")
+        if shutil.which("import"):
+            self._run_command(["import", "-window", "root", str(screenshot_path)], check=False, timeout=5)
+        diagnostics = {
+            "reason": reason,
+            "details": dict(details or {}),
+            "display": self.display,
+            "window_id": self.window_id,
+            "window_title": self._window_title(),
+            "browser_process_pid": self.browser_process.pid if self.browser_process else None,
+            "screenshot_path": str(screenshot_path),
+            "screenshot_exists": screenshot_path.exists(),
+            "commands": {},
+        }
+        command_map = {
+            "wmctrl_windows": ["wmctrl", "-lG"],
+            "xdotool_visible_windows": ["xdotool", "search", "--onlyvisible", "--name", "."],
+            "processes": ["ps", "-ef"],
+            "pactl_sources": ["pactl", "list", "short", "sources"],
+            "pactl_sink_inputs": ["pactl", "list", "sink-inputs"],
+        }
+        for key, command in command_map.items():
+            result = self._run_command(command, check=False, timeout=5)
+            diagnostics["commands"][key] = {
+                "command": command,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip()[:4000],
+                "stderr": result.stderr.strip()[:4000],
+            }
+        base.with_suffix(".json").write_text(json.dumps(diagnostics, indent=2, sort_keys=True), encoding="utf-8")
+        self.collect_browser_log(reason, base.with_suffix(".browser-log.jsonl"))
+        emit_event(
+            self.config,
+            "browser_diagnostics_collected",
+            {"reason": reason, "base_path": str(base), **dict(details or {})},
+            self.service_name,
+        )
+
+    def _xdotool_shortcut(self, shortcut: str) -> str:
+        return shortcut.replace("Control", "ctrl").replace("+", "+").lower()
+
+    def _command_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["DISPLAY"] = self.display
+        extra_env = self.adapter_config().get("env", {})
+        if isinstance(extra_env, Mapping):
+            env.update({str(key): str(value) for key, value in extra_env.items()})
+        return env
+
+    def _run_xdotool(self, args: list[str], check: bool = True, timeout: int | None = None):
+        return self._run_command(["xdotool", *args], check=check, timeout=timeout)
+
+    def _run_command(self, command: list[str], check: bool = True, timeout: int | None = None):
+        if shutil.which(command[0]) is None:
+            result = subprocess.CompletedProcess(command, 127, "", f"{command[0]} not found")
+        else:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.action_timeout_sec,
+                env=self._command_env(),
+            )
+        self.browser_log.append(
+            {
+                "ts": time.time(),
+                "type": "command",
+                "command": command,
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip()[:2000],
+                "stderr": result.stderr.strip()[:2000],
+            }
+        )
+        if check and result.returncode != 0:
+            raise RuntimeError(
+                f"Command failed ({result.returncode}): {command}\n"
+                f"stdout={result.stdout}\nstderr={result.stderr}"
+            )
+        return result
 
     def _timeout_ms(self, key: str, default_sec: float):
         return int(float(self.adapter_config().get(key, default_sec)) * 1000)
