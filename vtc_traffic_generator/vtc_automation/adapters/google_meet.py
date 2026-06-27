@@ -893,16 +893,50 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
         while time.time() < deadline:
             if self.browser_process and self.browser_process.poll() is not None:
                 raise RuntimeError(f"Chromium exited before a window appeared with code {self.browser_process.returncode}")
+            pid_window_id = self._window_id_for_browser_process()
+            if pid_window_id:
+                self.window_id = pid_window_id
+                self._activate_window()
+                return pid_window_id
             for args in self._window_searches():
                 result = self._run_xdotool(args, check=False, timeout=2)
                 if result.returncode == 0 and result.stdout.strip():
-                    window_id = result.stdout.strip().splitlines()[-1]
-                    self.window_id = window_id
-                    self._activate_window()
-                    return window_id
+                    for window_id in reversed(result.stdout.strip().splitlines()):
+                        if not self._is_valid_launch_window(window_id):
+                            continue
+                        self.window_id = window_id
+                        self._activate_window()
+                        return window_id
                 last_error = result.stderr or result.stdout
             time.sleep(0.5)
         raise RuntimeError(f"Timed out waiting for Google Meet Chromium window. Last output: {last_error}")
+
+    def _window_id_for_browser_process(self) -> str | None:
+        if not self.browser_process or not self.browser_process.pid:
+            return None
+        result = self._run_command(["wmctrl", "-lp"], check=False, timeout=2)
+        if result.returncode != 0:
+            return None
+        target_pid = str(self.browser_process.pid)
+        for line in reversed(result.stdout.splitlines()):
+            parts = line.split(None, 4)
+            if len(parts) < 5 or parts[2] != target_pid:
+                continue
+            window_id = parts[0]
+            if self._is_valid_launch_window(window_id, title=parts[4]):
+                return window_id
+        return None
+
+    def _is_valid_launch_window(self, window_id: str, title: str | None = None) -> bool:
+        title = title if title is not None else self._window_title_for_id(window_id)
+        if not title:
+            return False
+        normalized = title.lower()
+        blocked_markers = (
+            "vtc share window",
+            "vtc camera test",
+        )
+        return not any(marker in normalized for marker in blocked_markers)
 
     def _window_searches(self) -> list[list[str]]:
         configured = self.adapter_config().get("window_title_regex")
@@ -998,7 +1032,10 @@ class GoogleMeetAdapter(BrowserMeetingAdapter):
     def _window_title(self) -> str | None:
         if not self.window_id:
             return None
-        result = self._run_xdotool(["getwindowname", str(self.window_id)], check=False, timeout=2)
+        return self._window_title_for_id(self.window_id)
+
+    def _window_title_for_id(self, window_id: str) -> str | None:
+        result = self._run_xdotool(["getwindowname", str(window_id)], check=False, timeout=2)
         if result.returncode != 0:
             return None
         return result.stdout.strip()
