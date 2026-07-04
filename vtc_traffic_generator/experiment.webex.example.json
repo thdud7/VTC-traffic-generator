@@ -1,0 +1,106 @@
+{
+  "service": "webex",
+  "vtc_url": "https://example.webex.com/meet/YOUR_ROOM_OR_MEETING_ID",
+  "duration": 3,
+  "videoconference": true,
+  "branch": "webex",
+  "run_id": "example-webex-001",
+  "repo": {
+    "dir": "/home/ubuntu/video-teleconference",
+    "url": "git@github.com:YOUR_ORG/video-teleconference.git",
+    "version": "webex",
+    "python": "python3"
+  },
+  "ansible": {
+    "user": "ubuntu",
+    "ssh_private_key_file": "~/.ssh/YOUR_EC2_KEY.pem"
+  },
+  "capture_upload": {
+    "s3_uri": "s3://vtc-traffic-data/captures",
+    "run_id": "example-webex-001",
+    "include_logs": true
+  },
+  "defaults": {
+    "audio_path": "/home/ubuntu/video-teleconference/VTC_AV/VTC_audio_tracks",
+    "voice_name": "male_1-en-US-Wavenet-I",
+    "video_path": "/home/ubuntu/video-teleconference/VTC_AV/270_resized",
+    "video_name": "man_1_270.mp4",
+    "screen_share_window": {
+      "enabled": false,
+      "title": "VTC Share Window",
+      "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
+    },
+    "packet_capture": {
+      "enabled": true,
+      "interface": "any",
+      "output_dir": "/home/ubuntu/vtc_data/captures/local",
+      "capture_filter": "not port 5900",
+      "display_filter": null,
+      "dumpcap_path": "dumpcap",
+      "tshark_path": "tshark"
+    },
+    "adapter_config": {
+      "browser_channel": "chrome",
+      "ignore_certificate_errors": true,
+      "initial_microphone_enabled": true,
+      "initial_camera_enabled": true,
+      "verify_joined": true,
+      "prejoin_timeout_ms": 30000,
+      "joined_timeout_ms": 45000,
+      "optional_selector_timeout_ms": 1000,
+      "selectors": {
+        "browser_join": [
+          "button:has-text(\"Join from your browser\")",
+          "a:has-text(\"Join from your browser\")"
+        ],
+        "guest_join": [
+          "button:has-text(\"Join as a guest\")",
+          "button:has-text(\"Continue as guest\")"
+        ],
+        "name_input": [
+          "input[name=\"displayName\"]",
+          "input[aria-label*=\"name\" i]",
+          "input[placeholder*=\"name\" i]"
+        ],
+        "email_input": [
+          "input[type=\"email\"]",
+          "input[name=\"email\"]"
+        ],
+        "password_input": [
+          "input[type=\"password\"]",
+          "input[name=\"password\"]"
+        ],
+        "join_button": [
+          "button:has-text(\"Join meeting\")",
+          "button:has-text(\"Join\")"
+        ],
+        "joined": [
+          "[aria-label*=\"Leave meeting\"]",
+          "button:has-text(\"Leave\")"
+        ]
+      },
+      "fallback": {
+        "enabled": false,
+        "mic_key": "ctrl+shift+m",
+        "camera_key": "ctrl+shift+v",
+        "screen_share_key": "ctrl+shift+s",
+        "leave_key": "alt+q",
+        "coordinates": {
+          "mic": null,
+          "camera": null,
+          "screen_share": null,
+          "leave": null
+        }
+      }
+    }
+  },
+  "clients": [
+    {
+      "name": "bot1",
+      "host": "10.0.1.21",
+      "c2_port": 8001,
+      "display": ":99",
+      "video_device": "/dev/video5"
+    }
+  ]
+}

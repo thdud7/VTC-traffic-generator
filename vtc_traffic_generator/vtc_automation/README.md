@@ -99,6 +99,47 @@ If a self-hosted Jitsi deployment has custom labels or a different prejoin
 screen, override `name_selectors`, `join_button_selectors`, or
 `joined_selectors` in `adapter_config`.
 
+## Webex Adapter
+
+The `webex` adapter uses the same controller/client XML-RPC, packet capture,
+event logging, media playback, and ICSI behavior paths as the other services.
+Only the meeting UI automation lives in `vtc_automation/adapters/webex.py`.
+
+The adapter targets Webex in Chrome/Chromium through Playwright:
+
+1. Open `vtc_url`.
+2. Prefer "Join from your browser" and guest join controls when present.
+3. Fill `adapter_config.display_name` or `bot_name`.
+4. Optionally fill `adapter_config.email` and
+   `adapter_config.meeting_password`.
+5. Set initial microphone and camera state.
+6. Click Join and wait for an in-meeting control.
+7. Support runtime microphone, camera, screen-share, and leave actions through
+   the existing adapter action methods.
+
+Selectors are grouped under `adapter_config.selectors` so Webex UI changes can
+be handled without touching common framework code. If DOM automation is not
+stable for a specific deployment, enable `adapter_config.fallback.enabled` and
+provide xdotool keys or coordinates for only the failing controls.
+
+Example experiment config:
+
+```bash
+python3 vtc_traffic_generator/run_experiment.py \
+  vtc_traffic_generator/experiment.webex.example.json \
+  --output-dir generated/webex-smoke
+```
+
+Smoke-test the adapter without the controller:
+
+```bash
+PYTHONPATH=vtc_traffic_generator python3 -m vtc_automation.test_adapter \
+  --service webex \
+  --vtc-url "https://example.webex.com/meet/YOUR_ROOM_OR_MEETING_ID" \
+  --display-name bot1 \
+  --leave-after-sec 10
+```
+
 ## Jitsi Electron Adapter
 
 The `jitsi_electron` adapter targets Ubuntu Server VM + Xvfb + openbox +
