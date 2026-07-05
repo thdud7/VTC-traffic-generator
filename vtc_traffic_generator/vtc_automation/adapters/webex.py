@@ -153,6 +153,16 @@ class WebexAdapter(BrowserMeetingAdapter):
             'button:has-text("Mute")',
             '[data-test*="mute"]',
         ],
+        "mic_on_indicator": [
+            'role=button[name=/Mute/i]',
+            'role=button[name=/Mute microphone/i]',
+            '[aria-label*="Mute"]',
+        ],
+        "mic_off_indicator": [
+            'role=button[name=/Unmute/i]',
+            'role=button[name=/Unmute microphone/i]',
+            '[aria-label*="Unmute"]',
+        ],
         "camera_enable": [
             '[aria-label*="Start video"]',
             '[aria-label*="Turn on camera"]',
@@ -165,6 +175,16 @@ class WebexAdapter(BrowserMeetingAdapter):
             'button:has-text("Stop video")',
             '[data-test*="stop-video"]',
         ],
+        "camera_on_indicator": [
+            'role=button[name=/Stop video/i]',
+            'role=button[name=/Turn off camera/i]',
+            '[aria-label*="Stop video"]',
+        ],
+        "camera_off_indicator": [
+            'role=button[name=/Start video/i]',
+            'role=button[name=/Turn on camera/i]',
+            '[aria-label*="Start video"]',
+        ],
         "share_start": [
             '[aria-label*="Share content"]',
             '[aria-label*="Share screen"]',
@@ -175,6 +195,20 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[aria-label*="Stop sharing"]',
             'button:has-text("Stop sharing")',
             '[data-test*="stop-share"]',
+        ],
+        "screen_share_button": [
+            'role=button[name=/Share content/i]',
+            'role=button[name=/Share screen/i]',
+            '[aria-label*="Share"]',
+        ],
+        "screen_share_on_indicator": [
+            'role=button[name=/Stop sharing/i]',
+            'text=/You are sharing/i',
+            '[aria-label*="Stop sharing"]',
+        ],
+        "screen_share_stop": [
+            'role=button[name=/Stop sharing/i]',
+            '[aria-label*="Stop sharing"]',
         ],
         "share_target": [
             'button:has-text("Screen")',
@@ -292,6 +326,13 @@ class WebexAdapter(BrowserMeetingAdapter):
             "name_input": "display_name",
             "joined_indicator": "joined",
             "joined": "joined_indicator",
+            "mic_on_indicator": "mic_disable",
+            "mic_off_indicator": "mic_enable",
+            "camera_on_indicator": "camera_disable",
+            "camera_off_indicator": "camera_enable",
+            "screen_share_button": "share_start",
+            "screen_share_on_indicator": "share_stop",
+            "screen_share_stop": "share_stop",
         }
         alias = aliases.get(name)
         if isinstance(configured, Mapping) and alias in configured:
@@ -635,77 +676,196 @@ class WebexAdapter(BrowserMeetingAdapter):
             return False
 
     async def mute_microphone(self):
-        return await self._set_button_state(
-            state_attr="mic_enabled",
+        return await self._set_binary_control_state(
+            name="microphone",
             desired=False,
-            selector_group="mic_disable",
-            fallback_name="mic",
-            event_name="webex_mic_muted",
+            on_group="mic_on_indicator",
+            off_group="mic_off_indicator",
+            cached_attr="mic_enabled",
         )
 
     async def unmute_microphone(self):
-        return await self._set_button_state(
-            state_attr="mic_enabled",
+        return await self._set_binary_control_state(
+            name="microphone",
             desired=True,
-            selector_group="mic_enable",
-            fallback_name="mic",
-            event_name="webex_mic_unmuted",
+            on_group="mic_on_indicator",
+            off_group="mic_off_indicator",
+            cached_attr="mic_enabled",
         )
 
     async def start_camera(self):
-        return await self._set_button_state(
-            state_attr="camera_enabled",
+        return await self._set_binary_control_state(
+            name="camera",
             desired=True,
-            selector_group="camera_enable",
-            fallback_name="camera",
-            event_name="webex_camera_started",
+            on_group="camera_on_indicator",
+            off_group="camera_off_indicator",
+            cached_attr="camera_enabled",
         )
 
     async def stop_camera(self):
-        return await self._set_button_state(
-            state_attr="camera_enabled",
+        return await self._set_binary_control_state(
+            name="camera",
             desired=False,
-            selector_group="camera_disable",
-            fallback_name="camera",
-            event_name="webex_camera_stopped",
+            on_group="camera_on_indicator",
+            off_group="camera_off_indicator",
+            cached_attr="camera_enabled",
         )
 
     async def start_screen_share(self):
-        clicked = await self._click_optional("share_start", "webex_screen_share_start_clicked")
-        fallback_success = False
-        if clicked:
-            await self._click_optional("share_target", "webex_screen_share_target_clicked")
-            await self._click_optional("share_confirm", "webex_screen_share_confirmed")
-        else:
-            fallback_success = await self._fallback_action("screen_share")
-        success = bool(clicked or fallback_success)
-        if success:
+        timeout_ms = self.timeout_ms("control_state_timeout_ms", 500)
+        if await self._visible_optional("screen_share_on_indicator", timeout_ms=timeout_ms):
             self.screen_sharing = True
-        return success
-
-    async def stop_screen_share(self):
-        clicked = await self._click_optional("share_stop", "webex_screen_share_stop_clicked")
-        fallback_success = False
-        if not clicked:
-            fallback_success = await self._fallback_action("screen_share")
-        success = bool(clicked or fallback_success)
-        if success:
-            self.screen_sharing = False
-        return success
-
-    async def _set_button_state(self, state_attr, desired, selector_group, fallback_name, event_name):
-        if getattr(self, state_attr) is desired and self.adapter_config().get("use_cached_control_state", False):
-            emit_event(self.config, event_name, {"success": True, "cached": True}, self.service_name)
+            emit_event(self.config, "webex_screen_share_started", {"success": True, "already_active": True}, self.service_name)
             return True
 
-        clicked = await self._click_optional(selector_group, event_name)
+        clicked = await self._click_first_visible("screen_share_button", timeout_ms=timeout_ms)
         fallback_success = False
-        if not clicked:
-            fallback_success = await self._fallback_action(fallback_name)
-        success = bool(clicked or fallback_success)
-        if success:
-            setattr(self, state_attr, desired)
-        return success
+        if clicked:
+            emit_event(self.config, "webex_screen_share_start_clicked", {"selector": clicked, "success": True}, self.service_name)
+            await self._click_optional("share_target", "webex_screen_share_target_clicked")
+            await self._click_optional("share_confirm", "webex_screen_share_confirmed")
+        elif self._control_fallback_enabled():
+            fallback_success = await self._fallback_action("screen_share")
+
+        if clicked or fallback_success:
+            await asyncio.sleep(float(self.adapter_config().get("control_state_settle_sec", 0.5)))
+            if await self._visible_optional("screen_share_on_indicator", timeout_ms=timeout_ms):
+                self.screen_sharing = True
+                emit_event(self.config, "webex_screen_share_started", {"success": True, "selector": clicked, "fallback": fallback_success}, self.service_name)
+                return True
+
+        return await self._handle_unverified_control_state(
+            name="screen_share_start",
+            desired=True,
+            cached_attr="screen_sharing",
+            stage="webex_screen_share_start_unverified",
+            extra={"clicked": clicked, "fallback_success": fallback_success},
+        )
+
+    async def stop_screen_share(self):
+        timeout_ms = self.timeout_ms("control_state_timeout_ms", 500)
+        if not await self._visible_optional("screen_share_on_indicator", timeout_ms=timeout_ms):
+            self.screen_sharing = False
+            emit_event(self.config, "webex_screen_share_stopped", {"success": True, "already_inactive": True}, self.service_name)
+            return True
+
+        clicked = await self._click_first_visible("screen_share_stop", timeout_ms=timeout_ms)
+        fallback_success = False
+        if clicked:
+            emit_event(self.config, "webex_screen_share_stop_clicked", {"selector": clicked, "success": True}, self.service_name)
+        elif self._control_fallback_enabled():
+            fallback_success = await self._fallback_action("screen_share")
+
+        if clicked or fallback_success:
+            await asyncio.sleep(float(self.adapter_config().get("control_state_settle_sec", 0.5)))
+            if not await self._visible_optional("screen_share_on_indicator", timeout_ms=timeout_ms):
+                self.screen_sharing = False
+                emit_event(self.config, "webex_screen_share_stopped", {"success": True, "selector": clicked, "fallback": fallback_success}, self.service_name)
+                return True
+
+        return await self._handle_unverified_control_state(
+            name="screen_share_stop",
+            desired=False,
+            cached_attr="screen_sharing",
+            stage="webex_screen_share_stop_unverified",
+            extra={"clicked": clicked, "fallback_success": fallback_success},
+        )
+
+    async def _set_button_state(self, state_attr, desired, selector_group, fallback_name, event_name):
+        on_group = {
+            "mic_enabled": "mic_on_indicator",
+            "camera_enabled": "camera_on_indicator",
+        }.get(state_attr, selector_group)
+        off_group = {
+            "mic_enabled": "mic_off_indicator",
+            "camera_enabled": "camera_off_indicator",
+        }.get(state_attr, selector_group)
+        name = "microphone" if state_attr == "mic_enabled" else "camera" if state_attr == "camera_enabled" else state_attr
+        return await self._set_binary_control_state(name, desired, on_group, off_group, state_attr)
+
+    async def _detect_binary_state(self, on_group, off_group, timeout_ms=500):
+        on_candidates = await self._visible_candidates(on_group, timeout_ms=timeout_ms)
+        off_candidates = await self._visible_candidates(off_group, timeout_ms=timeout_ms)
+        if on_candidates and not off_candidates:
+            return True
+        if off_candidates and not on_candidates:
+            return False
+        if not on_candidates and not off_candidates:
+            return None
+
+        combined = [(True, item) for item in on_candidates] + [(False, item) for item in off_candidates]
+        enabled = [item for item in combined if item[1].get("enabled", True)] or combined
+        enabled.sort(key=lambda item: self._selector_specificity_score(item[1]["selector"]), reverse=True)
+        chosen_state, chosen = enabled[0]
+        self._warn_control_event(
+            "webex_control_state_ambiguous",
+            {
+                "on_group": on_group,
+                "off_group": off_group,
+                "chosen_state": chosen_state,
+                "chosen_selector": chosen.get("selector"),
+                "on_selectors": [item["selector"] for item in on_candidates],
+                "off_selectors": [item["selector"] for item in off_candidates],
+            },
+        )
+        return chosen_state
+
+    async def _set_binary_control_state(self, name, desired, on_group, off_group, cached_attr, timeout_ms=500):
+        timeout_ms = self.timeout_ms("control_state_timeout_ms", timeout_ms)
+        current = await self._detect_binary_state(on_group, off_group, timeout_ms=timeout_ms)
+        event_prefix = self._control_event_prefix(name)
+        emit_event(
+            self.config,
+            f"webex_{event_prefix}_state_detected",
+            {"state": current, "desired": desired, "cached_attr": cached_attr},
+            self.service_name,
+        )
+        if current is desired:
+            setattr(self, cached_attr, desired)
+            return True
+
+        action_group = off_group if desired else on_group
+        clicked = await self._click_first_visible(action_group, timeout_ms=timeout_ms)
+        fallback_success = False
+        if clicked:
+            emit_event(
+                self.config,
+                f"webex_{event_prefix}_state_action_clicked",
+                {"selector": clicked, "desired": desired, "current": current},
+                self.service_name,
+            )
+        elif self._control_fallback_enabled():
+            fallback_success = await self._fallback_action(event_prefix)
+
+        if clicked or fallback_success:
+            await asyncio.sleep(float(self.adapter_config().get("control_state_settle_sec", 0.5)))
+            verified = await self._detect_binary_state(on_group, off_group, timeout_ms=timeout_ms)
+            if verified is desired:
+                setattr(self, cached_attr, desired)
+                emit_event(
+                    self.config,
+                    f"webex_{event_prefix}_state_changed",
+                    {"state": desired, "selector": clicked, "fallback": fallback_success},
+                    self.service_name,
+                )
+                return True
+        else:
+            verified = current
+
+        return await self._handle_unverified_control_state(
+            name=name,
+            desired=desired,
+            cached_attr=cached_attr,
+            stage=f"webex_{name}_state_unverified",
+            extra={
+                "current": current,
+                "verified": verified,
+                "clicked": clicked,
+                "fallback_success": fallback_success,
+                "on_group": on_group,
+                "off_group": off_group,
+            },
+        )
 
     async def _click_required(self, selector_group, event_name, timeout):
         selector = await self.click_first_visible(self.page, self.selectors(selector_group), timeout=timeout)
@@ -718,6 +878,80 @@ class WebexAdapter(BrowserMeetingAdapter):
         if selector:
             emit_event(self.config, event_name, {"selector": selector, "success": True}, self.service_name)
         return selector
+
+    async def _visible_candidates(self, selector_group, timeout_ms=None):
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        candidates = []
+        if self.page is None:
+            return candidates
+        for selector in self.selectors(selector_group):
+            locator = self.page.locator(selector).first
+            try:
+                await locator.wait_for(state="visible", timeout=timeout)
+                enabled = True
+                if hasattr(locator, "is_enabled"):
+                    try:
+                        enabled = bool(await self._maybe_await(locator.is_enabled(timeout=timeout)))
+                    except TypeError:
+                        enabled = bool(await self._maybe_await(locator.is_enabled()))
+                candidates.append({"selector": selector, "enabled": enabled})
+            except PlaywrightTimeoutError:
+                continue
+            except Exception:
+                continue
+        return candidates
+
+    def _selector_specificity_score(self, selector):
+        text = str(selector)
+        score = len(text)
+        for token in ("microphone", "camera", "video", "sharing", "content", "screen"):
+            if token in text.lower():
+                score += 20
+        for token in ("Unmute", "Stop video", "Start video", "Stop sharing", "Share content", "Share screen"):
+            if token in text:
+                score += 30
+        if text in {"[aria-label*=\"Share\"]", 'button:has-text("Share")'}:
+            score -= 50
+        return score
+
+    def _control_event_prefix(self, name):
+        return "mic" if name == "microphone" else str(name)
+
+    def _control_fallback_enabled(self):
+        fallback = self.adapter_config().get("fallback", {})
+        return isinstance(fallback, Mapping) and bool(
+            fallback.get("enabled", False)
+            or self.adapter_config().get("allow_unverified_fallback", False)
+            or fallback.get("allow_unverified_fallback", False)
+        )
+
+    def _trust_unverified_control_state(self):
+        return bool(self.adapter_config().get("trust_click_state_after_unverified_action", False))
+
+    def _warn_control_event(self, event_name, details):
+        payload = {**dict(details or {}), "warning": True}
+        self._append_browser_log(event_name, json.dumps(payload, sort_keys=True, default=str))
+        emit_event(self.config, event_name, payload, self.service_name)
+
+    async def _handle_unverified_control_state(self, name, desired, cached_attr, stage, extra=None):
+        details = {
+            "control": name,
+            "desired": desired,
+            "cached_attr": cached_attr,
+            **dict(extra or {}),
+        }
+        await self._maybe_await(self.collect_diagnostics(stage=stage, extra=details))
+        self._warn_control_event("webex_control_state_unverified", details)
+        if self._trust_unverified_control_state():
+            setattr(self, cached_attr, desired)
+            self._warn_control_event(
+                "webex_control_state_trusted_after_unverified_action",
+                {**details, "trusted_cached_state": desired},
+            )
+            return True
+        raise RuntimeError(
+            f"Webex {name} state could not be verified after action; cached state was not updated."
+        )
 
     async def _fill_optional(self, selector_group, value, event_name):
         if value in (None, ""):
@@ -818,7 +1052,11 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _fallback_action(self, action_name):
         fallback = self.adapter_config().get("fallback", {})
-        if not isinstance(fallback, Mapping) or not fallback.get("enabled", False):
+        if not isinstance(fallback, Mapping) or not (
+            fallback.get("enabled", False)
+            or self.adapter_config().get("allow_unverified_fallback", False)
+            or fallback.get("allow_unverified_fallback", False)
+        ):
             return False
 
         key = fallback.get(f"{action_name}_key")
@@ -913,6 +1151,10 @@ class WebexAdapter(BrowserMeetingAdapter):
             "prejoin_timeout_ms",
             "joined_timeout_ms",
             "optional_selector_timeout_ms",
+            "control_state_timeout_ms",
+            "control_state_settle_sec",
+            "trust_click_state_after_unverified_action",
+            "allow_unverified_fallback",
             "skip_sanity_checks",
             "strict_sanity_checks",
             "diagnostic_dir",

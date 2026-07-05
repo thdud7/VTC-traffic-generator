@@ -224,6 +224,90 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(callbacks, [("joined", ["#join"]), ("media", ["#join"])])
 
+    def test_unmute_microphone_clicks_off_indicator_and_updates_after_on_verification(self):
+        adapter = _control_test_adapter({"mic": False})
+
+        self.assertTrue(asyncio.run(adapter.unmute_microphone()))
+
+        self.assertEqual(adapter.page.clicks, ["#mic-off"])
+        self.assertTrue(adapter.mic_enabled)
+
+    def test_mute_microphone_clicks_on_indicator_and_updates_after_off_verification(self):
+        adapter = _control_test_adapter({"mic": True})
+
+        self.assertTrue(asyncio.run(adapter.mute_microphone()))
+
+        self.assertEqual(adapter.page.clicks, ["#mic-on"])
+        self.assertFalse(adapter.mic_enabled)
+
+    def test_microphone_no_click_when_already_desired_state(self):
+        adapter = _control_test_adapter({"mic": True})
+
+        self.assertTrue(asyncio.run(adapter.unmute_microphone()))
+
+        self.assertEqual(adapter.page.clicks, [])
+        self.assertTrue(adapter.mic_enabled)
+
+    def test_start_camera_clicks_off_indicator_and_updates_after_on_verification(self):
+        adapter = _control_test_adapter({"camera": False})
+
+        self.assertTrue(asyncio.run(adapter.start_camera()))
+
+        self.assertEqual(adapter.page.clicks, ["#camera-off"])
+        self.assertTrue(adapter.camera_enabled)
+
+    def test_stop_camera_clicks_on_indicator_and_updates_after_off_verification(self):
+        adapter = _control_test_adapter({"camera": True})
+
+        self.assertTrue(asyncio.run(adapter.stop_camera()))
+
+        self.assertEqual(adapter.page.clicks, ["#camera-on"])
+        self.assertFalse(adapter.camera_enabled)
+
+    def test_cached_state_not_updated_when_post_click_verification_fails_without_trust(self):
+        adapter = _control_test_adapter({"mic": False}, transitions_enabled=False)
+        adapter.mic_enabled = False
+
+        with self.assertRaisesRegex(RuntimeError, "microphone state could not be verified"):
+            asyncio.run(adapter.unmute_microphone())
+
+        self.assertEqual(adapter.page.clicks, ["#mic-off"])
+        self.assertFalse(adapter.mic_enabled)
+        self.assertEqual(adapter.diagnostic_stages, ["webex_microphone_state_unverified"])
+
+    def test_cached_state_can_be_updated_with_warning_when_unverified_trust_enabled(self):
+        events = []
+        adapter = _control_test_adapter(
+            {"mic": False},
+            transitions_enabled=False,
+            extra_adapter_config={"trust_click_state_after_unverified_action": True},
+        )
+        adapter.mic_enabled = False
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.emit_event") as emit:
+            emit.side_effect = lambda config, event, details, service=None: events.append(event)
+            self.assertTrue(asyncio.run(adapter.unmute_microphone()))
+
+        self.assertTrue(adapter.mic_enabled)
+        self.assertIn("webex_control_state_unverified", events)
+        self.assertIn("webex_control_state_trusted_after_unverified_action", events)
+
+    def test_start_screen_share_clicks_button_and_verifies_before_cache_update(self):
+        adapter = _control_test_adapter({"screen": False})
+
+        self.assertTrue(asyncio.run(adapter.start_screen_share()))
+
+        self.assertEqual(adapter.page.clicks, ["#share-button"])
+        self.assertTrue(adapter.screen_sharing)
+
+    def test_stop_screen_share_clicks_stop_and_verifies_inactive_before_cache_update(self):
+        adapter = _control_test_adapter({"screen": True})
+
+        self.assertTrue(asyncio.run(adapter.stop_screen_share()))
+
+        self.assertEqual(adapter.page.clicks, ["#share-stop"])
+        self.assertFalse(adapter.screen_sharing)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -280,6 +364,100 @@ class FakeWebexPage:
 
     def locator(self, selector):
         return FakeWebexLocator(self, selector)
+
+
+class FakeControlLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, state="visible", timeout=0):
+        if self.page.is_visible(self.selector):
+            return None
+        raise PlaywrightTimeoutError(f"{self.selector} is not visible")
+
+    async def click(self):
+        self.page.click(self.selector)
+
+    async def is_enabled(self, timeout=0):
+        return True
+
+
+class FakeControlPage:
+    def __init__(self, states, transitions_enabled=True):
+        self.states = dict(states)
+        self.transitions_enabled = transitions_enabled
+        self.clicks = []
+
+    def locator(self, selector):
+        return FakeControlLocator(self, selector)
+
+    def is_visible(self, selector):
+        if selector == "#mic-on":
+            return self.states.get("mic") is True
+        if selector == "#mic-off":
+            return self.states.get("mic") is False
+        if selector == "#camera-on":
+            return self.states.get("camera") is True
+        if selector == "#camera-off":
+            return self.states.get("camera") is False
+        if selector == "#share-button":
+            return self.states.get("screen") is not True
+        if selector in {"#share-on", "#share-stop"}:
+            return self.states.get("screen") is True
+        return False
+
+    def click(self, selector):
+        self.clicks.append(selector)
+        if not self.transitions_enabled:
+            return
+        if selector == "#mic-on":
+            self.states["mic"] = False
+        elif selector == "#mic-off":
+            self.states["mic"] = True
+        elif selector == "#camera-on":
+            self.states["camera"] = False
+        elif selector == "#camera-off":
+            self.states["camera"] = True
+        elif selector == "#share-button":
+            self.states["screen"] = True
+        elif selector == "#share-stop":
+            self.states["screen"] = False
+
+
+def _control_test_adapter(states, transitions_enabled=True, extra_adapter_config=None):
+    adapter_config = {
+        "control_state_timeout_ms": 1,
+        "control_state_settle_sec": 0,
+        "optional_selector_timeout_ms": 1,
+        "selectors": {
+            "mic_on_indicator": "#mic-on",
+            "mic_off_indicator": "#mic-off",
+            "camera_on_indicator": "#camera-on",
+            "camera_off_indicator": "#camera-off",
+            "screen_share_button": "#share-button",
+            "screen_share_on_indicator": "#share-on",
+            "screen_share_stop": "#share-stop",
+        },
+    }
+    adapter_config.update(extra_adapter_config or {})
+    adapter = WebexAdapter({"adapter_config": adapter_config})
+    adapter.page = FakeControlPage(states, transitions_enabled=transitions_enabled)
+    adapter.mic_enabled = bool(states.get("mic", adapter.mic_enabled))
+    adapter.camera_enabled = bool(states.get("camera", adapter.camera_enabled))
+    adapter.screen_sharing = bool(states.get("screen", adapter.screen_sharing))
+    adapter.diagnostic_stages = []
+
+    async def collect_diagnostics(stage=None, extra=None):
+        adapter.diagnostic_stages.append(stage)
+        return {"stage": stage, "extra": extra}
+
+    adapter.collect_diagnostics = collect_diagnostics
+    return adapter
 
 
 def _join_test_adapter(join_result, extra_config=None):
