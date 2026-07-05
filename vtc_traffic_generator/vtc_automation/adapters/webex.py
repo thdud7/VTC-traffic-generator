@@ -22,17 +22,48 @@ class WebexAdapter(BrowserMeetingAdapter):
     service_name = "webex"
 
     DEFAULT_SELECTORS = {
+        "cookie_accept": [
+            'button:has-text("Accept all")',
+            'button:has-text("Accept All")',
+            'button:has-text("Accept")',
+            'button:has-text("I accept")',
+            '[data-test*="cookie"] button:has-text("Accept")',
+        ],
+        "join_from_browser": [
+            'button:has-text("Join from your browser")',
+            'a:has-text("Join from your browser")',
+            '[data-test="join-from-browser"]',
+            '[aria-label*="Join from your browser"]',
+        ],
         "browser_join": [
             'button:has-text("Join from your browser")',
             'a:has-text("Join from your browser")',
             '[data-test="join-from-browser"]',
             '[aria-label*="Join from your browser"]',
         ],
+        "continue_in_browser": [
+            'button:has-text("Continue in browser")',
+            'button:has-text("Continue in this browser")',
+            'a:has-text("Continue in browser")',
+            '[aria-label*="Continue in browser"]',
+        ],
+        "join_as_guest": [
+            'button:has-text("Join as a guest")',
+            'button:has-text("Continue as guest")',
+            'a:has-text("Join as a guest")',
+            '[aria-label*="guest"]',
+        ],
         "guest_join": [
             'button:has-text("Join as a guest")',
             'button:has-text("Continue as guest")',
             'a:has-text("Join as a guest")',
             '[aria-label*="guest"]',
+        ],
+        "display_name": [
+            'input[name="displayName"]',
+            'input[name="name"]',
+            'input[aria-label*="name" i]',
+            'input[placeholder*="name" i]',
         ],
         "name_input": [
             'input[name="displayName"]',
@@ -52,19 +83,42 @@ class WebexAdapter(BrowserMeetingAdapter):
             'input[aria-label*="password" i]',
             'input[placeholder*="password" i]',
         ],
+        "continue_button": [
+            'button:has-text("Continue")',
+            'button:has-text("Continue as guest")',
+            '[aria-label="Continue"]',
+            '[aria-label*="Continue"]',
+        ],
         "next_button": [
             'button:has-text("Next")',
-            'button:has-text("Continue")',
             '[aria-label="Next"]',
-            '[aria-label="Continue"]',
+            '[aria-label*="Next"]',
+        ],
+        "use_computer_audio": [
+            'button:has-text("Use computer audio")',
+            'button:has-text("Use computer for audio")',
+            '[aria-label*="Use computer audio"]',
+            '[aria-label*="Computer audio"]',
+        ],
+        "start_meeting_button": [
+            'button:has-text("Start meeting")',
+            'button:has-text("Start Meeting")',
+            '[aria-label*="Start meeting"]',
         ],
         "join_button": [
             'button:has-text("Join meeting")',
             'button:has-text("Join webinar")',
             'button:has-text("Join")',
-            'button:has-text("Start meeting")',
             '[aria-label*="Join meeting"]',
             '[aria-label="Join"]',
+        ],
+        "joined_indicator": [
+            '[aria-label*="Leave meeting"]',
+            '[aria-label*="Leave"]',
+            'button:has-text("Leave")',
+            '[data-test*="leave"]',
+            '[aria-label*="Mute"]',
+            '[aria-label*="Unmute"]',
         ],
         "joined": [
             '[aria-label*="Leave meeting"]',
@@ -73,6 +127,21 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[data-test*="leave"]',
             '[aria-label*="Mute"]',
             '[aria-label*="Unmute"]',
+        ],
+        "lobby_indicator": [
+            'text=/waiting for.*(host|organizer)/i',
+            'text=/host.*(let|admit).*you in/i',
+            'text=/you are in the lobby/i',
+            'text=/waiting room/i',
+            '[data-test*="lobby"]',
+        ],
+        "blocked_indicator": [
+            'text=/meeting has not started/i',
+            'text=/unable to join/i',
+            'text=/cannot join/i',
+            'text=/meeting is locked/i',
+            'text=/removed from the meeting/i',
+            '[data-test*="error"]',
         ],
         "mic_enable": [
             '[aria-label*="Unmute"]',
@@ -214,6 +283,20 @@ class WebexAdapter(BrowserMeetingAdapter):
         if isinstance(configured, Mapping) and name in configured:
             value = configured[name]
             return value if isinstance(value, list) else [value]
+        aliases = {
+            "join_from_browser": "browser_join",
+            "browser_join": "join_from_browser",
+            "join_as_guest": "guest_join",
+            "guest_join": "join_as_guest",
+            "display_name": "name_input",
+            "name_input": "display_name",
+            "joined_indicator": "joined",
+            "joined": "joined_indicator",
+        }
+        alias = aliases.get(name)
+        if isinstance(configured, Mapping) and alias in configured:
+            value = configured[alias]
+            return value if isinstance(value, list) else [value]
         return list(self.DEFAULT_SELECTORS.get(name, []))
 
     def timeout_ms(self, key, default):
@@ -259,18 +342,29 @@ class WebexAdapter(BrowserMeetingAdapter):
         return True
 
     async def connect_to_meeting(self, vtc_url: str, display_name: str):
-        await self.launch()
+        if self.page is None:
+            await self.launch()
         self._meeting_joined_notified = False
         self._media_ready_notified = False
-        await self.page.goto(vtc_url, wait_until="domcontentloaded")
+        emit_event(self.config, "webex_join_start", {"vtc_url": vtc_url}, self.service_name)
+        emit_event(self.config, "meeting_join_start", {"vtc_url": vtc_url}, self.service_name)
+
+        await self.page.goto(
+            vtc_url,
+            wait_until="domcontentloaded",
+            timeout=self.timeout_ms("navigation_timeout_ms", 45000),
+        )
         emit_event(self.config, "webex_page_opened", {"vtc_url": vtc_url, "title": await self.page.title()}, self.service_name)
 
-        await self._click_optional("browser_join", "webex_browser_join_clicked")
-        await self._click_optional("guest_join", "webex_guest_join_clicked")
-        await self._fill_optional("name_input", display_name, "webex_display_name_entered")
-        await self._fill_optional_configured("email_input", "email", "webex_email_entered")
-        await self._fill_optional_configured("password_input", "meeting_password", "webex_password_entered")
-        await self._click_optional("next_button", "webex_next_clicked")
+        page_load_wait_sec = float(self.adapter_config().get("page_load_wait_sec", 2))
+        if page_load_wait_sec > 0:
+            await asyncio.sleep(page_load_wait_sec)
+
+        await self._run_prejoin_transition_loop(display_name)
+
+        existing_result = await self._wait_for_join_result(0)
+        if existing_result["status"] in {"joined", "lobby", "blocked"}:
+            return await self._handle_join_result(vtc_url, existing_result)
 
         if bool(self.adapter_config().get("initial_microphone_enabled", True)):
             await self.unmute_microphone()
@@ -282,16 +376,98 @@ class WebexAdapter(BrowserMeetingAdapter):
         else:
             await self.stop_camera()
 
-        await self._click_required(
-            "join_button",
-            "webex_join_clicked",
-            timeout=self.timeout_ms("prejoin_timeout_ms", 30000),
+        join_selector = await self._click_first_visible(
+            "start_meeting_button",
+            required=False,
+            timeout_ms=self.timeout_ms("optional_selector_timeout_ms", 1000),
         )
-        if self.adapter_config().get("verify_joined", True):
-            await self._wait_required("joined", timeout=self.timeout_ms("joined_timeout_ms", 45000))
+        if not join_selector:
+            join_selector = await self._click_first_visible(
+                "join_button",
+                required=True,
+                timeout_ms=self.timeout_ms("prejoin_timeout_ms", 30000),
+            )
+        emit_event(self.config, "webex_join_clicked", {"selector": join_selector, "success": True}, self.service_name)
 
-        self._notify_meeting_joined(vtc_url)
-        self._notify_media_ready(vtc_url)
+        result = await self._wait_for_join_result(
+            float(self.adapter_config().get("join_result_timeout_sec", self.timeout_ms("joined_timeout_ms", 45000) / 1000))
+        )
+        return await self._handle_join_result(vtc_url, result)
+
+    async def _handle_join_result(self, vtc_url, result):
+        emit_event(self.config, "webex_join_result", result, self.service_name)
+
+        if result["status"] == "joined":
+            if hasattr(self, "joined"):
+                self.joined = True
+            if hasattr(self, "in_meeting"):
+                self.in_meeting = True
+            emit_event(self.config, "webex_joined_meeting", {"vtc_url": vtc_url, "selector": result.get("selector")}, self.service_name)
+            self._notify_meeting_joined(vtc_url)
+            self._notify_media_ready(vtc_url)
+            return True
+
+        if result["status"] == "lobby":
+            diagnostics = await self._maybe_await(
+                self.collect_diagnostics(stage="lobby", extra={"join_result": result})
+            )
+            if self.adapter_config().get("accept_lobby_as_joined") is True:
+                self._notify_meeting_joined(vtc_url)
+                if self.adapter_config().get("allow_lobby_media_ready") is True:
+                    self._notify_media_ready(vtc_url)
+                return {"status": "lobby", "diagnostics": diagnostics}
+            raise RuntimeError(
+                f"Webex join stopped in lobby/waiting screen. Visible text: {result.get('visible_text', '')}"
+            )
+
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage=f"join_{result['status']}", extra={"join_result": result})
+        )
+        raise RuntimeError(
+            f"Webex join failed with status {result['status']}. "
+            f"Visible text: {result.get('visible_text', '')}. Diagnostics: {diagnostics}"
+        )
+
+    async def _run_prejoin_transition_loop(self, display_name):
+        deadline = asyncio.get_running_loop().time() + (
+            self.timeout_ms("prejoin_timeout_ms", 30000) / 1000
+        )
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000)
+        email = self.adapter_config().get("email")
+        password = self.adapter_config().get("password") or self.adapter_config().get("meeting_password")
+
+        while asyncio.get_running_loop().time() < deadline:
+            if (
+                await self._visible_optional("joined_indicator", timeout_ms=250)
+                or await self._visible_optional("lobby_indicator", timeout_ms=250)
+                or await self._visible_optional("blocked_indicator", timeout_ms=250)
+            ):
+                return True
+
+            progressed = False
+            progressed = bool(await self._click_first_visible("cookie_accept", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("join_from_browser", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("continue_in_browser", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("join_as_guest", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_first_visible("display_name", display_name, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_first_visible("email_input", email, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_first_visible("password_input", password, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("continue_button", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("next_button", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._click_first_visible("use_computer_audio", timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_first_visible("display_name", display_name, timeout_ms=timeout)) or progressed
+
+            if (
+                await self._visible_optional("start_meeting_button", timeout_ms=250)
+                or await self._visible_optional("join_button", timeout_ms=250)
+                or await self._visible_optional("joined_indicator", timeout_ms=250)
+                or await self._visible_optional("lobby_indicator", timeout_ms=250)
+                or await self._visible_optional("blocked_indicator", timeout_ms=250)
+            ):
+                return True
+
+            await asyncio.sleep(0.2 if progressed else 0.5)
+
         return True
 
     async def leave(self):
@@ -565,6 +741,80 @@ class WebexAdapter(BrowserMeetingAdapter):
         selector = await self.wait_for_any_visible(self.page, self.selectors(selector_group), timeout=timeout)
         emit_event(self.config, "webex_join_verified", {"selector": selector, "success": True}, self.service_name)
         return selector
+
+    async def _visible_optional(self, selector_group, timeout_ms=None):
+        return await self._first_visible_selector(selector_group, timeout_ms=timeout_ms) is not None
+
+    async def _first_visible_selector(self, selector_group, timeout_ms=None):
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        for selector in self.selectors(selector_group):
+            locator = self.page.locator(selector).first
+            try:
+                await locator.wait_for(state="visible", timeout=timeout)
+                return selector
+            except PlaywrightTimeoutError:
+                continue
+        return None
+
+    async def _click_first_visible(self, selector_group, required=False, timeout_ms=None):
+        selector = await self._first_visible_selector(selector_group, timeout_ms=timeout_ms)
+        if not selector:
+            if required:
+                raise RuntimeError(f"No visible selector matched: {self.selectors(selector_group)}")
+            return None
+        await self.page.locator(selector).first.click()
+        return selector
+
+    async def _fill_first_visible(self, selector_group, value, timeout_ms=None):
+        if value in (None, ""):
+            return None
+        selector = await self._first_visible_selector(selector_group, timeout_ms=timeout_ms)
+        if not selector:
+            return None
+        await self.page.locator(selector).first.fill(str(value))
+        return selector
+
+    async def _visible_text_excerpt(self, max_chars=2000):
+        if self.page is None:
+            return ""
+        text = ""
+        for selector in ("body", "html"):
+            try:
+                locator = self.page.locator(selector).first
+                if hasattr(locator, "inner_text"):
+                    text = await self._maybe_await(locator.inner_text(timeout=1000))
+                elif hasattr(locator, "text_content"):
+                    text = await self._maybe_await(locator.text_content(timeout=1000))
+                if text:
+                    break
+            except Exception:
+                continue
+        text = " ".join(str(text or "").split())
+        return text[:max_chars]
+
+    async def _wait_for_join_result(self, timeout_sec):
+        deadline = asyncio.get_running_loop().time() + max(0, float(timeout_sec))
+        poll_timeout_ms = self.timeout_ms("join_result_poll_timeout_ms", 500)
+        while asyncio.get_running_loop().time() <= deadline:
+            for status, group in (
+                ("joined", "joined_indicator"),
+                ("lobby", "lobby_indicator"),
+                ("blocked", "blocked_indicator"),
+            ):
+                selector = await self._first_visible_selector(group, timeout_ms=poll_timeout_ms)
+                if selector:
+                    return {
+                        "status": status,
+                        "selector": selector,
+                        "visible_text": await self._visible_text_excerpt(),
+                    }
+            await asyncio.sleep(float(self.adapter_config().get("join_result_poll_interval_sec", 0.25)))
+
+        return {
+            "status": "timeout",
+            "selector": None,
+            "visible_text": await self._visible_text_excerpt(),
+        }
 
     async def _fallback_action(self, action_name):
         fallback = self.adapter_config().get("fallback", {})

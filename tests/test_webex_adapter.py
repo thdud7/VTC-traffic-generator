@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
 from vtc_traffic_generator.run_experiment import generate
+from vtc_traffic_generator.vtc_automation.adapters.webex import PlaywrightTimeoutError
 from vtc_traffic_generator.vtc_automation.adapters.registry import get_adapter, list_supported_services
 from vtc_traffic_generator.vtc_automation.adapters.webex import WebexAdapter
 
@@ -168,6 +169,61 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertTrue(asyncio.run(adapter._fallback_action("mic")))
         self.assertEqual(calls, [(["xdotool", "key", "ctrl+shift+m"], "mic")])
 
+    def test_connect_to_meeting_lobby_does_not_call_media_ready_unless_allowed(self):
+        callbacks = []
+        adapter = _join_test_adapter(
+            "lobby",
+            {
+                "accept_lobby_as_joined": True,
+                "_meeting_joined_callback": lambda url: callbacks.append(("joined", url)),
+                "_media_ready_callback": lambda url: callbacks.append(("media", url)),
+            },
+        )
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "lobby")
+        self.assertIn(("joined", "https://example.webex.com/meet/test"), callbacks)
+        self.assertNotIn(("media", "https://example.webex.com/meet/test"), callbacks)
+
+        callbacks = []
+        adapter = _join_test_adapter(
+            "lobby",
+            {
+                "accept_lobby_as_joined": True,
+                "allow_lobby_media_ready": True,
+                "_meeting_joined_callback": lambda url: callbacks.append(("joined", url)),
+                "_media_ready_callback": lambda url: callbacks.append(("media", url)),
+            },
+        )
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertIn(("joined", "https://example.webex.com/meet/test"), callbacks)
+        self.assertIn(("media", "https://example.webex.com/meet/test"), callbacks)
+
+    def test_connect_to_meeting_blocked_collects_diagnostics_and_raises(self):
+        adapter = _join_test_adapter("blocked")
+
+        with self.assertRaisesRegex(RuntimeError, "blocked"):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(adapter.diagnostic_stages, ["join_blocked"])
+
+    def test_connect_to_meeting_callbacks_wait_for_joined_indicator(self):
+        callbacks = []
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "_meeting_joined_callback": lambda url: callbacks.append(("joined", list(adapter.page.clicks))),
+                "_media_ready_callback": lambda url: callbacks.append(("media", list(adapter.page.clicks))),
+            },
+        )
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(callbacks, [("joined", ["#join"]), ("media", ["#join"])])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -177,3 +233,108 @@ def subprocess_completed(returncode=0, stdout="", stderr=""):
     import subprocess
 
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+class FakeWebexLocator:
+    def __init__(self, page, selector):
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, state="visible", timeout=0):
+        if self.selector in self.page.visible:
+            return None
+        raise PlaywrightTimeoutError(f"{self.selector} is not visible")
+
+    async def click(self):
+        self.page.clicks.append(self.selector)
+        if self.selector == "#join":
+            self.page.visible.discard("#join")
+            self.page.visible.add(f"#{self.page.join_result}")
+
+    async def fill(self, value):
+        self.page.fills.append((self.selector, value))
+
+    async def inner_text(self, timeout=1000):
+        return self.page.text
+
+
+class FakeWebexPage:
+    url = "https://example.webex.com/meet/test"
+
+    def __init__(self, join_result):
+        self.join_result = join_result
+        self.visible = {"#join"}
+        self.clicks = []
+        self.fills = []
+        self.text = f"visible {join_result} screen"
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.url = url
+
+    async def title(self):
+        return "Fake Webex"
+
+    def locator(self, selector):
+        return FakeWebexLocator(self, selector)
+
+
+def _join_test_adapter(join_result, extra_config=None):
+    config = {
+        "adapter_config": {
+            "skip_sanity_checks": True,
+            "page_load_wait_sec": 0,
+            "prejoin_timeout_ms": 100,
+            "joined_timeout_ms": 100,
+            "join_result_timeout_sec": 0.2,
+            "optional_selector_timeout_ms": 1,
+            "join_result_poll_timeout_ms": 1,
+            "selectors": {
+                "join_button": "#join",
+                "start_meeting_button": "#start",
+                "joined_indicator": "#joined",
+                "lobby_indicator": "#lobby",
+                "blocked_indicator": "#blocked",
+                "display_name": "#name",
+                "email_input": "#email",
+                "password_input": "#password",
+                "cookie_accept": "#cookie",
+                "join_from_browser": "#browser",
+                "continue_in_browser": "#continue-browser",
+                "join_as_guest": "#guest",
+                "continue_button": "#continue",
+                "next_button": "#next",
+                "use_computer_audio": "#audio",
+            },
+        }
+    }
+    extra_config = dict(extra_config or {})
+    adapter_config_updates = {
+        key: extra_config.pop(key)
+        for key in list(extra_config)
+        if key in {"accept_lobby_as_joined", "allow_lobby_media_ready"}
+    }
+    config["adapter_config"].update(adapter_config_updates)
+    config.update(extra_config)
+    adapter = WebexAdapter(config)
+    adapter.page = FakeWebexPage(join_result)
+    adapter.launch = _async_true
+    adapter.mute_microphone = _async_true
+    adapter.unmute_microphone = _async_true
+    adapter.start_camera = _async_true
+    adapter.stop_camera = _async_true
+    adapter.diagnostic_stages = []
+
+    async def collect_diagnostics(stage=None, extra=None):
+        adapter.diagnostic_stages.append(stage)
+        return {"stage": stage, "extra": extra}
+
+    adapter.collect_diagnostics = collect_diagnostics
+    return adapter
+
+
+async def _async_true(*args, **kwargs):
+    return True
