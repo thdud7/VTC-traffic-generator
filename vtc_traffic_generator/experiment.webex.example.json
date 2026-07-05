@@ -48,6 +48,8 @@
       "prejoin_timeout_ms": 30000,
       "joined_timeout_ms": 45000,
       "optional_selector_timeout_ms": 1000,
+      "trust_click_state_after_unverified_action": false,
+      "allow_unverified_fallback": false,
       "selectors": {
         "browser_join": [
           "button:has-text(\"Join from your browser\")",
@@ -77,6 +79,40 @@
         "joined": [
           "[aria-label*=\"Leave meeting\"]",
           "button:has-text(\"Leave\")"
+        ],
+        "mic_on_indicator": [
+          "role=button[name=/Mute/i]",
+          "role=button[name=/Mute microphone/i]",
+          "[aria-label*=\"Mute\"]"
+        ],
+        "mic_off_indicator": [
+          "role=button[name=/Unmute/i]",
+          "role=button[name=/Unmute microphone/i]",
+          "[aria-label*=\"Unmute\"]"
+        ],
+        "camera_on_indicator": [
+          "role=button[name=/Stop video/i]",
+          "role=button[name=/Turn off camera/i]",
+          "[aria-label*=\"Stop video\"]"
+        ],
+        "camera_off_indicator": [
+          "role=button[name=/Start video/i]",
+          "role=button[name=/Turn on camera/i]",
+          "[aria-label*=\"Start video\"]"
+        ],
+        "screen_share_button": [
+          "role=button[name=/Share content/i]",
+          "role=button[name=/Share screen/i]",
+          "[aria-label*=\"Share\"]"
+        ],
+        "screen_share_on_indicator": [
+          "role=button[name=/Stop sharing/i]",
+          "text=/You are sharing/i",
+          "[aria-label*=\"Stop sharing\"]"
+        ],
+        "screen_share_stop": [
+          "role=button[name=/Stop sharing/i]",
+          "[aria-label*=\"Stop sharing\"]"
         ]
       },
       "fallback": {
