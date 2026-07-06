@@ -26,9 +26,10 @@
     "video_path": "/home/ubuntu/video-teleconference/VTC_AV/270_resized",
     "video_name": "man_1_270.mp4",
     "screen_share_window": {
-      "enabled": false,
+      "enabled": true,
       "title": "VTC Share Window",
-      "html_path": "/home/ubuntu/vtc_data/screen_share/share.html"
+      "html_path": "/home/ubuntu/vtc_data/screen_share/share.html",
+      "note": "For Webex, title must match the Chrome desktop-capture source shown in the share picker."
     },
     "packet_capture": {
       "enabled": true,
@@ -41,6 +42,7 @@
     },
     "adapter_config": {
       "browser_channel": "chrome",
+      "auto_select_desktop_capture_source": null,
       "ignore_certificate_errors": true,
       "initial_microphone_enabled": true,
       "initial_camera_enabled": true,
@@ -136,7 +138,12 @@
       "host": "10.0.1.21",
       "c2_port": 8001,
       "display": ":99",
-      "video_device": "/dev/video5"
+      "video_device": "/dev/video5",
+      "sink_name": "VTC_Speaker",
+      "source_name": "VTC_Microphone",
+      "sink_description": "VTC_Speaker",
+      "source_description": "VTC_Microphone",
+      "microphone_name": "VTC_Microphone"
     }
   ]
 }

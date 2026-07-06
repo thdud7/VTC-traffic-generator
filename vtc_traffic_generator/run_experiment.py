@@ -29,6 +29,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "generated" / "experiment"
 DEFAULT_PLAYBOOK = PROJECT_ROOT / "ansible" / "deploy_experiment.yml"
 DEFAULT_STOP_PLAYBOOK = PROJECT_ROOT / "ansible" / "stop_clients.yml"
 DEFAULT_UPLOAD_PLAYBOOK = PROJECT_ROOT / "ansible" / "upload_captures.yml"
+JITSI_SERVICES = {"jitsi", "jitsi_electron"}
 
 
 def load_json(path):
@@ -168,10 +169,11 @@ def build_remote_config(experiment, client):
     }
     screen_share_window = resolve_screen_share_window(experiment, client, defaults)
     if screen_share_window.get("enabled"):
-        adapter_config.setdefault(
-            "screen_share_target",
-            str(screen_share_window.get("title") or f"VTC Share Window - {bot_name}"),
-        )
+        screen_share_target = str(screen_share_window.get("title") or f"VTC Share Window - {bot_name}")
+        if not adapter_config.get("screen_share_target"):
+            adapter_config["screen_share_target"] = screen_share_target
+        if not adapter_config.get("auto_select_desktop_capture_source"):
+            adapter_config["auto_select_desktop_capture_source"] = adapter_config["screen_share_target"]
 
     executable_path = client.get("executable_path") or defaults.get("executable_path")
     if executable_path:
@@ -180,10 +182,11 @@ def build_remote_config(experiment, client):
     packet_capture = merge_mapping(defaults.get("packet_capture"), client.get("packet_capture"))
     if packet_capture:
         packet_capture.setdefault("client_ip", client["c2_host"])
-        parsed_vtc_url = urlparse(str(experiment.get("vtc_url") or experiment.get("room_url") or ""))
-        if parsed_vtc_url.hostname:
-            packet_capture.setdefault("jvb_ip", parsed_vtc_url.hostname)
-        packet_capture.setdefault("jvb_port", 10000)
+        if is_jitsi_service(service):
+            parsed_vtc_url = urlparse(str(experiment.get("vtc_url") or experiment.get("room_url") or ""))
+            if parsed_vtc_url.hostname:
+                packet_capture.setdefault("jvb_ip", parsed_vtc_url.hostname)
+            packet_capture.setdefault("jvb_port", 10000)
 
     remote = {
         "role": "client",
@@ -243,6 +246,7 @@ def build_remote_config(experiment, client):
 
 
 def render_inventory(experiment, clients, output_dir):
+    service = require(experiment.get("service") or experiment.get("vtc_platform"), "service")
     ansible_config = experiment.get("ansible", {})
     if not isinstance(ansible_config, dict):
         raise ValueError("experiment.ansible must be an object when provided")
@@ -268,6 +272,8 @@ def render_inventory(experiment, clients, output_dir):
 
     group_vars = [
         "[vtc_clients:vars]",
+        f"vtc_service={quote_inventory_value(service)}",
+        f"service={quote_inventory_value(service)}",
         f"repo_dir={quote_inventory_value(repo_dir)}",
         f"repo_version={quote_inventory_value(repo_version)}",
         f"python_bin={quote_inventory_value(python_bin)}",
@@ -322,6 +328,7 @@ def render_inventory(experiment, clients, output_dir):
         parts = [
             client["name"],
             f"ansible_host={quote_inventory_value(client['host'])}",
+            f"vtc_service={quote_inventory_value(service)}",
             f"c2_port={quote_inventory_value(client['c2_port'])}",
             f"vtc_display={quote_inventory_value(client['display'])}",
             f"video_device={quote_inventory_value(client['video_device'])}",
@@ -463,6 +470,14 @@ def experiment_run_log_id(experiment):
 def sanitize_log_id(value):
     text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-")
     return text or "vtc-experiment"
+
+
+def normalize_service_key(service):
+    return str(service).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def is_jitsi_service(service):
+    return normalize_service_key(service) in JITSI_SERVICES
 
 
 def capture_upload_configured(experiment):

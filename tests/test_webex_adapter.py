@@ -26,14 +26,38 @@ class WebexAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             generated = generate("vtc_traffic_generator/experiment.webex.example.json", tmpdir)
             remote_config = json.loads(Path(generated["remote_configs"][0]).read_text(encoding="utf-8"))
+            inventory = Path(generated["inventory"]).read_text(encoding="utf-8")
 
         self.assertEqual(remote_config["vtc_platform"], "webex")
         self.assertEqual(remote_config["service"], "webex")
+        self.assertEqual(remote_config["adapter_config"]["display"], ":99")
         self.assertEqual(remote_config["adapter_config"]["display_name"], "bot1")
+        self.assertEqual(remote_config["adapter_config"]["microphone_name"], "VTC_Microphone")
         self.assertEqual(remote_config["adapter_config"]["browser_channel"], "chrome")
+        self.assertTrue(remote_config["adapter_config"]["screen_share_target"].startswith("VTC Share Window"))
+        self.assertEqual(
+            remote_config["adapter_config"]["auto_select_desktop_capture_source"],
+            remote_config["adapter_config"]["screen_share_target"],
+        )
+        self.assertEqual(remote_config["virtual_audio"]["source_name"], "VTC_Microphone")
         self.assertTrue(remote_config["packet_capture"]["enabled"])
+        self.assertNotIn("jvb_ip", remote_config["packet_capture"])
+        self.assertNotIn("jvb_port", remote_config["packet_capture"])
         self.assertIn("browser_join", remote_config["adapter_config"]["selectors"])
         self.assertIn("fallback", remote_config["adapter_config"])
+        self.assertIn("vtc_service=webex", inventory)
+        self.assertIn("audio_source_name=VTC_Microphone", inventory)
+        self.assertNotIn("jitsi_electron_launcher", inventory)
+
+    def test_ansible_branches_browser_and_jitsi_preflight_by_service(self):
+        deploy_playbook = Path("ansible/deploy_clients.yml").read_text(encoding="utf-8")
+        preflight_playbook = Path("ansible/preflight_clients.yml").read_text(encoding="utf-8")
+
+        self.assertIn("Verify Chrome or Chromium is available for browser services", deploy_playbook)
+        self.assertIn("google-chrome google-chrome-stable chromium chromium-browser", deploy_playbook)
+        self.assertIn("== 'jitsi_electron'", deploy_playbook)
+        self.assertIn("source_name={{ audio_source_name | default('VTC_Microphone') | quote }}", preflight_playbook)
+        self.assertIn("Webex|Chrome|Chromium|Google Chrome", preflight_playbook)
 
     def test_selector_groups_can_be_overridden_from_config(self):
         adapter = WebexAdapter(

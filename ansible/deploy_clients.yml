@@ -67,6 +67,36 @@
         executable: /bin/bash
       changed_when: false
 
+    - name: Verify Chrome or Chromium is available for browser services
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for browser in google-chrome google-chrome-stable chromium chromium-browser; do
+          if command -v "$browser" >/dev/null 2>&1; then
+            exit 0
+          fi
+        done
+
+        echo "Missing Chrome/Chromium for {{ vtc_service | default('unknown') }}. Install one of: google-chrome, google-chrome-stable, chromium, chromium-browser." >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: (vtc_service | default(service | default(vtc_platform | default('')))) | lower | replace('-', '_') | replace(' ', '_') in ['webex', 'meet', 'google_meet', 'googlemeet']
+
+    - name: Verify Playwright Python package is available for browser services
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if {{ python_bin | default('python3') }} -c 'import playwright.async_api' >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        echo "Missing Python Playwright package for {{ vtc_service | default('unknown') }}. Install playwright in the {{ python_bin | default('python3') }} environment." >&2
+        exit 1
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: (vtc_service | default(service | default(vtc_platform | default('')))) | lower | replace('-', '_') | replace(' ', '_') in ['webex', 'meet', 'google_meet', 'googlemeet']
+
     - name: Disable desktop services not needed for VTC capture
       become: true
       ansible.builtin.shell: |
@@ -459,11 +489,14 @@
       ansible.builtin.stat:
         path: "{{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }}"
       register: jitsi_launcher
+      when: (vtc_service | default(service | default(vtc_platform | default('')))) | lower | replace('-', '_') | replace(' ', '_') == 'jitsi_electron'
 
     - name: Fail if Jitsi Electron launcher is missing
       ansible.builtin.fail:
         msg: "Missing {{ jitsi_electron_launcher | default('/home/ubuntu/service/jitsi-electron/run-jitsi.sh') }} on {{ inventory_hostname }}"
-      when: not jitsi_launcher.stat.exists
+      when:
+        - (vtc_service | default(service | default(vtc_platform | default('')))) | lower | replace('-', '_') | replace(' ', '_') == 'jitsi_electron'
+        - not (jitsi_launcher.stat.exists | default(false))
 
     - name: Copy generated client config
       ansible.builtin.copy:
