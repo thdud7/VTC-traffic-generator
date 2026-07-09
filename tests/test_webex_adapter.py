@@ -838,7 +838,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertTrue(state["detected"])
         self.assertIn("Open \"Webex Installer.dmg\" after it downloads", state["visible_text"])
-        self.assertIn("webex_page_text_fallback_used", output.getvalue())
+        self.assertIn("webex_page_state_snapshot_done", output.getvalue())
 
     def test_webex_download_retry_page_indicator_detects_aws_installer_text(self):
         adapter = _join_test_adapter(
@@ -868,6 +868,90 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertTrue(state["detected"])
         self.assertEqual(state["indicators"]["download_page_indicator"], "page_text")
+
+    def test_webex_download_url_without_visible_download_text_returns_quickly(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.url = "https://example.webex.com/meeting/download/test"
+        adapter.page.visible = set()
+        adapter.page.text = "Loading meeting"
+
+        state = asyncio.run(asyncio.wait_for(adapter._download_retry_page_state(timeout_ms=1), timeout=0.2))
+
+        self.assertFalse(state["detected"])
+        self.assertEqual(adapter.page.waits, [])
+        self.assertEqual(state["indicators"]["download_url"], "location.href")
+
+    def test_webex_download_detection_does_not_wait_for_download_locator_visibility(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "selectors": {
+                    "app_download_indicator": 'text="Download"',
+                    "download_page_indicator": 'text="Get ready to join"',
+                }
+            },
+        )
+        adapter.page.url = "https://example.webex.com/meeting/download/test"
+        adapter.page.text = "Get ready to join Open Webex Installer.dmg after it downloads"
+        adapter.page.timeout_selectors.add('text="Download"')
+
+        state = asyncio.run(asyncio.wait_for(adapter._download_retry_page_state(timeout_ms=1), timeout=0.2))
+
+        self.assertTrue(state["detected"])
+        self.assertEqual(adapter.page.waits, [])
+        self.assertNotIn('text="Download"', adapter.page.waits)
+
+    def test_webex_webclient_frame_snapshot_preempts_download_retry_detection(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        outer.text = "Get ready to join Open Webex Installer.dmg after it downloads"
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/meeting/test", name="unified-webclient-iframe")
+        frame.visible = {"#name", "#join"}
+        frame.text = "Name Join meeting"
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertTrue(result["webclient_frame_detected"])
+        self.assertFalse(result["clicked"])
+        self.assertEqual(outer.clicks, [])
+        self.assertIs(adapter._preferred_webex_meeting_frame, frame)
+        self.assertIn("webex_frame_scan_start", output.getvalue())
+        self.assertIn("webex_webclient_frame_detected", output.getvalue())
+
+    def test_webex_page_state_detection_timeout_has_no_unhandled_future_exception(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "page_state_detection_timeout_sec": 0.01,
+                "frame_snapshot_timeout_sec": 0.01,
+            },
+        )
+        adapter.page = SlowSnapshotPage("joined")
+
+        async def slow_page_state_snapshot(timeout_ms=None):
+            await asyncio.sleep(1)
+            return {}
+
+        adapter._page_state_snapshot = slow_page_state_snapshot
+
+        async def run_detection():
+            loop = asyncio.get_running_loop()
+            unhandled = []
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            state = await adapter._download_retry_page_state(timeout_ms=1)
+            await asyncio.sleep(0)
+            return state, unhandled
+
+        state, unhandled = asyncio.run(run_detection())
+
+        self.assertTrue(state["classification_timeout"])
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_page_state_detection_timeout")
+        self.assertEqual(unhandled, [])
 
     def test_webex_download_retry_page_clicks_try_again_and_reaches_name_fill(self):
         adapter = _join_test_adapter(
@@ -1908,6 +1992,41 @@ class FakeWebexPage:
         return FakeWebexLocator(self, "#missing-role")
 
     async def evaluate(self, script, payload=None):
+        if "visible_inputs" in script and "visible_buttons_links" in script:
+            visible_inputs = []
+            visible_buttons_links = []
+            visible_text = self.text or WebexAdapter({"adapter_config": {}})._sanitize_html_text(self.html)
+            for selector in sorted(self.visible):
+                text = self.text_for_selector(selector)
+                item = {
+                    "tag": self.tags.get(selector, "BUTTON" if "button" in selector or "join" in selector else "DIV"),
+                    "role": self.roles.get(selector, ""),
+                    "type": self.input_attrs.get(selector, {}).get("type", ""),
+                    "name": self.input_attrs.get(selector, {}).get("name", ""),
+                    "id": selector.lstrip("#"),
+                    "text": text,
+                    "aria_label": self.input_attrs.get(selector, {}).get("aria-label", ""),
+                    "placeholder": self.input_attrs.get(selector, {}).get("placeholder", ""),
+                    "href": self.hrefs.get(selector, ""),
+                }
+                if selector in self.text_inputs or selector in self.role_textboxes or "input" in selector or selector == "#name":
+                    visible_inputs.append(item)
+                if selector in {"#join", "#start", "#browser", "#continue", "#try-again", "#got-it"} or "button" in selector or text:
+                    visible_buttons_links.append(item)
+            frame_urls = [
+                str(getattr(frame, "url", "") or "")
+                for frame in self.frames
+                if frame is not self
+            ]
+            return {
+                "title": self.title_text,
+                "url": self.url,
+                "visible_text": visible_text,
+                "hidden_text": visible_text or self.html,
+                "visible_inputs": visible_inputs,
+                "visible_buttons_links": visible_buttons_links,
+                "frame_urls": frame_urls,
+            }
         if "dom-near-problem-text" in script:
             return self.dom_try_again_result
         if "js_text_click" in script or "js_text_diagnostic" in script:
@@ -1946,6 +2065,16 @@ class FakeWebexPage:
             return "Try again"
         if selector == "#got-it":
             return "Got it"
+        if selector == "#download-indicator":
+            return "Get ready to join"
+        if selector == "#problem":
+            return "Problem joining from browser?"
+        if selector == "#download-button":
+            return "Download"
+        if selector == "#mobile":
+            return "Join on mobile"
+        if selector == "#join":
+            return "Join"
         if selector.startswith("text="):
             return selector.split("=", 1)[1].strip('"')
         for marker in ("Try again", "Retry", "다시 시도", "Got it", "확인", "알겠습니다"):
@@ -1963,6 +2092,13 @@ class FakeWebexFrame(FakeWebexPage):
 
     def name(self):
         return self._name
+
+
+class SlowSnapshotPage(FakeWebexPage):
+    async def evaluate(self, script, payload=None):
+        if "visible_inputs" in script and "visible_buttons_links" in script:
+            await asyncio.sleep(1)
+        return await super().evaluate(script, payload=payload)
 
 
 class FakeMouse:
@@ -2139,8 +2275,10 @@ def _join_test_adapter(join_result, extra_config=None):
             "download_retry_settle_ms",
             "download_retry_settle_sec",
             "download_retry_click_total_timeout_sec",
+            "frame_snapshot_timeout_sec",
             "fail_on_post_join_media_unverified",
             "max_download_retry_attempts",
+            "page_state_detection_timeout_sec",
             "retry_navigation_on_page_closed",
             "max_navigation_retries",
             "post_join_media_check",

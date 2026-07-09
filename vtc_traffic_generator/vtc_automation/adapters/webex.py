@@ -718,6 +718,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             adapter_config.setdefault("max_download_retry_attempts", 3)
             adapter_config.setdefault("download_retry_settle_ms", 2000)
             adapter_config.setdefault("download_retry_click_total_timeout_sec", 5.0)
+            adapter_config.setdefault("page_state_detection_timeout_sec", 3.0)
+            adapter_config.setdefault("frame_snapshot_timeout_sec", 0.5)
         self._playwright = None
         self.browser = None
         self.context = None
@@ -1175,10 +1177,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         email = self.adapter_config().get("email")
         password = self.adapter_config().get("password") or self.adapter_config().get("meeting_password")
         download_retry_attempts = 0
+        iteration = 0
 
         while asyncio.get_running_loop().time() < deadline:
+            iteration += 1
+            self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration})
             await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
-            await self._visible_text_excerpt()
             state = await self._prejoin_state(timeout_ms=250)
             if state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
                 return state
@@ -1320,19 +1324,30 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _handle_download_retry_page(self, timeout_ms=None):
         state = await self._download_retry_page_state(timeout_ms=timeout_ms)
-        if not state.get("detected"):
-            return state
-        self._progress("webex_download_retry_page_detected", state)
-        webclient_frame = await self._detect_loaded_webex_webclient_frame(timeout_ms=timeout_ms)
-        if webclient_frame:
-            self._progress("webex_webclient_frame_detected", webclient_frame)
+        if state.get("webclient_frame_detected"):
+            frame = state.get("webclient_frame") or {}
+            self._progress("webex_webclient_frame_detected", frame)
+            self._progress(
+                "webex_next_action_selected",
+                {"action": "continue_webclient_prejoin", "reason": "webclient_frame_detected"},
+            )
             return {
                 **state,
+                "detected": True,
                 "clicked": False,
                 "got_it_clicked": False,
-                "webclient_frame_detected": True,
-                "webclient_frame": webclient_frame,
             }
+        if not state.get("detected"):
+            self._progress(
+                "webex_next_action_selected",
+                {"action": "continue_prejoin", "reason": "download_retry_not_detected"},
+            )
+            return state
+        self._progress("webex_download_retry_page_detected", state)
+        self._progress(
+            "webex_next_action_selected",
+            {"action": "click_download_retry", "reason": "download_retry_detected"},
+        )
         click_total_timeout = self._download_retry_click_total_timeout_sec()
         click_deadline = asyncio.get_running_loop().time() + click_total_timeout
         try:
@@ -1356,28 +1371,76 @@ class WebexAdapter(BrowserMeetingAdapter):
         await self._raise_download_retry_try_again_not_clickable({**state, "got_it_clicked": got_it})
 
     async def _download_retry_page_state(self, timeout_ms=None):
+        timeout_sec = self._page_state_detection_timeout_sec()
+        try:
+            return await asyncio.wait_for(
+                self._download_retry_page_state_from_snapshot(timeout_ms=timeout_ms),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            extra = {
+                "timeout_sec": timeout_sec,
+                "url": self._safe_page_url(),
+                "title": await self._safe_page_title(),
+            }
+            self._progress("webex_page_state_detection_timeout", extra)
+            await self._maybe_await(
+                self.collect_diagnostics(stage="webex_page_state_detection_timeout", extra=extra)
+            )
+            return {
+                "detected": False,
+                "indicators": {},
+                "visible_text": "",
+                "keyword_hits": [],
+                "classification_timeout": True,
+            }
+
+    async def _download_retry_page_state_from_snapshot(self, timeout_ms=None):
+        self._progress("webex_page_state_snapshot_start", {"url": self._safe_page_url()})
+        snapshot = await self._page_state_snapshot(timeout_ms=timeout_ms)
+        page_snapshot = snapshot.get("page", {})
+        text = str(page_snapshot.get("visible_text") or "")
         hits = {}
-        for group in (
-            "download_page_indicator",
-            "installer_download_indicator",
-            "problem_joining_from_browser",
-            "join_on_mobile_indicator",
-            "app_download_indicator",
-        ):
-            selector = await self._first_visible_selector(group, timeout_ms=timeout_ms)
-            if selector:
-                hits[group] = selector
-        text = await self._visible_text_excerpt()
         keyword_hits = self._download_retry_keyword_hits(text)
+        for group, keywords in self._download_retry_text_groups().items():
+            match = self._snapshot_control_match(page_snapshot.get("visible_buttons_links") or [], keywords)
+            if group not in hits and match:
+                hits[group] = match
         for group, keywords in self._download_retry_text_groups().items():
             if group not in hits and any(keyword in keyword_hits for keyword in keywords):
                 hits[group] = "page_text"
+        href = str(page_snapshot.get("url") or self._safe_page_url() or "")
+        if "/meeting/download" in href.lower():
+            hits.setdefault("download_url", "location.href")
+
+        webclient_frame = self._webclient_frame_from_snapshot(snapshot)
         detected = bool(
             hits.get("download_page_indicator")
             or hits.get("installer_download_indicator")
             or hits.get("problem_joining_from_browser")
         )
-        return {"detected": detected, "indicators": hits, "visible_text": text, "keyword_hits": keyword_hits}
+        result = {
+            "detected": detected,
+            "indicators": hits,
+            "visible_text": text,
+            "hidden_dom_text": str(page_snapshot.get("hidden_text") or "")[:2000],
+            "keyword_hits": keyword_hits,
+            "url": href,
+            "title": str(page_snapshot.get("title") or ""),
+            "frame_count": len(snapshot.get("frames") or []),
+            "webclient_frame_detected": bool(webclient_frame),
+            "webclient_frame": webclient_frame,
+        }
+        self._progress(
+            "webex_download_detection_result",
+            {
+                "detected": result["detected"],
+                "indicators": result["indicators"],
+                "keyword_hits": result["keyword_hits"],
+                "webclient_frame_detected": result["webclient_frame_detected"],
+            },
+        )
+        return result
 
     async def _download_retry_page_visible(self, timeout_ms=None):
         return bool((await self._download_retry_page_state(timeout_ms=timeout_ms)).get("detected"))
@@ -1385,47 +1448,166 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _detect_loaded_webex_webclient_frame(self, timeout_ms=None):
         if not self._is_page_available():
             return None
-        timeout = min(self._download_retry_action_timeout_ms(timeout_ms), 100)
+        snapshot = await self._page_state_snapshot(timeout_ms=timeout_ms)
+        return self._webclient_frame_from_snapshot(snapshot)
+
+    def _page_state_detection_timeout_sec(self):
+        try:
+            return max(0.1, float(self.adapter_config().get("page_state_detection_timeout_sec", 3.0)))
+        except (TypeError, ValueError):
+            return 3.0
+
+    def _frame_snapshot_timeout_sec(self):
+        try:
+            return max(0.05, float(self.adapter_config().get("frame_snapshot_timeout_sec", 0.5)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    async def _page_state_snapshot(self, timeout_ms=None):
+        page_snapshot = await self._snapshot_scope(self.page, "page", timeout_sec=self._frame_snapshot_timeout_sec())
+        frames = []
+        frame_scopes = self._page_locator_scopes(prefer_meeting_frame=False)[1:]
+        self._progress("webex_frame_scan_start", {"frame_count": len(frame_scopes)})
+        for scope_name, frame in frame_scopes:
+            snapshot = await self._snapshot_scope(frame, scope_name, timeout_sec=self._frame_snapshot_timeout_sec())
+            frames.append(snapshot)
+            self._progress(
+                "webex_frame_scan_result",
+                {
+                    "scope": scope_name,
+                    "url": snapshot.get("url", ""),
+                    "visible_text_input_count": len(snapshot.get("visible_inputs") or []),
+                    "visible_button_link_count": len(snapshot.get("visible_buttons_links") or []),
+                    "error": snapshot.get("error", ""),
+                },
+            )
+        self._progress("webex_frame_scan_done", {"frame_count": len(frames)})
+        snapshot = {"page": page_snapshot, "frames": frames}
+        self._progress(
+            "webex_page_state_snapshot_done",
+            {
+                "url": page_snapshot.get("url", ""),
+                "title": page_snapshot.get("title", ""),
+                "visible_text_chars": len(str(page_snapshot.get("visible_text") or "")),
+                "hidden_text_chars": len(str(page_snapshot.get("hidden_text") or "")),
+                "frame_count": len(frames),
+            },
+        )
+        return snapshot
+
+    async def _snapshot_scope(self, scope, scope_name, timeout_sec=0.5):
+        if scope is None or not hasattr(scope, "evaluate"):
+            return {"scope": scope_name, "url": "", "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": "scope_unavailable"}
+        script = r"""
+        () => {
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const visible = (el) => {
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          };
+          const textOf = (el) => norm(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "");
+          const summarize = (el) => ({
+            tag: el.tagName || "",
+            role: el.getAttribute("role") || "",
+            type: el.getAttribute("type") || "",
+            name: el.getAttribute("name") || "",
+            id: el.getAttribute("id") || "",
+            text: textOf(el).slice(0, 300),
+            aria_label: el.getAttribute("aria-label") || "",
+            placeholder: el.getAttribute("placeholder") || "",
+            href: el.getAttribute("href") || "",
+          });
+          const visibleText = norm(document.body && document.body.innerText || "");
+          const hiddenText = norm(document.body && document.body.textContent || "");
+          const visibleInputs = Array.from(document.querySelectorAll(
+            'input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="password"], textarea, [role="textbox"], [contenteditable="true"]'
+          )).filter(visible).slice(0, 30).map(summarize);
+          const visibleButtonsLinks = Array.from(document.querySelectorAll("button, a, [role='button'], [role='link']"))
+            .filter(visible).slice(0, 80).map(summarize);
+          const frameUrls = Array.from(document.querySelectorAll("iframe, frame")).slice(0, 40).map((el) => el.src || "");
+          return {
+            title: document.title || "",
+            url: location.href || "",
+            visible_text: visibleText.slice(0, 6000),
+            hidden_text: hiddenText.slice(0, 6000),
+            visible_inputs: visibleInputs,
+            visible_buttons_links: visibleButtonsLinks,
+            frame_urls: frameUrls,
+          };
+        }
+        """
+        try:
+            result = await asyncio.wait_for(self._maybe_await(scope.evaluate(script)), timeout=timeout_sec)
+            if not isinstance(result, Mapping):
+                result = {}
+            return {"scope": scope_name, **dict(result), "error": ""}
+        except asyncio.TimeoutError:
+            return {"scope": scope_name, "url": str(getattr(scope, "url", "") or ""), "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": "snapshot_timeout"}
+        except Exception as exc:
+            return {"scope": scope_name, "url": str(getattr(scope, "url", "") or ""), "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": repr(exc)}
+
+    def _webclient_frame_from_snapshot(self, snapshot):
         best = None
-        for scope_name, frame in self._page_locator_scopes(prefer_meeting_frame=False)[1:]:
-            if not hasattr(frame, "locator"):
-                continue
-            url = str(getattr(frame, "url", "") or "")
-            name = self._safe_frame_name(frame)
+        frame_scopes = self._page_locator_scopes(prefer_meeting_frame=False)[1:]
+        for index, details in enumerate(snapshot.get("frames") or []):
+            url = str(details.get("url") or "")
+            name = str(details.get("name") or details.get("scope") or "")
             url_score = self._webex_meeting_frame_url_score(url, name)
-            if url_score <= 0:
+            visible_inputs = details.get("visible_inputs") or []
+            visible_buttons = details.get("visible_buttons_links") or []
+            visible_text = str(details.get("visible_text") or "").lower()
+            join_button = any(
+                self._snapshot_control_text_matches(item, ("join", "start meeting", "참여", "참가"))
+                for item in visible_buttons
+                if isinstance(item, Mapping)
+            )
+            prejoin_text = any(
+                token in visible_text
+                for token in ("join", "next", "continue", "name", "meeting", "참여", "참가", "이름", "계속")
+            )
+            score = url_score + (10 if visible_inputs else 0) + (6 if join_button else 0) + (3 if prejoin_text else 0)
+            detected = url_score > 0 and (visible_inputs or join_button or prejoin_text)
+            if not detected:
                 continue
-            details = {
-                "scope": scope_name,
+            candidate = {
+                "scope": details.get("scope", f"frame[{index}]"),
                 "url": url,
                 "name": name,
-                "visible_text_input_count": await self._visible_locator_count(
-                    frame,
-                    'input:not([type]), input[type="text"], input[type="search"], textarea, [role="textbox"], [contenteditable="true"]',
-                    timeout,
-                    limit=5,
-                ),
-                "visible_button_count": await self._visible_locator_count(
-                    frame,
-                    "button, [role='button'], a, [role='link']",
-                    timeout,
-                    limit=10,
-                ),
-                "prejoin_text": await self._frame_contains_prejoin_text(frame),
+                "visible_text_input_count": len(visible_inputs),
+                "visible_button_count": len(visible_buttons),
+                "join_button_detected": join_button,
+                "prejoin_text": prejoin_text,
+                "score": score,
             }
-            details["score"] = (
-                url_score
-                + (10 if details["visible_text_input_count"] else 0)
-                + (4 if details["visible_button_count"] else 0)
-                + (3 if details["prejoin_text"] else 0)
-            )
-            if details["visible_text_input_count"] or details["visible_button_count"] or details["prejoin_text"]:
-                if best is None or details["score"] > best["details"]["score"]:
-                    best = {"frame": frame, "details": details}
+            if best is None or candidate["score"] > best["details"]["score"]:
+                best = {"index": index, "details": candidate}
         if not best:
             return None
-        self._preferred_webex_meeting_frame = best["frame"]
+        if 0 <= best["index"] < len(frame_scopes):
+            self._preferred_webex_meeting_frame = frame_scopes[best["index"]][1]
         return best["details"]
+
+    def _snapshot_control_text_matches(self, item, needles):
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("text", "aria_label", "placeholder", "name", "id")
+        ).lower()
+        return any(str(needle).lower() in text for needle in needles)
+
+    def _snapshot_control_match(self, items, needles):
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            if not self._snapshot_control_text_matches(item, needles):
+                continue
+            element_id = str(item.get("id") or "")
+            if element_id:
+                return f"#{element_id}"
+            text = str(item.get("text") or item.get("aria_label") or "").strip()
+            return f"visible_control:{text[:80]}" if text else "visible_control"
+        return None
 
     def _webex_meeting_frame_url_score(self, url, name=""):
         text = f"{url} {name}".lower()
@@ -2194,6 +2376,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         return {
             "download_page_indicator": installer_keywords,
             "installer_download_indicator": installer_keywords,
+            "problem_joining_from_browser": {
+                "Problem joining from browser?",
+                "Problem joining from your browser?",
+                "브라우저에서 참여하는 데 문제가 있",
+                "브라우저에서 참가하는 데 문제가 있",
+            },
             "try_again_button": {"Try again", "Retry", "다시 시도"},
             "got_it_button": {"Got it", "확인", "알겠습니다"},
             "join_on_mobile_indicator": {"Join on mobile", "모바일에서 참여", "모바일에서 참가"},
