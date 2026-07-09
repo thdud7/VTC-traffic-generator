@@ -809,12 +809,34 @@ class WebexAdapterTests(unittest.TestCase):
     def test_webex_download_retry_selector_candidates_are_supported(self):
         adapter = WebexAdapter({"adapter_config": {}})
 
+        self.assertIn('text="Get ready to join"', adapter.selectors("download_page_indicator"))
         self.assertIn('text="Webex Installer.dmg"', adapter.selectors("download_page_indicator"))
+        self.assertIn('text="Webex Installer.dmg"', adapter.selectors("installer_download_indicator"))
         self.assertIn('text="Problem joining from browser?"', adapter.selectors("problem_joining_from_browser"))
         self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_browser_join"))
+        self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_button"))
         self.assertIn('button:has-text("Got it")', adapter.selectors("got_it_button"))
         self.assertIn('text="Join on mobile"', adapter.selectors("join_on_mobile_indicator"))
         self.assertIn('text="Download"', adapter.selectors("app_download_indicator"))
+
+    def test_html_text_fallback_detects_download_text_when_visible_text_empty(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.text = ""
+        adapter.page.html = """
+            <html><body>
+              <h1>Get ready to join</h1>
+              <p>Open &quot;Webex Installer.dmg&quot; after it downloads.</p>
+              <button>Got it</button><a>Try again</a>
+            </body></html>
+        """
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            state = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
+
+        self.assertTrue(state["detected"])
+        self.assertIn("Open \"Webex Installer.dmg\" after it downloads", state["visible_text"])
+        self.assertIn("webex_page_text_fallback_used", output.getvalue())
 
     def test_webex_download_retry_page_indicator_detects_aws_installer_text(self):
         adapter = _join_test_adapter(
@@ -833,6 +855,17 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertTrue(state["detected"])
         self.assertEqual(state["indicators"]["download_page_indicator"], "#download-indicator")
+
+    def test_webex_download_retry_page_detects_aws_installer_text_from_html(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        adapter.page.text = ""
+        adapter.page.html = "<main>Meeting Webex Open Webex Installer.dmg after it downloads Try again</main>"
+
+        state = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
+
+        self.assertTrue(state["detected"])
+        self.assertEqual(state["indicators"]["download_page_indicator"], "page_text")
 
     def test_webex_download_retry_page_clicks_try_again_and_reaches_name_fill(self):
         adapter = _join_test_adapter(
@@ -884,6 +917,26 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertIn("#got-it", adapter.page.clicks)
 
+    def test_webex_download_retry_page_clicks_try_again_after_got_it(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "download_retry_settle_sec": 0,
+                "selectors": {
+                    "got_it_button": "#got-it",
+                    "download_page_indicator": "#download-indicator",
+                    "try_again_button": "#try-again",
+                    "try_again_browser_join": "#try-again",
+                },
+            },
+        )
+        adapter.page.visible = {"#got-it", "#download-indicator", "#try-again"}
+        adapter.page.text = "Get ready to join Open Webex Installer.dmg after it downloads Try again Got it"
+
+        asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertLess(adapter.page.clicks.index("#got-it"), adapter.page.clicks.index("#try-again"))
+
     def test_webex_download_retry_dom_click_does_not_click_download_or_mobile(self):
         adapter = _join_test_adapter(
             "joined",
@@ -931,22 +984,41 @@ class WebexAdapterTests(unittest.TestCase):
         adapter = _join_test_adapter(
             "joined",
             {
+                "max_download_retry_attempts": 1,
+                "download_retry_settle_sec": 0,
                 "selectors": {
                     "download_page_indicator": "#download-indicator",
                     "problem_joining_from_browser": "#problem",
                     "try_again_browser_join": "#missing-try-again",
+                    "try_again_button": "#missing-try-again",
                 }
             },
         )
         adapter.page.visible = {"#download-indicator", "#problem"}
         adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser? Try again"
 
-        result = asyncio.run(adapter._run_prejoin_transition_loop("bot"))
+        with self.assertRaisesRegex(RuntimeError, "download/retry page remained"):
+            asyncio.run(adapter._run_prejoin_transition_loop("bot"))
 
-        self.assertEqual(result["status"], "timeout")
         self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_page_timeout")
         self.assertIn("links_buttons_debug", adapter.diagnostic_extras[-1])
         self.assertIn("download_retry_keyword_hits", adapter.diagnostic_extras[-1])
+
+    def test_optional_display_name_selector_timeout_is_caught(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "selectors": {
+                    "display_name": 'input[name*="name" i]',
+                    "name_input": 'input[name*="name" i]',
+                }
+            },
+        )
+        adapter.page.visible = set()
+
+        result = asyncio.run(adapter._find_display_name_input(timeout_ms=1))
+
+        self.assertIsNone(result)
 
     def test_korean_name_input_selector_candidates_are_supported(self):
         selectors = WebexAdapter({"adapter_config": {}}).selectors("display_name")
@@ -1461,6 +1533,7 @@ class FakeWebexPage:
         self.title_text = "Fake Webex"
         self.title_after_join = None
         self.text = f"visible {join_result} screen"
+        self.html = "<html><body>visible {}</body></html>".format(join_result)
         self.keyboard = FakeKeyboard(self)
         self.try_again_reveals = set()
         self.dom_try_again_result = None
@@ -1471,6 +1544,9 @@ class FakeWebexPage:
 
     async def title(self):
         return self.title_text
+
+    async def content(self):
+        return self.html
 
     def locator(self, selector):
         if selector.startswith(":focus"):
@@ -1684,8 +1760,10 @@ def _join_test_adapter(join_result, extra_config=None):
         in {
             "accept_lobby_as_joined",
             "allow_lobby_media_ready",
+            "download_retry_settle_ms",
             "download_retry_settle_sec",
             "fail_on_post_join_media_unverified",
+            "max_download_retry_attempts",
             "retry_navigation_on_page_closed",
             "max_navigation_retries",
             "post_join_media_check",

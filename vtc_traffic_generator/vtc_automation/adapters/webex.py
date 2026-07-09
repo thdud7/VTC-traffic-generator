@@ -1,5 +1,6 @@
 import asyncio
 import glob
+import html
 import json
 import os
 import platform
@@ -180,6 +181,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[aria-label*="취소"]',
         ],
         "download_page_indicator": [
+            'text="Get ready to join"',
             'text="Open \\"Webex Installer.dmg\\" after it downloads"',
             'text="Open Webex Installer.dmg after it downloads"',
             'text="Webex Installer.dmg"',
@@ -187,6 +189,15 @@ class WebexAdapter(BrowserMeetingAdapter):
             'text="Webex 앱 다운로드"',
             'text="Download the Webex app"',
             'text="Open Webex after it downloads"',
+        ],
+        "installer_download_indicator": [
+            'text="Get ready to join"',
+            'text="Open \\"Webex Installer.dmg\\" after it downloads"',
+            'text="Open Webex Installer.dmg after it downloads"',
+            'text="Webex Installer.dmg"',
+            'text="Download Webex"',
+            'text="Download the Webex app"',
+            'text="Webex 앱 다운로드"',
         ],
         "problem_joining_from_browser": [
             'text="Problem joining from browser?"',
@@ -227,6 +238,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             'button:has-text("알겠습니다")',
             '[role="button"]:has-text("알겠습니다")',
         ],
+        "try_again_button": [
+            'button:has-text("Try again")',
+            'a:has-text("Try again")',
+            '[role="button"]:has-text("Try again")',
+            'button:has-text("Retry")',
+            'a:has-text("Retry")',
+            '[role="button"]:has-text("Retry")',
+            'button:has-text("다시 시도")',
+            'a:has-text("다시 시도")',
+            '[role="button"]:has-text("다시 시도")',
+        ],
         "join_on_mobile_indicator": [
             'text="Join on mobile"',
             'text="모바일에서 참여"',
@@ -235,6 +257,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         "app_download_indicator": [
             'text="Webex Installer.dmg"',
             'text="Download"',
+            'text="Download Webex"',
             'text="Webex 앱 다운로드"',
             'text="Download Webex app"',
         ],
@@ -655,6 +678,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             adapter_config.setdefault("protocol_handler_excluded_scheme_value", True)
             adapter_config.setdefault("retry_navigation_on_page_closed", True)
             adapter_config.setdefault("max_navigation_retries", 1)
+            adapter_config.setdefault("max_download_retry_attempts", 3)
+            adapter_config.setdefault("download_retry_settle_ms", 2000)
         self._playwright = None
         self.browser = None
         self.context = None
@@ -1110,22 +1135,36 @@ class WebexAdapter(BrowserMeetingAdapter):
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000)
         email = self.adapter_config().get("email")
         password = self.adapter_config().get("password") or self.adapter_config().get("meeting_password")
+        download_retry_attempts = 0
 
         while asyncio.get_running_loop().time() < deadline:
             await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
+            await self._visible_text_excerpt()
             state = await self._prejoin_state(timeout_ms=250)
             if state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
                 return state
 
             progressed = False
-            progressed = bool(await self._click_first_visible("got_it_button", timeout_ms=timeout)) or progressed
             download_retry_result = await self._handle_download_retry_page(timeout_ms=timeout)
             if download_retry_result.get("detected"):
+                download_retry_attempts += 1
                 if download_retry_result.get("clicked"):
                     await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
-                    await asyncio.sleep(float(self.adapter_config().get("download_retry_settle_sec", 0.5)))
+                    await asyncio.sleep(self._download_retry_settle_sec())
                     if await self._browser_join_after_retry_seen(timeout_ms=timeout):
                         self._progress("webex_browser_join_after_retry_seen")
+                if download_retry_attempts >= self.timeout_ms("max_download_retry_attempts", 3):
+                    still_visible = await self._download_retry_page_visible(timeout_ms=timeout)
+                    if still_visible:
+                        await self._raise_download_retry_page_timeout(
+                            {
+                                **download_retry_result,
+                                "attempt": download_retry_attempts,
+                                "max_attempts": self.timeout_ms("max_download_retry_attempts", 3),
+                            }
+                        )
+                    continue
+                if download_retry_result.get("clicked"):
                     continue
                 progressed = True
             if await self._name_entry_text_visible():
@@ -1239,18 +1278,20 @@ class WebexAdapter(BrowserMeetingAdapter):
         if not state.get("detected"):
             return state
         self._progress("webex_download_retry_page_detected", state)
+        got_it = await self._click_got_it_button(timeout_ms=timeout_ms)
         clicked = await self._click_try_again_browser_join(timeout_ms=timeout_ms)
         if clicked:
-            self._progress("webex_try_again_browser_join_clicked", clicked)
-            return {**state, "clicked": True, "click": clicked}
+            self._progress("webex_try_again_clicked", clicked)
+            return {**state, "clicked": True, "got_it_clicked": got_it, "click": clicked}
         if await self._download_retry_page_visible(timeout_ms=timeout_ms):
             self._progress("webex_download_retry_page_still_visible", state)
-        return {**state, "clicked": False}
+        return {**state, "clicked": False, "got_it_clicked": got_it}
 
     async def _download_retry_page_state(self, timeout_ms=None):
         hits = {}
         for group in (
             "download_page_indicator",
+            "installer_download_indicator",
             "problem_joining_from_browser",
             "join_on_mobile_indicator",
             "app_download_indicator",
@@ -1258,8 +1299,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             selector = await self._first_visible_selector(group, timeout_ms=timeout_ms)
             if selector:
                 hits[group] = selector
-        detected = bool(hits.get("download_page_indicator") or hits.get("problem_joining_from_browser"))
-        return {"detected": detected, "indicators": hits}
+        text = await self._visible_text_excerpt()
+        keyword_hits = self._download_retry_keyword_hits(text)
+        for group, keywords in self._download_retry_text_groups().items():
+            if group not in hits and any(keyword in keyword_hits for keyword in keywords):
+                hits[group] = "page_text"
+        detected = bool(
+            hits.get("download_page_indicator")
+            or hits.get("installer_download_indicator")
+            or hits.get("problem_joining_from_browser")
+        )
+        return {"detected": detected, "indicators": hits, "visible_text": text, "keyword_hits": keyword_hits}
 
     async def _download_retry_page_visible(self, timeout_ms=None):
         return bool((await self._download_retry_page_state(timeout_ms=timeout_ms)).get("detected"))
@@ -1279,12 +1329,14 @@ class WebexAdapter(BrowserMeetingAdapter):
         return False
 
     async def _click_try_again_browser_join(self, timeout_ms=None):
-        self._progress("webex_try_again_browser_join_attempt")
+        self._progress("webex_try_again_click_attempt")
         clicked = await self._click_try_again_near_problem_text()
         if clicked:
             return clicked
 
-        candidates = await self._visible_candidates("try_again_browser_join", timeout_ms=timeout_ms, include_locator=True)
+        candidates = []
+        for group in ("try_again_button", "try_again_browser_join"):
+            candidates.extend(await self._visible_candidates(group, timeout_ms=timeout_ms, include_locator=True))
         for candidate in candidates:
             selector = str(candidate.get("selector", ""))
             if self._unsafe_download_retry_selector(selector):
@@ -1294,6 +1346,38 @@ class WebexAdapter(BrowserMeetingAdapter):
             await candidate["_locator"].click()
             return {key: value for key, value in candidate.items() if key != "_locator"}
         return None
+
+    async def _click_got_it_button(self, timeout_ms=None):
+        self._progress("webex_got_it_click_attempt")
+        clicked = await self._click_first_visible("got_it_button", timeout_ms=timeout_ms)
+        if clicked:
+            self._progress("webex_got_it_clicked", {"selector": clicked})
+        return clicked
+
+    async def _raise_download_retry_page_timeout(self, state):
+        text = await self._visible_text_excerpt()
+        extra = {
+            "download_retry": state,
+            "download_retry_keyword_hits": self._download_retry_keyword_hits(text),
+            "visible_text": text,
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+            "links_buttons_debug": await self._links_buttons_debug_info(),
+            "input_debug": await self._input_debug_info(),
+        }
+        self._progress("webex_download_retry_page_timeout", extra)
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage="webex_download_retry_page_timeout", extra=extra)
+        )
+        raise RuntimeError(
+            "Webex download/retry page remained after "
+            f"{state.get('max_attempts')} attempts. Visible text: {text}. Diagnostics: {diagnostics}"
+        )
+
+    def _download_retry_settle_sec(self):
+        if "download_retry_settle_sec" in self.adapter_config():
+            return max(0.0, float(self.adapter_config().get("download_retry_settle_sec", 2.0)))
+        return max(0, self.timeout_ms("download_retry_settle_ms", 2000)) / 1000
 
     async def _click_try_again_near_problem_text(self):
         if not self._is_page_available() or not hasattr(self.page, "evaluate"):
@@ -1389,21 +1473,47 @@ class WebexAdapter(BrowserMeetingAdapter):
     def _download_retry_keyword_hits(self, text):
         text = str(text or "")
         keywords = (
+            "Get ready to join",
+            'Open "Webex Installer.dmg" after it downloads',
+            "Open Webex Installer.dmg after it downloads",
             "Problem joining from browser?",
             "Problem joining from your browser?",
             "Try again",
+            "Retry",
             "Join on mobile",
             "Webex Installer.dmg",
             "Download Webex",
+            "Download the Webex app",
             "Download",
             "Webex 앱 다운로드",
             "브라우저에서 참여하는 데 문제가 있",
             "브라우저에서 참가하는 데 문제가 있",
+            "확인",
+            "알겠습니다",
             "다시 시도",
             "모바일에서 참여",
             "모바일에서 참가",
         )
         return [keyword for keyword in keywords if keyword in text]
+
+    def _download_retry_text_groups(self):
+        installer_keywords = {
+            "Get ready to join",
+            'Open "Webex Installer.dmg" after it downloads',
+            "Open Webex Installer.dmg after it downloads",
+            "Webex Installer.dmg",
+            "Download Webex",
+            "Download the Webex app",
+            "Webex 앱 다운로드",
+        }
+        return {
+            "download_page_indicator": installer_keywords,
+            "installer_download_indicator": installer_keywords,
+            "try_again_button": {"Try again", "Retry", "다시 시도"},
+            "got_it_button": {"Got it", "확인", "알겠습니다"},
+            "join_on_mobile_indicator": {"Join on mobile", "모바일에서 참여", "모바일에서 참가"},
+            "app_download_indicator": {"Download", "Download Webex", "Webex Installer.dmg", "Webex 앱 다운로드"},
+        }
 
     async def _links_buttons_debug_info(self):
         if not self._is_page_available() or not hasattr(self.page, "evaluate"):
@@ -3028,7 +3138,26 @@ return "sent_escape"
             if text:
                 break
         text = " ".join(str(text or "").split())
+        if text:
+            return text[:max_chars]
+        fallback = await self._html_text_excerpt(max_chars=max_chars, default=default)
+        if fallback:
+            self._progress("webex_page_text_fallback_used", {"max_chars": max_chars})
+        return fallback
+
+    async def _html_text_excerpt(self, max_chars=2000, default=""):
+        html_text = await self._safe_page_content(default="")
+        if not html_text:
+            return default
+        text = self._sanitize_html_text(html_text)
         return text[:max_chars] if text else default
+
+    def _sanitize_html_text(self, html_text):
+        text = re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", str(html_text or ""))
+        text = re.sub(r"(?is)<br\s*/?>", " ", text)
+        text = re.sub(r"(?is)</(p|div|li|h[1-6]|button|a|span)>", " ", text)
+        text = re.sub(r"(?is)<[^>]+>", " ", text)
+        return " ".join(html.unescape(text).split())
 
     async def _visible_text_excerpt(self, max_chars=2000):
         return await self._safe_visible_text_excerpt(max_chars=max_chars)
@@ -3259,6 +3388,8 @@ return "sent_escape"
             "diagnostics_dir",
             "retry_navigation_on_page_closed",
             "max_navigation_retries",
+            "max_download_retry_attempts",
+            "download_retry_settle_ms",
             "permissions",
             "viewport",
         }
