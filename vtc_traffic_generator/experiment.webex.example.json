@@ -46,6 +46,25 @@
       "ignore_certificate_errors": true,
       "initial_microphone_enabled": true,
       "initial_camera_enabled": true,
+      "apply_initial_media_state_in_prejoin": true,
+      "strict_prejoin_media_state": false,
+      "fail_on_prejoin_media_state_unverified": false,
+      "dismiss_external_protocol_dialog": true,
+      "external_protocol_dismiss_method": "auto",
+      "strict_external_protocol_dismiss": false,
+      "suppress_external_protocol_dialog": true,
+      "use_persistent_browser_profile_for_webex": true,
+      "chrome_user_data_dir": "artifacts/webex_chrome_profile",
+      "blocked_external_protocol_schemes": [
+        "webex",
+        "wbx",
+        "ciscospark",
+        "webexteams",
+        "webexapp",
+        "webex-meetings",
+        "cisco-webex"
+      ],
+      "protocol_handler_excluded_scheme_value": true,
       "verify_joined": true,
       "prejoin_timeout_ms": 30000,
       "joined_timeout_ms": 45000,
@@ -55,7 +74,53 @@
       "selectors": {
         "browser_join": [
           "button:has-text(\"Join from your browser\")",
-          "a:has-text(\"Join from your browser\")"
+          "a:has-text(\"Join from your browser\")",
+          "button:has-text(\"Join from this browser\")",
+          "button:has-text(\"Continue in browser\")",
+          "button:has-text(\"Continue in this browser\")",
+          "button:has-text(\"Join from browser\")",
+          "button:has-text(\"Use web app\")",
+          "button:has-text(\"Use browser\")",
+          "button:has-text(\"Open in browser\")",
+          "button:has-text(\"Join using browser\")",
+          "button:has-text(\"브라우저에서 참여\")",
+          "button:has-text(\"브라우저에서 참가\")",
+          "button:has-text(\"이 브라우저에서 참여\")",
+          "button:has-text(\"이 브라우저에서 참가\")",
+          "button:has-text(\"브라우저로 참여\")",
+          "button:has-text(\"브라우저로 참가\")",
+          "button:has-text(\"웹에서 참여\")",
+          "button:has-text(\"웹에서 참가\")",
+          "button:has-text(\"웹 앱 사용\")",
+          "button:has-text(\"앱 없이 참여\")",
+          "button:has-text(\"앱 없이 참가\")"
+        ],
+        "continue_in_browser": [
+          "button:has-text(\"Continue in browser\")",
+          "button:has-text(\"Continue in this browser\")",
+          "a:has-text(\"Continue in browser\")",
+          "button:has-text(\"브라우저에서 계속\")"
+        ],
+        "cancel_open_app_prompt": [
+          "button:has-text(\"Cancel\")",
+          "button:has-text(\"Not now\")",
+          "button:has-text(\"취소\")"
+        ],
+        "cookie_accept": [
+          "button:has-text(\"Accept all\")",
+          "button:has-text(\"Accept\")",
+          "button:has-text(\"수락\")"
+        ],
+        "cookie_reject": [
+          "button:has-text(\"Reject all\")",
+          "button:has-text(\"Reject\")",
+          "button:has-text(\"거절\")"
+        ],
+        "cookie_close": [
+          "[data-test*=\"cookie\"] button[aria-label*=\"Close\" i]",
+          "[data-test*=\"cookie\"] button[aria-label*=\"닫기\" i]",
+          "button[aria-label=\"Close\"]",
+          "button[aria-label=\"닫기\"]"
         ],
         "guest_join": [
           "button:has-text(\"Join as a guest\")",
@@ -63,8 +128,16 @@
         ],
         "name_input": [
           "input[name=\"displayName\"]",
+          "input[name*=\"name\" i]",
           "input[aria-label*=\"name\" i]",
-          "input[placeholder*=\"name\" i]"
+          "input[placeholder*=\"name\" i]",
+          "input[placeholder*=\"Your name\" i]",
+          "input[aria-label*=\"이름\" i]",
+          "input[placeholder*=\"이름\" i]",
+          "input[aria-label*=\"참가자\" i]",
+          "input[placeholder*=\"참가자\" i]",
+          "input[aria-label*=\"이름을 입력\" i]",
+          "input[placeholder*=\"이름을 입력\" i]"
         ],
         "email_input": [
           "input[type=\"email\"]",
@@ -76,7 +149,13 @@
         ],
         "join_button": [
           "button:has-text(\"Join meeting\")",
-          "button:has-text(\"Join\")"
+          "button:has-text(\"Join\")",
+          "button:has-text(\"미팅 참여\")",
+          "button:has-text(\"회의 참여\")",
+          "button:has-text(\"참여\")",
+          "button:has-text(\"참가\")",
+          "button:has-text(\"미팅 시작\")",
+          "button:has-text(\"회의 시작\")"
         ],
         "joined": [
           "[aria-label*=\"Leave meeting\"]",
@@ -85,36 +164,79 @@
         "mic_on_indicator": [
           "role=button[name=/Mute/i]",
           "role=button[name=/Mute microphone/i]",
-          "[aria-label*=\"Mute\"]"
+          "[aria-label*=\"Mute\"]",
+          "role=button[name=/음소거/]",
+          "[aria-label*=\"마이크 음소거\"]"
         ],
         "mic_off_indicator": [
           "role=button[name=/Unmute/i]",
           "role=button[name=/Unmute microphone/i]",
-          "[aria-label*=\"Unmute\"]"
+          "[aria-label*=\"Unmute\"]",
+          "role=button[name=/음소거 해제/]",
+          "[aria-label*=\"마이크 음소거 해제\"]"
         ],
         "camera_on_indicator": [
           "role=button[name=/Stop video/i]",
           "role=button[name=/Turn off camera/i]",
-          "[aria-label*=\"Stop video\"]"
+          "[aria-label*=\"Stop video\"]",
+          "role=button[name=/비디오 중지/]",
+          "[aria-label*=\"카메라 끄기\"]"
         ],
         "camera_off_indicator": [
           "role=button[name=/Start video/i]",
           "role=button[name=/Turn on camera/i]",
-          "[aria-label*=\"Start video\"]"
+          "[aria-label*=\"Start video\"]",
+          "role=button[name=/비디오 시작/]",
+          "[aria-label*=\"카메라 켜기\"]"
+        ],
+        "prejoin_mic_on_indicator": [
+          "role=button[name=/Mute/i]",
+          "role=button[name=/Mute microphone/i]",
+          "[aria-label*=\"Mute\"]",
+          "role=button[name=/음소거/]",
+          "[aria-label*=\"마이크 음소거\"]"
+        ],
+        "prejoin_mic_off_indicator": [
+          "role=button[name=/Unmute/i]",
+          "role=button[name=/Unmute microphone/i]",
+          "[aria-label*=\"Unmute\"]",
+          "role=button[name=/음소거 해제/]",
+          "[aria-label*=\"마이크 음소거 해제\"]"
+        ],
+        "prejoin_camera_on_indicator": [
+          "role=button[name=/Stop video/i]",
+          "role=button[name=/Turn off camera/i]",
+          "[aria-label*=\"Stop video\"]",
+          "role=button[name=/비디오 중지/]",
+          "[aria-label*=\"카메라 끄기\"]"
+        ],
+        "prejoin_camera_off_indicator": [
+          "role=button[name=/Start video/i]",
+          "role=button[name=/Turn on camera/i]",
+          "[aria-label*=\"Start video\"]",
+          "role=button[name=/비디오 시작/]",
+          "[aria-label*=\"카메라 켜기\"]"
         ],
         "screen_share_button": [
           "role=button[name=/Share content/i]",
           "role=button[name=/Share screen/i]",
-          "[aria-label*=\"Share\"]"
+          "[aria-label*=\"Share\"]",
+          "role=button[name=/화면 공유/]",
+          "role=button[name=/콘텐츠 공유/]",
+          "[aria-label*=\"공유\"]"
         ],
         "screen_share_on_indicator": [
           "role=button[name=/Stop sharing/i]",
           "text=/You are sharing/i",
-          "[aria-label*=\"Stop sharing\"]"
+          "[aria-label*=\"Stop sharing\"]",
+          "role=button[name=/공유 중지/]",
+          "text=/공유하고 있습니다/"
         ],
         "screen_share_stop": [
           "role=button[name=/Stop sharing/i]",
-          "[aria-label*=\"Stop sharing\"]"
+          "[aria-label*=\"Stop sharing\"]",
+          "role=button[name=/공유 중지/]",
+          "[aria-label*=\"공유 중지\"]"
         ]
       },
       "fallback": {

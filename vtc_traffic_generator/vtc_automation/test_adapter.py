@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import json
+import sys
 import time
 
 from vtc_automation.adapters import create_vtc_adapter
@@ -21,10 +23,17 @@ def build_config(args):
         "skip_device_selection": args.skip_device_selection,
     }
 
+    if args.prejoin_timeout_sec is not None:
+        adapter_config["prejoin_timeout_ms"] = int(args.prejoin_timeout_sec * 1000)
+    if args.join_timeout_sec is not None:
+        adapter_config["join_result_timeout_sec"] = args.join_timeout_sec
+        adapter_config["joined_timeout_ms"] = int(args.join_timeout_sec * 1000)
     if args.executable_path:
         adapter_config["executable_path"] = args.executable_path
     if args.launch_command:
         adapter_config["launch_command"] = args.launch_command
+    if args.adapter_config_json:
+        adapter_config.update(json.loads(args.adapter_config_json))
 
     return {
         "service": args.service,
@@ -48,30 +57,51 @@ async def run_adapter(args):
         if args.dump_only:
             return
 
-    if hasattr(adapter, "connect_to_meeting"):
-        await adapter.connect_to_meeting(args.vtc_url, args.display_name)
-    else:
-        await adapter.connect(args.leave_after_sec / 60)
+    async def smoke_cycle():
+        if hasattr(adapter, "connect_to_meeting"):
+            join_result = await adapter.connect_to_meeting(args.vtc_url, args.display_name)
+        else:
+            join_result = await adapter.connect(args.leave_after_sec / 60)
 
-    status = await adapter.is_in_meeting()
-    print(f"in_meeting={status}")
+        print(f"join_result={json.dumps(join_result, ensure_ascii=False, default=str)}", flush=True)
+        join_status = join_result.get("status") if isinstance(join_result, dict) else "joined" if join_result else None
+        if args.strict_success and join_status not in {"joined"}:
+            raise RuntimeError(f"Adapter join did not reach strict joined status: {join_result}")
+        if not args.strict_success and join_status not in {"joined", "waiting_for_others"}:
+            raise RuntimeError(f"Adapter join did not reach an accepted smoke status: {join_result}")
 
-    if args.screen_share_target:
-        started = await adapter.start_screen_share()
-        print(f"screen_share_started={started}")
-        if started:
-            await asyncio.sleep(args.screen_share_hold_sec)
-            stopped = await adapter.stop_screen_share()
-            print(f"screen_share_stopped={stopped}")
+        status = await adapter.is_in_meeting()
+        print(f"in_meeting={status}", flush=True)
 
-    if args.leave_after_sec is None:
-        print("Adapter is staying connected. Press Ctrl-C to stop this process.")
-        while True:
-            await asyncio.sleep(60)
+        if args.screen_share_target:
+            started = await adapter.start_screen_share()
+            print(f"screen_share_started={started}", flush=True)
+            if started:
+                await asyncio.sleep(args.screen_share_hold_sec)
+                stopped = await adapter.stop_screen_share()
+                print(f"screen_share_stopped={stopped}", flush=True)
 
-    await asyncio.sleep(args.leave_after_sec)
-    await adapter.leave()
-    await adapter.close()
+        if args.leave_after_sec is None:
+            print("Adapter is staying connected. Press Ctrl-C to stop this process.", flush=True)
+            while True:
+                await asyncio.sleep(60)
+
+        await asyncio.sleep(args.leave_after_sec)
+        await adapter.leave()
+
+    try:
+        await asyncio.wait_for(smoke_cycle(), timeout=args.overall_timeout_sec)
+    except asyncio.TimeoutError as exc:
+        print(f"ERROR overall smoke timeout after {args.overall_timeout_sec} seconds", flush=True)
+        diagnostics = None
+        if hasattr(adapter, "collect_diagnostics"):
+            diagnostics = await adapter.collect_diagnostics(stage="webex_smoke_overall_timeout")
+            print(f"diagnostics={json.dumps(diagnostics, ensure_ascii=False, default=str)}", flush=True)
+        raise RuntimeError(
+            f"Smoke test exceeded --overall-timeout-sec={args.overall_timeout_sec}. Diagnostics: {diagnostics}"
+        ) from exc
+    finally:
+        await adapter.close()
 
 
 def parse_args():
@@ -87,15 +117,20 @@ def parse_args():
     parser.add_argument("--window-title-regex", default="Jitsi Meet|testroom|jitsi")
     parser.add_argument("--launch-timeout-sec", type=int, default=20)
     parser.add_argument("--action-timeout-sec", type=int, default=10)
+    parser.add_argument("--prejoin-timeout-sec", type=float)
+    parser.add_argument("--join-timeout-sec", type=float)
+    parser.add_argument("--overall-timeout-sec", type=float, default=120)
     parser.add_argument("--event-log-path", default="/tmp/vtc-events.jsonl")
     parser.add_argument("--accessibility-dump-path")
     parser.add_argument("--screen-share-target")
     parser.add_argument("--screen-share-hold-sec", type=float, default=5)
     parser.add_argument("--display-backend", choices=["xvfb", "xorg_dummy"], default="xvfb")
     parser.add_argument("--skip-device-selection", action="store_true")
+    parser.add_argument("--strict-success", action="store_true")
     parser.add_argument("--dump-accessibility-tree", action="store_true")
     parser.add_argument("--dump-only", action="store_true")
     parser.add_argument("--leave-after-sec", type=float)
+    parser.add_argument("--adapter-config-json")
     parser.add_argument(
         "--ignore-certificate-errors",
         action=argparse.BooleanOptionalAction,
@@ -110,6 +145,10 @@ def main():
         asyncio.run(run_adapter(args))
     except KeyboardInterrupt:
         print(f"Interrupted at {time.time()}")
+        sys.exit(130)
+    except Exception as exc:
+        print(f"ERROR {exc}", flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@ import asyncio
 import glob
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -11,9 +13,16 @@ from typing import Any, Mapping
 from vtc_automation.event_log import emit_event, utc_now_iso
 
 try:
+    from playwright.async_api import Error as PlaywrightError
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 except ModuleNotFoundError:
+    PlaywrightError = Exception
     PlaywrightTimeoutError = TimeoutError
+
+try:
+    from playwright._impl._errors import TargetClosedError
+except ModuleNotFoundError:
+    TargetClosedError = RuntimeError
 
 from .browser import BrowserMeetingAdapter
 
@@ -27,25 +36,148 @@ class WebexAdapter(BrowserMeetingAdapter):
             'button:has-text("Accept All")',
             'button:has-text("Accept")',
             'button:has-text("I accept")',
+            'button:has-text("수락")',
             '[data-test*="cookie"] button:has-text("Accept")',
+            '[data-test*="cookie"] button:has-text("수락")',
+        ],
+        "cookie_reject": [
+            'button:has-text("Reject all")',
+            'button:has-text("Reject All")',
+            'button:has-text("Reject")',
+            'button:has-text("Decline")',
+            'button:has-text("거절")',
+            '[data-test*="cookie"] button:has-text("Reject")',
+            '[data-test*="cookie"] button:has-text("거절")',
+        ],
+        "cookie_close": [
+            '[data-test*="cookie"] button[aria-label*="Close" i]',
+            '[data-test*="cookie"] button[aria-label*="닫기" i]',
+            '[aria-label*="Close cookie" i]',
+            '[aria-label*="쿠키" i][aria-label*="닫기" i]',
+            'button[aria-label="Close"]',
+            'button[aria-label="닫기"]',
+        ],
+        "cookie_settings": [
+            'button:has-text("Cookie settings")',
+            'button:has-text("Manage cookie settings")',
+            'button:has-text("쿠키 설정 관리")',
         ],
         "join_from_browser": [
             'button:has-text("Join from your browser")',
             'a:has-text("Join from your browser")',
+            'button:has-text("Join from this browser")',
+            'a:has-text("Join from this browser")',
+            'button:has-text("Continue in browser")',
+            'a:has-text("Continue in browser")',
+            'button:has-text("Continue in this browser")',
+            'a:has-text("Continue in this browser")',
+            'button:has-text("Join from browser")',
+            'a:has-text("Join from browser")',
+            'button:has-text("Use web app")',
+            'a:has-text("Use web app")',
+            'button:has-text("Use browser")',
+            'a:has-text("Use browser")',
+            'button:has-text("Open in browser")',
+            'a:has-text("Open in browser")',
+            'button:has-text("Join using browser")',
+            'a:has-text("Join using browser")',
+            'text="Having trouble? Join from your browser"',
+            'button:has-text("브라우저에서 참여")',
+            'a:has-text("브라우저에서 참여")',
+            'button:has-text("브라우저에서 참가")',
+            'a:has-text("브라우저에서 참가")',
+            'button:has-text("브라우저로 참여")',
+            'a:has-text("브라우저로 참여")',
+            'button:has-text("브라우저로 참가")',
+            'a:has-text("브라우저로 참가")',
+            'button:has-text("브라우저에서 계속")',
+            'a:has-text("브라우저에서 계속")',
+            'button:has-text("이 브라우저에서 참여")',
+            'a:has-text("이 브라우저에서 참여")',
+            'button:has-text("이 브라우저에서 참가")',
+            'a:has-text("이 브라우저에서 참가")',
+            'button:has-text("웹에서 참여")',
+            'a:has-text("웹에서 참여")',
+            'button:has-text("웹에서 참가")',
+            'a:has-text("웹에서 참가")',
+            'button:has-text("웹 앱 사용")',
+            'a:has-text("웹 앱 사용")',
+            'button:has-text("앱 없이 참여")',
+            'a:has-text("앱 없이 참여")',
+            'button:has-text("앱 없이 참가")',
+            'a:has-text("앱 없이 참가")',
             '[data-test="join-from-browser"]',
             '[aria-label*="Join from your browser"]',
+            '[aria-label*="Join from this browser"]',
+            '[aria-label*="Join from browser"]',
+            '[aria-label*="Join using browser"]',
+            '[aria-label*="브라우저"]',
+            '[aria-label*="웹"]',
         ],
         "browser_join": [
             'button:has-text("Join from your browser")',
             'a:has-text("Join from your browser")',
+            'button:has-text("Join from this browser")',
+            'a:has-text("Join from this browser")',
+            'button:has-text("Join from browser")',
+            'a:has-text("Join from browser")',
             '[data-test="join-from-browser"]',
             '[aria-label*="Join from your browser"]',
+            '[aria-label*="Join from this browser"]',
+            '[aria-label*="Join from browser"]',
         ],
         "continue_in_browser": [
             'button:has-text("Continue in browser")',
             'button:has-text("Continue in this browser")',
             'a:has-text("Continue in browser")',
+            'a:has-text("Continue in this browser")',
+            'button:has-text("브라우저에서 계속")',
+            'a:has-text("브라우저에서 계속")',
             '[aria-label*="Continue in browser"]',
+            '[aria-label*="Continue in this browser"]',
+            '[aria-label*="브라우저에서 계속"]',
+        ],
+        "use_web_app": [
+            'button:has-text("Use web app")',
+            'a:has-text("Use web app")',
+            'button:has-text("Use browser")',
+            'a:has-text("Use browser")',
+            'button:has-text("웹 앱 사용")',
+            'a:has-text("웹 앱 사용")',
+            '[aria-label*="Use web app"]',
+            '[aria-label*="Use browser"]',
+            '[aria-label*="웹 앱 사용"]',
+        ],
+        "join_from_this_browser": [
+            'button:has-text("Join from this browser")',
+            'a:has-text("Join from this browser")',
+            'button:has-text("이 브라우저에서 참여")',
+            'a:has-text("이 브라우저에서 참여")',
+            'button:has-text("이 브라우저에서 참가")',
+            'a:has-text("이 브라우저에서 참가")',
+            '[aria-label*="Join from this browser"]',
+            '[aria-label*="이 브라우저"]',
+        ],
+        "open_in_browser": [
+            'button:has-text("Open in browser")',
+            'a:has-text("Open in browser")',
+            'button:has-text("브라우저로 참여")',
+            'a:has-text("브라우저로 참여")',
+            'button:has-text("브라우저로 참가")',
+            'a:has-text("브라우저로 참가")',
+            '[aria-label*="Open in browser"]',
+            '[aria-label*="브라우저로"]',
+        ],
+        "cancel_open_app_prompt": [
+            'button:has-text("Cancel")',
+            'button:has-text("Not now")',
+            'button:has-text("Not Now")',
+            'button:has-text("No thanks")',
+            'button:has-text("취소")',
+            '[aria-label="Cancel"]',
+            '[aria-label*="Not now"]',
+            '[aria-label*="Not Now"]',
+            '[aria-label*="취소"]',
         ],
         "join_as_guest": [
             'button:has-text("Join as a guest")',
@@ -61,15 +193,49 @@ class WebexAdapter(BrowserMeetingAdapter):
         ],
         "display_name": [
             'input[name="displayName"]',
+            'input[name*="display" i]',
             'input[name="name"]',
+            'input[name*="name" i]',
+            'input[id*="display" i]',
+            'input[id*="name" i]',
             'input[aria-label*="name" i]',
             'input[placeholder*="name" i]',
+            'input[placeholder*="Your name" i]',
+            'input[placeholder*="Display name" i]',
+            'input[aria-label*="이름" i]',
+            'input[placeholder*="이름" i]',
+            'input[aria-label*="참가자" i]',
+            'input[placeholder*="참가자" i]',
+            'input[aria-label*="이름을 입력" i]',
+            'input[placeholder*="이름을 입력" i]',
+            'input[type="text"]',
+            "input:not([type])",
+            "textarea",
+            '[role="textbox"]',
+            '[contenteditable="true"]',
         ],
         "name_input": [
             'input[name="displayName"]',
+            'input[name*="display" i]',
             'input[name="name"]',
+            'input[name*="name" i]',
+            'input[id*="display" i]',
+            'input[id*="name" i]',
             'input[aria-label*="name" i]',
             'input[placeholder*="name" i]',
+            'input[placeholder*="Your name" i]',
+            'input[placeholder*="Display name" i]',
+            'input[aria-label*="이름" i]',
+            'input[placeholder*="이름" i]',
+            'input[aria-label*="참가자" i]',
+            'input[placeholder*="참가자" i]',
+            'input[aria-label*="이름을 입력" i]',
+            'input[placeholder*="이름을 입력" i]',
+            'input[type="text"]',
+            "input:not([type])",
+            "textarea",
+            '[role="textbox"]',
+            '[contenteditable="true"]',
         ],
         "email_input": [
             'input[type="email"]',
@@ -103,30 +269,129 @@ class WebexAdapter(BrowserMeetingAdapter):
         "start_meeting_button": [
             'button:has-text("Start meeting")',
             'button:has-text("Start Meeting")',
+            'button:has-text("미팅 시작")',
+            'button:has-text("회의 시작")',
+            '[role="button"]:has-text("Start meeting")',
+            '[role="button"]:has-text("Start Meeting")',
+            '[role="button"]:has-text("미팅 시작")',
+            '[role="button"]:has-text("회의 시작")',
+            'mdc-button:has-text("Start meeting")',
+            'mdc-button:has-text("Start Meeting")',
+            'mdc-button:has-text("미팅 시작")',
+            'mdc-button:has-text("회의 시작")',
+            'role=button[name=/Start meeting/i]',
+            'role=button[name=/미팅 시작/]',
+            'role=button[name=/회의 시작/]',
+            'text="Start meeting"',
+            'text="Start Meeting"',
+            'text="미팅 시작"',
+            'text="회의 시작"',
             '[aria-label*="Start meeting"]',
+            '[aria-label*="미팅 시작"]',
+            '[aria-label*="회의 시작"]',
         ],
         "join_button": [
             'button:has-text("Join meeting")',
+            'button:has-text("Join Meeting")',
             'button:has-text("Join webinar")',
             'button:has-text("Join")',
+            'button:has-text("미팅 참여")',
+            'button:has-text("회의 참여")',
+            'button:has-text("참여")',
+            'button:has-text("참가")',
+            '[role="button"]:has-text("Join meeting")',
+            '[role="button"]:has-text("Join Meeting")',
+            '[role="button"]:has-text("Join")',
+            '[role="button"]:has-text("미팅 참여")',
+            '[role="button"]:has-text("회의 참여")',
+            '[role="button"]:has-text("참여")',
+            '[role="button"]:has-text("참가")',
+            'mdc-button:has-text("Join meeting")',
+            'mdc-button:has-text("Join Meeting")',
+            'mdc-button:has-text("Join")',
+            'mdc-button:has-text("미팅 참여")',
+            'mdc-button:has-text("회의 참여")',
+            'mdc-button:has-text("참여")',
+            'mdc-button:has-text("참가")',
+            'role=button[name=/Join meeting/i]',
+            'role=button[name=/Join/i]',
+            'role=button[name=/미팅 참여/]',
+            'role=button[name=/회의 참여/]',
+            'role=button[name=/참여/]',
+            'role=button[name=/참가/]',
+            'text="Join meeting"',
+            'text="Join Meeting"',
+            'text="Join"',
+            'text="미팅 참여"',
+            'text="회의 참여"',
+            'text="참여"',
+            'text="참가"',
             '[aria-label*="Join meeting"]',
             '[aria-label="Join"]',
+            'button:has-text("미팅 시작")',
+            'button:has-text("회의 시작")',
+            '[role="button"]:has-text("미팅 시작")',
+            '[role="button"]:has-text("회의 시작")',
+            'mdc-button:has-text("미팅 시작")',
+            'mdc-button:has-text("회의 시작")',
+            'role=button[name=/미팅 시작/]',
+            'role=button[name=/회의 시작/]',
+            'text="미팅 시작"',
+            'text="회의 시작"',
+            '[aria-label*="미팅 참여"]',
+            '[aria-label*="회의 참여"]',
+            '[aria-label*="참여"]',
+            '[aria-label*="참가"]',
+            '[aria-label*="미팅 시작"]',
+            '[aria-label*="회의 시작"]',
+        ],
+        "final_join_fast": [
+            'text="미팅 참여"',
+            'text="회의 참여"',
+            'text="Join meeting"',
+            'text="Join Meeting"',
+            '[role="button"]:has-text("미팅 참여")',
+            '[role="button"]:has-text("회의 참여")',
+            '[role="button"]:has-text("Join meeting")',
+            '[role="button"]:has-text("Join Meeting")',
+            'mdc-button:has-text("미팅 참여")',
+            'mdc-button:has-text("회의 참여")',
+            'mdc-button:has-text("Join meeting")',
+            'mdc-button:has-text("Join Meeting")',
+            'button:has-text("미팅 참여")',
+            'button:has-text("회의 참여")',
+            'button:has-text("Join meeting")',
+            'button:has-text("Join Meeting")',
+            'role=button[name=/미팅 참여/]',
+            'role=button[name=/회의 참여/]',
+            'role=button[name=/Join meeting/i]',
+            'role=button[name=/Join Meeting/i]',
         ],
         "joined_indicator": [
+            'text=/미팅 중/',
             '[aria-label*="Leave meeting"]',
             '[aria-label*="Leave"]',
+            '[aria-label*="미팅 나가기"]',
+            '[aria-label*="나가기"]',
             'button:has-text("Leave")',
+            'button:has-text("나가기")',
             '[data-test*="leave"]',
             '[aria-label*="Mute"]',
             '[aria-label*="Unmute"]',
+            '[aria-label*="음소거"]',
         ],
         "joined": [
+            'text=/미팅 중/',
             '[aria-label*="Leave meeting"]',
             '[aria-label*="Leave"]',
+            '[aria-label*="미팅 나가기"]',
+            '[aria-label*="나가기"]',
             'button:has-text("Leave")',
+            'button:has-text("나가기")',
             '[data-test*="leave"]',
             '[aria-label*="Mute"]',
             '[aria-label*="Unmute"]',
+            '[aria-label*="음소거"]',
         ],
         "lobby_indicator": [
             'text=/waiting for.*(host|organizer)/i',
@@ -143,6 +408,15 @@ class WebexAdapter(BrowserMeetingAdapter):
             'text=/removed from the meeting/i',
             '[data-test*="error"]',
         ],
+        "waiting_for_others_indicator": [
+            'text="다른 사용자가 참여할 때까지 기다리는 중"',
+            'text="다른 사용자가 참여할 때까지"',
+            'text="기다리는 중"',
+            'text="Waiting for others to join"',
+            'text="Waiting for others"',
+            'text=/Waiting for others to join/i',
+            'text=/Waiting for others/i',
+        ],
         "mic_enable": [
             '[aria-label*="Unmute"]',
             'button:has-text("Unmute")',
@@ -157,11 +431,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             'role=button[name=/Mute/i]',
             'role=button[name=/Mute microphone/i]',
             '[aria-label*="Mute"]',
+            'role=button[name=/음소거/]',
+            'role=button[name=/마이크 음소거/]',
+            '[aria-label*="음소거"]',
         ],
         "mic_off_indicator": [
             'role=button[name=/Unmute/i]',
             'role=button[name=/Unmute microphone/i]',
             '[aria-label*="Unmute"]',
+            'role=button[name=/음소거 해제/]',
+            'role=button[name=/마이크 음소거 해제/]',
+            '[aria-label*="음소거 해제"]',
         ],
         "camera_enable": [
             '[aria-label*="Start video"]',
@@ -179,11 +459,53 @@ class WebexAdapter(BrowserMeetingAdapter):
             'role=button[name=/Stop video/i]',
             'role=button[name=/Turn off camera/i]',
             '[aria-label*="Stop video"]',
+            'role=button[name=/비디오 중지/]',
+            'role=button[name=/카메라 끄기/]',
+            '[aria-label*="비디오 중지"]',
+            '[aria-label*="카메라 끄기"]',
         ],
         "camera_off_indicator": [
             'role=button[name=/Start video/i]',
             'role=button[name=/Turn on camera/i]',
             '[aria-label*="Start video"]',
+            'role=button[name=/비디오 시작/]',
+            'role=button[name=/카메라 켜기/]',
+            '[aria-label*="비디오 시작"]',
+            '[aria-label*="카메라 켜기"]',
+        ],
+        "prejoin_mic_on_indicator": [
+            'role=button[name=/Mute/i]',
+            'role=button[name=/Mute microphone/i]',
+            '[aria-label*="Mute"]',
+            'role=button[name=/음소거/]',
+            'role=button[name=/마이크 음소거/]',
+            '[aria-label*="음소거"]',
+        ],
+        "prejoin_mic_off_indicator": [
+            'role=button[name=/Unmute/i]',
+            'role=button[name=/Unmute microphone/i]',
+            '[aria-label*="Unmute"]',
+            'role=button[name=/음소거 해제/]',
+            'role=button[name=/마이크 음소거 해제/]',
+            '[aria-label*="음소거 해제"]',
+        ],
+        "prejoin_camera_on_indicator": [
+            'role=button[name=/Stop video/i]',
+            'role=button[name=/Turn off camera/i]',
+            '[aria-label*="Stop video"]',
+            'role=button[name=/비디오 중지/]',
+            'role=button[name=/카메라 끄기/]',
+            '[aria-label*="비디오 중지"]',
+            '[aria-label*="카메라 끄기"]',
+        ],
+        "prejoin_camera_off_indicator": [
+            'role=button[name=/Start video/i]',
+            'role=button[name=/Turn on camera/i]',
+            '[aria-label*="Start video"]',
+            'role=button[name=/비디오 시작/]',
+            'role=button[name=/카메라 켜기/]',
+            '[aria-label*="비디오 시작"]',
+            '[aria-label*="카메라 켜기"]',
         ],
         "share_start": [
             '[aria-label*="Share content"]',
@@ -199,16 +521,28 @@ class WebexAdapter(BrowserMeetingAdapter):
         "screen_share_button": [
             'role=button[name=/Share content/i]',
             'role=button[name=/Share screen/i]',
+            'role=button[name=/화면 공유/]',
+            'role=button[name=/콘텐츠 공유/]',
+            'role=button[name=/공유/]',
             '[aria-label*="Share"]',
+            '[aria-label*="화면 공유"]',
+            '[aria-label*="콘텐츠 공유"]',
+            '[aria-label*="공유"]',
         ],
         "screen_share_on_indicator": [
             'role=button[name=/Stop sharing/i]',
             'text=/You are sharing/i',
+            'role=button[name=/공유 중지/]',
+            'text=/공유를 중지/',
+            'text=/공유하고 있습니다/',
             '[aria-label*="Stop sharing"]',
+            '[aria-label*="공유 중지"]',
         ],
         "screen_share_stop": [
             'role=button[name=/Stop sharing/i]',
+            'role=button[name=/공유 중지/]',
             '[aria-label*="Stop sharing"]',
+            '[aria-label*="공유 중지"]',
         ],
         "share_target": [
             'button:has-text("Screen")',
@@ -235,6 +569,33 @@ class WebexAdapter(BrowserMeetingAdapter):
     def __init__(self, config: Mapping[str, Any]):
         super().__init__(config)
         adapter_config = self.adapter_config()
+        if isinstance(adapter_config, dict):
+            adapter_config.setdefault("apply_initial_media_state_in_prejoin", True)
+            adapter_config.setdefault("strict_prejoin_media_state", False)
+            adapter_config.setdefault("fail_on_prejoin_media_state_unverified", False)
+            adapter_config.setdefault("post_join_media_check", False)
+            adapter_config.setdefault("strict_post_join_media_state", False)
+            adapter_config.setdefault("fail_on_post_join_media_unverified", False)
+            adapter_config.setdefault("dismiss_external_protocol_dialog", True)
+            adapter_config.setdefault("external_protocol_dismiss_method", "auto")
+            adapter_config.setdefault("strict_external_protocol_dismiss", False)
+            adapter_config.setdefault("suppress_external_protocol_dialog", True)
+            adapter_config.setdefault("use_persistent_browser_profile_for_webex", True)
+            adapter_config.setdefault(
+                "blocked_external_protocol_schemes",
+                [
+                    "webex",
+                    "wbx",
+                    "ciscospark",
+                    "webexteams",
+                    "webexapp",
+                    "webex-meetings",
+                    "cisco-webex",
+                ],
+            )
+            adapter_config.setdefault("protocol_handler_excluded_scheme_value", True)
+            adapter_config.setdefault("retry_navigation_on_page_closed", True)
+            adapter_config.setdefault("max_navigation_retries", 1)
         self._playwright = None
         self.browser = None
         self.context = None
@@ -246,6 +607,15 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._media_ready_notified = False
         self.browser_log = []
         self.sanity_check_results = []
+        self.external_protocol_dismiss_attempts = []
+        self.external_protocol_profile_path = None
+        self._last_page_metadata_error = None
+        self._last_display_name_fill_method = None
+
+    def _progress(self, stage, details=None):
+        payload = {"stage": stage, **dict(details or {})}
+        print(f"webex_progress {json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}", flush=True)
+        emit_event(self.config, stage, dict(details or {}), self.service_name)
 
     def adapter_config(self):
         return self.config.get("adapter_config", {})
@@ -312,6 +682,97 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         return options
 
+    def persistent_context_options(self):
+        options = dict(self.launch_options())
+        options.update(self.context_options())
+        return options
+
+    def _use_persistent_browser_profile(self):
+        return bool(self.adapter_config().get("use_persistent_browser_profile_for_webex", True))
+
+    def _external_protocol_suppression_enabled(self):
+        return bool(self.adapter_config().get("suppress_external_protocol_dialog", True))
+
+    def _chrome_user_data_dir(self):
+        adapter_config = self.adapter_config()
+        configured = adapter_config.get("chrome_user_data_dir") or adapter_config.get("user_data_dir")
+        if configured:
+            return Path(str(configured)).expanduser()
+
+        bot = self.config.get("bot", {})
+        if not isinstance(bot, Mapping):
+            bot = {}
+        bot_name = (
+            adapter_config.get("bot_id")
+            or adapter_config.get("display_name")
+            or self.config.get("bot_name")
+            or self.config.get("client_id")
+            or bot.get("display_name")
+            or "default"
+        )
+        safe_bot_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(bot_name)).strip("_")
+        return Path("artifacts/webex_chrome_profile") / (safe_bot_name or "default")
+
+    def _prepare_external_protocol_suppression_profile(self):
+        user_data_dir = self._chrome_user_data_dir()
+        default_dir = user_data_dir / "Default"
+        default_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self._external_protocol_suppression_enabled():
+            self.external_protocol_profile_path = str(user_data_dir)
+            return user_data_dir
+
+        excluded_schemes = self._protocol_handler_excluded_schemes()
+        for path in (user_data_dir / "Local State", default_dir / "Preferences"):
+            self._merge_chrome_json_file(path, excluded_schemes)
+
+        self.external_protocol_profile_path = str(user_data_dir)
+        details = {
+            "profile_path": str(user_data_dir),
+            "excluded_schemes": excluded_schemes,
+            "persistent_context": self._use_persistent_browser_profile(),
+        }
+        self._append_browser_log(
+            "webex_external_protocol_suppression_profile_prepared",
+            json.dumps(details, sort_keys=True, default=str),
+        )
+        emit_event(
+            self.config,
+            "webex_external_protocol_suppression_profile_prepared",
+            details,
+            self.service_name,
+        )
+        return user_data_dir
+
+    def _protocol_handler_excluded_schemes(self):
+        value = bool(self.adapter_config().get("protocol_handler_excluded_scheme_value", True))
+        schemes = self.adapter_config().get("blocked_external_protocol_schemes") or []
+        return {str(scheme): value for scheme in schemes if str(scheme)}
+
+    def _merge_chrome_json_file(self, path, excluded_schemes):
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8") or "{}")
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception as exc:
+                self._append_browser_log("chrome_profile_json_read_failed", f"{path}: {exc!r}")
+                data = {}
+
+        protocol_handler = data.setdefault("protocol_handler", {})
+        if not isinstance(protocol_handler, dict):
+            protocol_handler = {}
+            data["protocol_handler"] = protocol_handler
+        existing = protocol_handler.setdefault("excluded_schemes", {})
+        if not isinstance(existing, dict):
+            existing = {}
+            protocol_handler["excluded_schemes"] = existing
+        existing.update(excluded_schemes)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
     def selectors(self, name):
         configured = self.adapter_config().get("selectors", {})
         if isinstance(configured, Mapping) and name in configured:
@@ -338,6 +799,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         if isinstance(configured, Mapping) and alias in configured:
             value = configured[alias]
             return value if isinstance(value, list) else [value]
+        if name == "browser_join":
+            return list(self.DEFAULT_SELECTORS.get("join_from_browser", []))
         return list(self.DEFAULT_SELECTORS.get(name, []))
 
     def timeout_ms(self, key, default):
@@ -352,11 +815,27 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         from playwright.async_api import async_playwright
 
+        self._progress("webex_launch_start")
         if not self.adapter_config().get("skip_sanity_checks", False):
             self.run_sanity_checks()
         self._playwright = await async_playwright().start()
-        self.browser = await self._playwright.chromium.launch(**self.launch_options())
-        self.context = await self.browser.new_context(**self.context_options())
+        if self._use_persistent_browser_profile():
+            user_data_dir = self._prepare_external_protocol_suppression_profile()
+            options = self.persistent_context_options()
+            self.context = await self._playwright.chromium.launch_persistent_context(
+                str(user_data_dir),
+                **options,
+            )
+            self.browser = getattr(self.context, "browser", None)
+            if callable(self.browser):
+                self.browser = self.browser()
+            self._attach_browser_logging(self.browser)
+        else:
+            self._prepare_external_protocol_suppression_profile()
+            self.browser = await self._playwright.chromium.launch(**self.launch_options())
+            self._attach_browser_logging(self.browser)
+            self.context = await self.browser.new_context(**self.context_options())
+        self._attach_context_logging(self.context)
         self.page = await self.context.new_page()
         self._attach_page_logging(self.page)
         emit_event(self.config, "adapter_launched", {"backend": "playwright"}, self.service_name)
@@ -390,65 +869,155 @@ class WebexAdapter(BrowserMeetingAdapter):
         emit_event(self.config, "webex_join_start", {"vtc_url": vtc_url}, self.service_name)
         emit_event(self.config, "meeting_join_start", {"vtc_url": vtc_url}, self.service_name)
 
-        await self.page.goto(
-            vtc_url,
-            wait_until="domcontentloaded",
-            timeout=self.timeout_ms("navigation_timeout_ms", 45000),
+        self._progress("webex_page_goto_start", {"vtc_url": vtc_url})
+        page_metadata = await self._navigate_to_meeting_page(vtc_url)
+        self._progress(
+            "webex_page_opened",
+            {"vtc_url": vtc_url, "title": page_metadata["title"], "url": page_metadata["url"]},
         )
-        emit_event(self.config, "webex_page_opened", {"vtc_url": vtc_url, "title": await self.page.title()}, self.service_name)
 
         page_load_wait_sec = float(self.adapter_config().get("page_load_wait_sec", 2))
         if page_load_wait_sec > 0:
             await asyncio.sleep(page_load_wait_sec)
+            await self._dismiss_external_protocol_prompt(stage="after_goto_settle")
 
-        await self._run_prejoin_transition_loop(display_name)
+        prejoin_result = await self._run_prejoin_transition_loop(display_name)
+        if prejoin_result["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            return await self._handle_join_result(vtc_url, prejoin_result)
 
         existing_result = await self._wait_for_join_result(0)
-        if existing_result["status"] in {"joined", "lobby", "blocked"}:
+        if existing_result["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
             return await self._handle_join_result(vtc_url, existing_result)
 
-        if bool(self.adapter_config().get("initial_microphone_enabled", True)):
-            await self.unmute_microphone()
-        else:
-            await self.mute_microphone()
-
-        if bool(self.adapter_config().get("initial_camera_enabled", True)):
-            await self.start_camera()
-        else:
-            await self.stop_camera()
-
-        join_selector = await self._click_first_visible(
-            "start_meeting_button",
-            required=False,
-            timeout_ms=self.timeout_ms("optional_selector_timeout_ms", 1000),
-        )
-        if not join_selector:
-            join_selector = await self._click_first_visible(
-                "join_button",
-                required=True,
-                timeout_ms=self.timeout_ms("prejoin_timeout_ms", 30000),
+        if prejoin_result["status"] == "timeout":
+            diagnostics = await self._maybe_await(
+                self.collect_diagnostics(
+                    stage="webex_prejoin_failed",
+                    extra={
+                        "join_result": prejoin_result,
+                        "url": self._safe_page_url(),
+                        "title": await self._safe_page_title(),
+                    },
+                )
             )
-        emit_event(self.config, "webex_join_clicked", {"selector": join_selector, "success": True}, self.service_name)
+            raise RuntimeError(
+                f"Webex prejoin timed out before final Join button. "
+                f"Visible text: {prejoin_result.get('visible_text', '')}. Diagnostics: {diagnostics}"
+            )
 
+        if prejoin_result["status"] == "final_join":
+            self._progress("final_join_button_seen", {"selector": prejoin_result.get("selector")})
+        join_selector = await self._click_final_join_control(display_name)
+        self._progress("final_join_clicked", {"selector": join_selector, "success": True})
+
+        self._progress("waiting_for_join_result")
         result = await self._wait_for_join_result(
             float(self.adapter_config().get("join_result_timeout_sec", self.timeout_ms("joined_timeout_ms", 45000) / 1000))
         )
         return await self._handle_join_result(vtc_url, result)
 
+    async def _navigate_to_meeting_page(self, vtc_url):
+        retries = self.timeout_ms("max_navigation_retries", 1)
+        if not bool(self.adapter_config().get("retry_navigation_on_page_closed", True)):
+            retries = 0
+
+        for attempt in range(retries + 1):
+            if not self._is_page_available():
+                if not await self._open_replacement_page():
+                    break
+
+            self._last_page_metadata_error = None
+            await self.page.goto(
+                vtc_url,
+                wait_until="domcontentloaded",
+                timeout=self.timeout_ms("navigation_timeout_ms", 45000),
+            )
+            await self._dismiss_external_protocol_prompt(stage="after_goto")
+
+            title = await self._safe_page_title()
+            url = self._safe_page_url()
+            if self._is_page_available() and not self._page_metadata_saw_target_closed():
+                return {"title": title, "url": url}
+
+            await self._handle_page_closed_after_goto(vtc_url, title, url, attempt, retries)
+
+        raise RuntimeError("Webex page closed after navigation before prejoin flow could start")
+
+    async def _handle_page_closed_after_goto(self, vtc_url, title, url, attempt, retries):
+        details = {
+            "vtc_url": vtc_url,
+            "title": title,
+            "url": url,
+            "attempt": attempt,
+            "max_navigation_retries": retries,
+            "browser_log": list(self.browser_log),
+        }
+        self._append_browser_log("webex_page_closed_after_goto", json.dumps(details, default=str))
+        await self._maybe_await(self.collect_diagnostics(stage="webex_page_closed_after_goto", extra=details))
+        if attempt < retries:
+            if await self._open_replacement_page():
+                emit_event(self.config, "webex_navigation_retry", details, self.service_name)
+                return
+        raise RuntimeError("Webex page closed after navigation before prejoin flow could start")
+
+    async def _open_replacement_page(self):
+        if self.context is None:
+            return False
+        try:
+            if self.browser is not None and hasattr(self.browser, "is_connected"):
+                connected = await self._maybe_await(self.browser.is_connected())
+                if not connected:
+                    return False
+            self.page = await self._maybe_await(self.context.new_page())
+            self._attach_page_logging(self.page)
+            self._append_browser_log("page_recreated", "created replacement page after close")
+            return True
+        except self._safe_playwright_errors() as exc:
+            self._append_browser_log("page_recreate_failed", repr(exc))
+            return False
+        except Exception as exc:
+            self._append_browser_log("page_recreate_failed", repr(exc))
+            return False
+
     async def _handle_join_result(self, vtc_url, result):
         emit_event(self.config, "webex_join_result", result, self.service_name)
 
         if result["status"] == "joined":
+            self._progress("joined_detected", {"selector": result.get("selector")})
             if hasattr(self, "joined"):
                 self.joined = True
             if hasattr(self, "in_meeting"):
                 self.in_meeting = True
             emit_event(self.config, "webex_joined_meeting", {"vtc_url": vtc_url, "selector": result.get("selector")}, self.service_name)
             self._notify_meeting_joined(vtc_url)
-            self._notify_media_ready(vtc_url)
-            return True
+            media_ready = await self._maybe_run_post_join_media_check(vtc_url)
+            status = {
+                "status": "joined",
+                "selector": result.get("selector"),
+                "visible_text": result.get("visible_text", ""),
+                "media_ready": media_ready,
+            }
+            return status
+
+        if result["status"] == "waiting_for_others":
+            self._progress("webex_waiting_for_others_detected", {"selector": result.get("selector")})
+            if hasattr(self, "joined"):
+                self.joined = True
+            if hasattr(self, "in_meeting"):
+                self.in_meeting = True
+            emit_event(self.config, "webex_waiting_for_others_detected", result, self.service_name)
+            self._notify_meeting_joined(vtc_url)
+            return {
+                "status": "waiting_for_others",
+                "selector": result.get("selector"),
+                "joined_selector": result.get("joined_selector"),
+                "leave_control_present": bool(result.get("joined_selector")),
+                "visible_text": result.get("visible_text", ""),
+                "media_ready": False,
+            }
 
         if result["status"] == "lobby":
+            self._progress("lobby_detected", {"selector": result.get("selector")})
             diagnostics = await self._maybe_await(
                 self.collect_diagnostics(stage="lobby", extra={"join_result": result})
             )
@@ -461,8 +1030,14 @@ class WebexAdapter(BrowserMeetingAdapter):
                 f"Webex join stopped in lobby/waiting screen. Visible text: {result.get('visible_text', '')}"
             )
 
+        if result["status"] == "blocked":
+            self._progress("blocked_detected", {"selector": result.get("selector")})
+
+        if result["status"] == "timeout":
+            self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
+        stage = "webex_join_result_timeout" if result["status"] == "timeout" else f"join_{result['status']}"
         diagnostics = await self._maybe_await(
-            self.collect_diagnostics(stage=f"join_{result['status']}", extra={"join_result": result})
+            self.collect_diagnostics(stage=stage, extra={"join_result": result})
         )
         raise RuntimeError(
             f"Webex join failed with status {result['status']}. "
@@ -478,38 +1053,239 @@ class WebexAdapter(BrowserMeetingAdapter):
         password = self.adapter_config().get("password") or self.adapter_config().get("meeting_password")
 
         while asyncio.get_running_loop().time() < deadline:
-            if (
-                await self._visible_optional("joined_indicator", timeout_ms=250)
-                or await self._visible_optional("lobby_indicator", timeout_ms=250)
-                or await self._visible_optional("blocked_indicator", timeout_ms=250)
-            ):
-                return True
+            await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
+            state = await self._prejoin_state(timeout_ms=250)
+            if state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+                return state
 
             progressed = False
+            if await self._name_entry_text_visible():
+                self._progress("display_name_page_detected")
+                if await self._fill_display_name(display_name, timeout_ms=timeout):
+                    progressed = True
+                    state = await self._prejoin_state(timeout_ms=75)
+                    if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                        return state
+            progressed = bool(await self._click_first_visible("cookie_close", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_first_visible("cookie_reject", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
             progressed = bool(await self._click_first_visible("cookie_accept", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._click_first_visible("join_from_browser", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._click_first_visible("continue_in_browser", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_browser_prejoin_selector("cancel_open_app_prompt", timeout_ms=timeout)) or progressed
+            await self._dismiss_external_protocol_prompt(stage="before_browser_join")
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            self._progress("browser_join_click_attempt")
+            progressed = bool(await self._click_browser_prejoin_selector("join_from_browser", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_browser_prejoin_selector("join_from_this_browser", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_browser_prejoin_selector("continue_in_browser", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_browser_prejoin_selector("use_web_app", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
+            progressed = bool(await self._click_browser_prejoin_selector("open_in_browser", timeout_ms=timeout)) or progressed
+            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+                progressed = True
+                state = await self._prejoin_state(timeout_ms=75)
+                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    return state
             progressed = bool(await self._click_first_visible("join_as_guest", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_first_visible("display_name", display_name, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_display_name(display_name, timeout_ms=timeout)) or progressed
             progressed = bool(await self._fill_first_visible("email_input", email, timeout_ms=timeout)) or progressed
             progressed = bool(await self._fill_first_visible("password_input", password, timeout_ms=timeout)) or progressed
             progressed = bool(await self._click_first_visible("continue_button", timeout_ms=timeout)) or progressed
             progressed = bool(await self._click_first_visible("next_button", timeout_ms=timeout)) or progressed
             progressed = bool(await self._click_first_visible("use_computer_audio", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_first_visible("display_name", display_name, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._fill_display_name(display_name, timeout_ms=timeout)) or progressed
+            progressed = bool(await self._apply_prejoin_media_preferences()) or progressed
 
-            if (
-                await self._visible_optional("start_meeting_button", timeout_ms=250)
-                or await self._visible_optional("join_button", timeout_ms=250)
-                or await self._visible_optional("joined_indicator", timeout_ms=250)
-                or await self._visible_optional("lobby_indicator", timeout_ms=250)
-                or await self._visible_optional("blocked_indicator", timeout_ms=250)
-            ):
-                return True
+            state = await self._prejoin_state(timeout_ms=250)
+            if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                return state
 
             await asyncio.sleep(0.2 if progressed else 0.5)
 
+        await self._dismiss_external_protocol_prompt(stage="prejoin_timeout")
+        await self._fill_display_name_if_needed(display_name, timeout_ms=timeout, diagnose=True)
+        result = {"status": "timeout", "selector": None, "visible_text": await self._visible_text_excerpt()}
+        self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
+        await self._maybe_await(
+            self.collect_diagnostics(
+                stage="webex_prejoin_timeout",
+                extra={
+                    "join_result": result,
+                    "url": self._safe_page_url(),
+                    "title": await self._safe_page_title(),
+                },
+            )
+        )
+        return result
+
+    async def _prejoin_state(self, timeout_ms=250):
+        for status, group in (
+            ("final_join", "final_join_fast"),
+            ("final_join", "start_meeting_button"),
+            ("final_join", "join_button"),
+            ("joined", "joined_indicator"),
+            ("waiting_for_others", "waiting_for_others_indicator"),
+            ("lobby", "lobby_indicator"),
+            ("blocked", "blocked_indicator"),
+        ):
+            selector = await self._first_visible_selector(group, timeout_ms=timeout_ms)
+            if selector:
+                return {
+                    "status": status,
+                    "selector": selector,
+                    "visible_text": await self._visible_text_excerpt(),
+                }
+        return {"status": "continue", "selector": None, "visible_text": ""}
+
+    async def _apply_in_meeting_initial_media_state(self):
+        if bool(self.adapter_config().get("skip_device_selection", False)):
+            self._warn_control_event(
+                "webex_post_join_media_check_skipped",
+                {"reason": "skip_device_selection"},
+            )
+            return False
+
+        if bool(self.adapter_config().get("initial_microphone_enabled", True)):
+            await self.unmute_microphone()
+        else:
+            await self.mute_microphone()
+
+        if bool(self.adapter_config().get("initial_camera_enabled", True)):
+            await self.start_camera()
+        else:
+            await self.stop_camera()
         return True
+
+    async def _maybe_run_post_join_media_check(self, vtc_url):
+        if not bool(self.adapter_config().get("post_join_media_check", False)):
+            return None
+
+        timeout_sec = float(self.adapter_config().get("post_join_media_check_timeout_sec", 2))
+        try:
+            media_ready = await asyncio.wait_for(
+                self._apply_in_meeting_initial_media_state(),
+                timeout=max(0.1, timeout_sec),
+            )
+            if media_ready:
+                self._notify_media_ready(vtc_url)
+            return bool(media_ready)
+        except (asyncio.TimeoutError, RuntimeError) as exc:
+            details = {"error": repr(exc), "timeout_sec": timeout_sec}
+            self._warn_control_event("webex_post_join_media_state_unverified", details)
+            if bool(self.adapter_config().get("strict_post_join_media_state", False)):
+                await self._maybe_await(
+                    self.collect_diagnostics(stage="webex_post_join_media_state_unverified", extra=details)
+                )
+            if bool(self.adapter_config().get("fail_on_post_join_media_unverified", False)):
+                raise
+            return False
+
+    async def _apply_prejoin_media_preferences(self):
+        if not bool(self.adapter_config().get("apply_initial_media_state_in_prejoin", True)):
+            return False
+
+        changed = False
+        changed = bool(
+            await self._set_prejoin_media_state(
+                name="microphone",
+                desired=bool(self.adapter_config().get("initial_microphone_enabled", True)),
+                on_group="prejoin_mic_on_indicator",
+                off_group="prejoin_mic_off_indicator",
+            )
+        ) or changed
+        changed = bool(
+            await self._set_prejoin_media_state(
+                name="camera",
+                desired=bool(self.adapter_config().get("initial_camera_enabled", True)),
+                on_group="prejoin_camera_on_indicator",
+                off_group="prejoin_camera_off_indicator",
+            )
+        ) or changed
+        return changed
+
+    async def _set_prejoin_media_state(self, name, desired, on_group, off_group):
+        timeout_ms = self.timeout_ms("prejoin_media_state_timeout_ms", self.timeout_ms("optional_selector_timeout_ms", 1000))
+        current = await self._detect_binary_state(on_group, off_group, timeout_ms=timeout_ms)
+        if current is desired:
+            return False
+
+        action_group = off_group if desired else on_group
+        clicked = await self._click_first_visible(action_group, timeout_ms=timeout_ms)
+        verified = current
+        if clicked:
+            await asyncio.sleep(float(self.adapter_config().get("prejoin_media_state_settle_sec", 0.2)))
+            verified = await self._detect_binary_state(on_group, off_group, timeout_ms=timeout_ms)
+            if verified is desired:
+                emit_event(
+                    self.config,
+                    "webex_prejoin_media_state_changed",
+                    {"control": name, "desired": desired, "selector": clicked},
+                    self.service_name,
+                )
+                return True
+
+        return await self._handle_unverified_prejoin_media_state(
+            name=name,
+            desired=desired,
+            current=current,
+            verified=verified,
+            clicked=clicked,
+            on_group=on_group,
+            off_group=off_group,
+        )
+
+    async def _handle_unverified_prejoin_media_state(self, **details):
+        if not details.get("clicked") and details.get("current") is None:
+            return False
+
+        strict = bool(self.adapter_config().get("strict_prejoin_media_state", False))
+        fail = bool(self.adapter_config().get("fail_on_prejoin_media_state_unverified", False))
+        self._warn_control_event("webex_prejoin_media_state_unverified", details)
+        if strict or fail:
+            await self._maybe_await(
+                self.collect_diagnostics(stage="webex_prejoin_media_state_unverified", extra=details)
+            )
+        if fail:
+            raise RuntimeError(
+                f"Webex prejoin {details.get('name')} state could not be verified."
+            )
+        return False
 
     async def leave(self):
         clicked = await self._click_optional("leave_button", "webex_leave_clicked")
@@ -627,22 +1403,27 @@ class WebexAdapter(BrowserMeetingAdapter):
             "adapter_config": self._safe_adapter_config(),
             "browser_log": list(self.browser_log),
             "sanity_check_results": list(self.sanity_check_results),
+            "external_protocol_dismiss_attempts": list(self.external_protocol_dismiss_attempts),
+            "external_protocol_suppression_profile_path": self.external_protocol_profile_path,
             "commands": {},
         }
 
         if page is not None:
-            try:
-                if not getattr(page, "is_closed", lambda: False)():
-                    metadata["url"] = getattr(page, "url", None)
-                    metadata["title"] = await self._maybe_await(page.title())
-                    screenshot_path = diag_dir / f"{prefix}.png"
-                    await self._maybe_await(page.screenshot(path=str(screenshot_path)))
-                    saved["files"]["screenshot"] = str(screenshot_path)
-                    html_path = diag_dir / f"{prefix}.html"
-                    html_path.write_text(await self._maybe_await(page.content()), encoding="utf-8")
+            metadata["url"] = self._safe_page_url()
+            metadata["title"] = await self._safe_page_title()
+            metadata["visible_text"] = await self._safe_visible_text_excerpt()
+            metadata["input_debug"] = await self._input_debug_info()
+            screenshot_path = diag_dir / f"{prefix}.png"
+            if await self._safe_screenshot(path=str(screenshot_path)):
+                saved["files"]["screenshot"] = str(screenshot_path)
+            html = await self._safe_page_content()
+            if html:
+                html_path = diag_dir / f"{prefix}.html"
+                try:
+                    html_path.write_text(html, encoding="utf-8")
                     saved["files"]["html"] = str(html_path)
-            except Exception as exc:
-                saved["errors"]["page"] = repr(exc)
+                except Exception as exc:
+                    saved["errors"]["html"] = repr(exc)
 
         for name, command in self._diagnostic_commands().items():
             command_path = diag_dir / f"{prefix}.{name}.txt"
@@ -669,6 +1450,8 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def is_in_meeting(self):
         if self.page is None:
             return False
+        if await self._title_indicates_joined():
+            return True
         try:
             await self.wait_for_any_visible(self.page, self.selectors("joined"), timeout=1000)
             return True
@@ -868,37 +1651,66 @@ class WebexAdapter(BrowserMeetingAdapter):
         )
 
     async def _click_required(self, selector_group, event_name, timeout):
+        if not self._is_page_available():
+            raise RuntimeError(f"Webex page is unavailable while waiting for required selector group: {selector_group}")
         selector = await self.click_first_visible(self.page, self.selectors(selector_group), timeout=timeout)
         emit_event(self.config, event_name, {"selector": selector, "success": True}, self.service_name)
         return selector
 
     async def _click_optional(self, selector_group, event_name, timeout=None):
+        if not self._is_page_available():
+            return None
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout is None else timeout
         selector = await self.click_if_visible(self.page, self.selectors(selector_group), timeout=timeout)
         if selector:
             emit_event(self.config, event_name, {"selector": selector, "success": True}, self.service_name)
         return selector
 
-    async def _visible_candidates(self, selector_group, timeout_ms=None):
+    def _page_locator_scopes(self):
+        if not self._is_page_available():
+            return []
+        scopes = [("page", self.page)]
+        try:
+            frames = getattr(self.page, "frames", []) or []
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_frames_unavailable", repr(exc))
+            return scopes
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_frames_unavailable", repr(exc))
+            return scopes
+        for index, frame in enumerate(frames):
+            if frame is not self.page and hasattr(frame, "locator"):
+                scopes.append((f"frame[{index}]", frame))
+        return scopes
+
+    async def _visible_candidates(self, selector_group, timeout_ms=None, include_locator=False):
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
         candidates = []
-        if self.page is None:
-            return candidates
         for selector in self.selectors(selector_group):
-            locator = self.page.locator(selector).first
-            try:
-                await locator.wait_for(state="visible", timeout=timeout)
-                enabled = True
-                if hasattr(locator, "is_enabled"):
-                    try:
-                        enabled = bool(await self._maybe_await(locator.is_enabled(timeout=timeout)))
-                    except TypeError:
-                        enabled = bool(await self._maybe_await(locator.is_enabled()))
-                candidates.append({"selector": selector, "enabled": enabled})
-            except PlaywrightTimeoutError:
-                continue
-            except Exception:
-                continue
+            for scope_name, scope in self._page_locator_scopes():
+                try:
+                    locator = scope.locator(selector).first
+                    await locator.wait_for(state="visible", timeout=timeout)
+                    enabled = True
+                    if hasattr(locator, "is_enabled"):
+                        try:
+                            enabled = bool(await self._maybe_await(locator.is_enabled(timeout=timeout)))
+                        except TypeError:
+                            enabled = bool(await self._maybe_await(locator.is_enabled()))
+                    candidate = {"selector": selector, "enabled": enabled, "scope": scope_name}
+                    if include_locator:
+                        candidate["_locator"] = locator
+                    candidates.append(candidate)
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("selector_candidate_unavailable", repr(exc))
+                    continue
+                except Exception:
+                    continue
         return candidates
 
     def _selector_specificity_score(self, selector):
@@ -956,6 +1768,8 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _fill_optional(self, selector_group, value, event_name):
         if value in (None, ""):
             return None
+        if not self._is_page_available():
+            return None
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000)
         for selector in self.selectors(selector_group):
             locator = self.page.locator(selector).first
@@ -972,6 +1786,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         return await self._fill_optional(selector_group, self.adapter_config().get(config_key), event_name)
 
     async def _wait_required(self, selector_group, timeout):
+        if not self._is_page_available():
+            raise RuntimeError(f"Webex page is unavailable while waiting for required selector group: {selector_group}")
         selector = await self.wait_for_any_visible(self.page, self.selectors(selector_group), timeout=timeout)
         emit_event(self.config, "webex_join_verified", {"selector": selector, "success": True}, self.service_name)
         return selector
@@ -980,66 +1796,992 @@ class WebexAdapter(BrowserMeetingAdapter):
         return await self._first_visible_selector(selector_group, timeout_ms=timeout_ms) is not None
 
     async def _first_visible_selector(self, selector_group, timeout_ms=None):
+        found = await self._first_visible_locator(selector_group, timeout_ms=timeout_ms)
+        return found["selector"] if found else None
+
+    async def _first_visible_locator(self, selector_group, timeout_ms=None):
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
         for selector in self.selectors(selector_group):
-            locator = self.page.locator(selector).first
-            try:
-                await locator.wait_for(state="visible", timeout=timeout)
-                return selector
-            except PlaywrightTimeoutError:
-                continue
+            for scope_name, scope in self._page_locator_scopes():
+                try:
+                    locator = scope.locator(selector).first
+                    await locator.wait_for(state="visible", timeout=timeout)
+                    return {"selector": selector, "locator": locator, "scope": scope_name}
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("selector_visibility_unavailable", repr(exc))
+                    return None
         return None
 
+    async def _click_browser_prejoin_selector(self, selector_group, timeout_ms=None):
+        selector = await self._click_first_visible(selector_group, timeout_ms=timeout_ms)
+        if selector:
+            if selector_group in {"join_from_browser", "join_from_this_browser", "continue_in_browser", "use_web_app", "open_in_browser"}:
+                self._progress("browser_join_clicked", {"selector": selector, "selector_group": selector_group})
+            await self._dismiss_external_protocol_prompt(stage=f"after_click_{selector_group}")
+        return selector
+
+    async def _click_final_join_control(self, display_name):
+        if not self._is_page_available():
+            raise RuntimeError("Webex page closed before final join control could be clicked")
+        timeout = min(
+            self.timeout_ms("optional_selector_timeout_ms", 1000),
+            self.timeout_ms("final_join_candidate_timeout_ms", 150),
+        )
+        self._progress("final_join_click_attempt")
+        for group in ("final_join_fast", "start_meeting_button", "join_button"):
+            candidates = await self._visible_candidates(group, timeout_ms=timeout, include_locator=True)
+            enabled = [item for item in candidates if item.get("enabled", True)]
+            if enabled:
+                selector = enabled[0]["selector"]
+                if not self._is_page_available():
+                    raise RuntimeError("Webex page closed before final join control could be clicked")
+                await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+                await enabled[0]["_locator"].click()
+                await self._dismiss_external_protocol_prompt(stage=f"after_click_{group}")
+                return selector
+            if candidates:
+                fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+                await asyncio.sleep(float(self.adapter_config().get("join_button_enable_wait_sec", 0.5)))
+                candidates = await self._visible_candidates(group, timeout_ms=timeout, include_locator=True)
+                enabled = [item for item in candidates if item.get("enabled", True)]
+                if enabled:
+                    selector = enabled[0]["selector"]
+                    if not self._is_page_available():
+                        raise RuntimeError("Webex page closed before final join control could be clicked")
+                    await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+                    await enabled[0]["_locator"].click()
+                    await self._dismiss_external_protocol_prompt(stage=f"after_click_{group}")
+                    return selector
+                diagnostic_candidates = [
+                    {key: value for key, value in item.items() if key != "_locator"}
+                    for item in candidates
+                ]
+                visible_text = await self._visible_text_excerpt()
+                input_debug = await self._input_debug_info()
+                self._progress(
+                    "final_join_button_disabled",
+                    {
+                        "selector_group": group,
+                        "candidates": diagnostic_candidates,
+                        "visible_text": visible_text,
+                        "input_debug": input_debug,
+                    },
+                )
+                diagnostics = await self._maybe_await(
+                    self.collect_diagnostics(
+                        stage="webex_join_button_disabled",
+                        extra={
+                            "selector_group": group,
+                            "candidates": diagnostic_candidates,
+                            "visible_text": visible_text,
+                            "display_name_fill": fill_result,
+                            "input_debug": input_debug,
+                        },
+                    )
+                )
+                raise RuntimeError(
+                    f"Webex final join button is visible but disabled. Visible text: {visible_text}. "
+                    f"Input debug: {input_debug}. Diagnostics: {diagnostics}"
+                )
+
+        selector = await self._click_first_visible(
+            "join_button",
+            required=True,
+            timeout_ms=self.timeout_ms("prejoin_timeout_ms", 30000),
+        )
+        await self._dismiss_external_protocol_prompt(stage="after_click_join_button")
+        return selector
+
     async def _click_first_visible(self, selector_group, required=False, timeout_ms=None):
-        selector = await self._first_visible_selector(selector_group, timeout_ms=timeout_ms)
-        if not selector:
+        found = await self._first_visible_locator(selector_group, timeout_ms=timeout_ms)
+        if not found:
             if required:
+                if not self._is_page_available():
+                    raise RuntimeError(f"Webex page is unavailable while waiting for selector group: {selector_group}")
                 raise RuntimeError(f"No visible selector matched: {self.selectors(selector_group)}")
             return None
-        await self.page.locator(selector).first.click()
-        return selector
+        if not self._is_page_available():
+            if required:
+                raise RuntimeError(f"Webex page is unavailable while clicking selector group: {selector_group}")
+            return None
+        await found["locator"].click()
+        return found["selector"]
 
     async def _fill_first_visible(self, selector_group, value, timeout_ms=None):
         if value in (None, ""):
             return None
-        selector = await self._first_visible_selector(selector_group, timeout_ms=timeout_ms)
-        if not selector:
+        if not self._is_page_available():
             return None
-        await self.page.locator(selector).first.fill(str(value))
-        return selector
+        found = await self._first_visible_locator(selector_group, timeout_ms=timeout_ms)
+        if not found:
+            return None
+        if not self._is_page_available():
+            return None
+        locator = found["locator"]
+        if await self._fill_locator_verified(locator, value, timeout_ms=timeout_ms):
+            return found["selector"]
+        return None
 
-    async def _visible_text_excerpt(self, max_chars=2000):
-        if self.page is None:
-            return ""
-        text = ""
-        for selector in ("body", "html"):
+    async def _fill_display_name_if_needed(self, display_name, timeout_ms=None, diagnose=False):
+        result = await self._fill_display_name(display_name, timeout_ms=timeout_ms)
+        if result:
+            return {"success": True, "selector": result}
+        if diagnose:
+            details = {
+                "display_name": str(display_name or self._display_name()),
+                "visible_text": await self._visible_text_excerpt(),
+                "input_debug": await self._input_debug_info(),
+                "fill_attempts": list(self.browser_log[-20:]),
+            }
+            await self._maybe_await(self.collect_diagnostics(stage="webex_name_fill_failed", extra=details))
+        return {"success": False, "selector": None}
+
+    async def _fill_display_name(self, display_name, timeout_ms=None):
+        display_name = str(display_name or self._display_name())
+        self._last_display_name_fill_method = None
+        input_debug = await self._input_debug_info()
+        self._progress(
+            "display_name_fill_attempt",
+            {
+                "display_name_length": len(display_name),
+                "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
+            },
+        )
+        found = await self._find_display_name_input(timeout_ms=timeout_ms)
+        if found:
+            self._progress(
+                "display_name_input_candidate_found",
+                {
+                    "selector": found["selector"],
+                    "scope": found.get("scope"),
+                    "strategy": found.get("strategy"),
+                },
+            )
+            verified_method = await self._fill_locator_verified(found["locator"], display_name, timeout_ms=timeout_ms)
+            if verified_method:
+                emit_event(
+                    self.config,
+                    "webex_display_name_filled",
+                    {"selector": found["selector"], "scope": found.get("scope"), "strategy": found.get("strategy")},
+                    self.service_name,
+                )
+                self._progress(
+                    "display_name_fill_verified",
+                    {
+                        "selector": found["selector"],
+                        "scope": found.get("scope"),
+                        "strategy": found.get("strategy"),
+                        "fill_method": verified_method,
+                    },
+                )
+                self._progress(
+                    "display_name_fill_success",
+                    {
+                        "selector": found["selector"],
+                        "scope": found.get("scope"),
+                        "strategy": found.get("strategy"),
+                        "fill_method": verified_method,
+                        "verification_result": True,
+                        "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
+                    },
+                )
+                return found["selector"]
+            self._progress(
+                "display_name_fill_failed",
+                {
+                    "selector": found["selector"],
+                    "scope": found.get("scope"),
+                    "strategy": found.get("strategy"),
+                    "fill_method": self._last_display_name_fill_method,
+                    "verification_result": False,
+                    "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
+                },
+            )
+            return None
+        self._progress(
+            "display_name_fill_failed",
+            {
+                "selector": None,
+                "fill_method": None,
+                "verification_result": False,
+                "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
+            },
+        )
+        return None
+
+    async def _name_entry_text_visible(self):
+        text = await self._visible_text_excerpt(max_chars=4000)
+        return "이름을 입력하고 참여하십시오" in text or "이름 *" in text
+
+    async def _find_display_name_input(self, timeout_ms=None):
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        candidate_timeout = min(int(timeout), int(self.adapter_config().get("display_name_candidate_timeout_ms", 200)))
+
+        found = await self._find_single_visible_text_like_input(timeout_ms=candidate_timeout)
+        if found:
+            return found
+
+        found = await self._find_active_text_like_input(timeout_ms=candidate_timeout)
+        if found:
+            return found
+
+        label_patterns = (
+            r"이름\s*\*?",
+            r"Name",
+            r"Your name",
+            r"Display name",
+        )
+        for scope_name, scope in self._page_locator_scopes():
+            get_by_label = getattr(scope, "get_by_label", None)
+            if not get_by_label:
+                continue
+            for pattern in label_patterns:
+                try:
+                    locator = get_by_label(re.compile(pattern, re.IGNORECASE)).first
+                    await locator.wait_for(state="visible", timeout=candidate_timeout)
+                    return {
+                        "selector": f"label=/{pattern}/i",
+                        "locator": locator,
+                        "scope": scope_name,
+                        "strategy": "label",
+                    }
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("display_name_label_unavailable", repr(exc))
+                    continue
+                except Exception:
+                    continue
+
+        role_patterns = (
+            r"이름\s*\*?",
+            r"Name",
+            r"Your name",
+            r"Display name",
+        )
+        for scope_name, scope in self._page_locator_scopes():
+            get_by_role = getattr(scope, "get_by_role", None)
+            if not get_by_role:
+                continue
+            role_attempts = [None, *role_patterns]
+            for pattern in role_attempts:
+                try:
+                    if pattern is None:
+                        locator = get_by_role("textbox").first
+                        selector = "role=textbox"
+                    else:
+                        locator = get_by_role("textbox", name=re.compile(pattern, re.IGNORECASE)).first
+                        selector = f"role=textbox[name=/{pattern}/i]"
+                    await locator.wait_for(state="visible", timeout=candidate_timeout)
+                    return {
+                        "selector": selector,
+                        "locator": locator,
+                        "scope": scope_name,
+                        "strategy": "role_textbox",
+                    }
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("display_name_role_textbox_unavailable", repr(exc))
+                    continue
+                except Exception:
+                    continue
+
+        for group in ("display_name", "name_input"):
+            found = await self._first_visible_locator(group, timeout_ms=candidate_timeout)
+            if found:
+                found["strategy"] = group
+                return found
+
+        for selector in (
+            'label:has-text("이름") >> xpath=following::input[1]',
+            'text="이름" >> xpath=following::input[1]',
+        ):
+            for scope_name, scope in self._page_locator_scopes():
+                try:
+                    locator = scope.locator(selector).first
+                    await locator.wait_for(state="visible", timeout=candidate_timeout)
+                    return {"selector": selector, "locator": locator, "scope": scope_name, "strategy": "label_following_input"}
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("display_name_label_following_unavailable", repr(exc))
+                    continue
+                except Exception:
+                    continue
+
+        found = await self._find_active_text_like_input(timeout_ms=timeout)
+        if found:
+            return found
+
+        return await self._find_single_visible_text_like_input(timeout_ms=timeout)
+
+    async def _find_active_text_like_input(self, timeout_ms=None):
+        if not self._is_page_available():
+            return None
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        selector = ':focus:is(input:not([type]), input[type="text"], input[type="search"], textarea, [role="textbox"], [contenteditable="true"])'
+        for scope_name, scope in self._page_locator_scopes():
             try:
-                locator = self.page.locator(selector).first
-                if hasattr(locator, "inner_text"):
-                    text = await self._maybe_await(locator.inner_text(timeout=1000))
-                elif hasattr(locator, "text_content"):
-                    text = await self._maybe_await(locator.text_content(timeout=1000))
-                if text:
-                    break
+                locator = scope.locator(selector).first
+                await locator.wait_for(state="visible", timeout=timeout)
+                return {
+                    "selector": selector,
+                    "locator": locator,
+                    "scope": scope_name,
+                    "strategy": "active_focused_text_like_input",
+                }
+            except PlaywrightTimeoutError:
+                continue
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("active_text_input_unavailable", repr(exc))
+                continue
             except Exception:
                 continue
+        return None
+
+    async def _fill_single_visible_text_input(self, value, timeout_ms=None):
+        found = await self._find_single_visible_text_like_input(timeout_ms=timeout_ms)
+        if not found:
+            return None
+        if await self._fill_locator_verified(found["locator"], value, timeout_ms=timeout_ms):
+            emit_event(self.config, "webex_display_name_filled", {"selector": found["selector"]}, self.service_name)
+            return found["selector"]
+        return None
+
+    async def _find_single_visible_text_like_input(self, timeout_ms=None):
+        if not self._is_page_available():
+            return None
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        text_like_selector = (
+            'input:not([type]), input[type="text"], input[type="search"], '
+            'textarea, [role="textbox"], [contenteditable="true"]'
+        )
+        for _scope_name, scope in self._page_locator_scopes():
+            inputs = scope.locator(text_like_selector)
+            visible = []
+            try:
+                if hasattr(inputs, "count"):
+                    count = await self._maybe_await(inputs.count())
+                    for index in range(count):
+                        locator = inputs.nth(index) if hasattr(inputs, "nth") else inputs.first
+                        try:
+                            await locator.wait_for(state="visible", timeout=timeout)
+                            visible.append(locator)
+                        except PlaywrightTimeoutError:
+                            continue
+                else:
+                    locator = inputs.first
+                    try:
+                        await locator.wait_for(state="visible", timeout=timeout)
+                        visible.append(locator)
+                    except PlaywrightTimeoutError:
+                        continue
+                if len(visible) == 1:
+                    return {
+                        "selector": text_like_selector,
+                        "locator": visible[0],
+                        "scope": _scope_name,
+                        "strategy": "single_visible_text_like_input",
+                    }
+            except PlaywrightTimeoutError:
+                continue
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("single_text_input_unavailable", repr(exc))
+                return None
+        return None
+
+    async def _fill_locator_verified(self, locator, value, timeout_ms=None):
+        value = str(value)
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        methods = (
+            ("fill", self._fill_locator_with_fill),
+            ("keyboard_select_type", self._fill_locator_with_keyboard_select_type),
+            ("js_value_events", self._fill_locator_with_js_value_events),
+            ("focused_keyboard_type", self._fill_locator_with_focused_keyboard_type),
+        )
+        for method_name, method in methods:
+            try:
+                self._progress("display_name_fill_method", {"method": method_name})
+                await method(locator, value, timeout)
+                if await self._locator_value_matches(locator, value, timeout):
+                    self._last_display_name_fill_method = method_name
+                    self._append_browser_log(
+                        "webex_display_name_fill_verified",
+                        json.dumps({"method": method_name, "value_length": len(value)}, default=str),
+                    )
+                    return method_name
+            except PlaywrightTimeoutError:
+                continue
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("webex_display_name_fill_method_failed", f"{method_name}: {exc!r}")
+                continue
+            except Exception as exc:
+                self._append_browser_log("webex_display_name_fill_method_failed", f"{method_name}: {exc!r}")
+                continue
+        return False
+
+    async def _fill_locator_with_fill(self, locator, value, timeout):
+        await locator.wait_for(state="visible", timeout=timeout)
+        await locator.fill(value)
+
+    async def _fill_locator_with_keyboard_select_type(self, locator, value, timeout):
+        await locator.wait_for(state="visible", timeout=timeout)
+        if hasattr(locator, "click"):
+            await self._click_locator_force(locator)
+        keyboard = getattr(self.page, "keyboard", None)
+        if keyboard is None:
+            return
+        shortcut = "Meta+A" if platform.system() == "Darwin" else "Control+A"
+        if hasattr(keyboard, "press"):
+            await self._maybe_await(keyboard.press(shortcut))
+            await self._maybe_await(keyboard.press("Backspace"))
+        if hasattr(keyboard, "type"):
+            await self._maybe_await(keyboard.type(value))
+
+    async def _fill_locator_with_js_value_events(self, locator, value, timeout):
+        await locator.wait_for(state="visible", timeout=timeout)
+        if hasattr(locator, "evaluate"):
+            await self._maybe_await(
+                locator.evaluate(
+                    """(element, value) => {
+                        const prototype =
+                            element instanceof HTMLInputElement ? HTMLInputElement.prototype :
+                            element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype :
+                            element.constructor?.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                        if (setter) {
+                            setter.call(element, value);
+                        } else if ('value' in element) {
+                            element.value = value;
+                        } else {
+                            element.textContent = value;
+                        }
+                        const InputEventCtor = window.InputEvent || Event;
+                        element.dispatchEvent(new InputEventCtor('input', {
+                            bubbles: true,
+                            inputType: 'insertText',
+                            data: value
+                        }));
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                        element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+                        return element.value || element.textContent || '';
+                    }""",
+                    value,
+                )
+            )
+
+    async def _fill_locator_with_focused_keyboard_type(self, locator, value, timeout):
+        await locator.wait_for(state="visible", timeout=timeout)
+        if hasattr(locator, "click"):
+            await self._click_locator_force(locator)
+        keyboard = getattr(self.page, "keyboard", None)
+        if keyboard is not None and hasattr(keyboard, "press"):
+            shortcut = "Meta+A" if platform.system() == "Darwin" else "Control+A"
+            await self._maybe_await(keyboard.press(shortcut))
+            await self._maybe_await(keyboard.press("Backspace"))
+        if keyboard is not None and hasattr(keyboard, "type"):
+            await self._maybe_await(keyboard.type(value))
+
+    async def _click_locator_force(self, locator):
+        try:
+            await locator.click(force=True)
+        except TypeError:
+            await locator.click()
+
+    async def _locator_value_matches(self, locator, expected, timeout):
+        actual = None
+        if hasattr(locator, "input_value"):
+            try:
+                actual = await self._maybe_await(locator.input_value(timeout=timeout))
+            except TypeError:
+                actual = await self._maybe_await(locator.input_value())
+            except Exception:
+                actual = None
+        if actual is None and hasattr(locator, "evaluate"):
+            try:
+                actual = await self._maybe_await(
+                    locator.evaluate("(element) => element.value || element.textContent || ''")
+                )
+            except Exception:
+                actual = None
+        return str(actual or "") == str(expected)
+
+    async def _input_debug_info(self):
+        info = {
+            "visible_text_input_count": 0,
+            "inputs": [],
+            "active_element": {},
+        }
+        if not self._is_page_available():
+            return info
+        selector = (
+            'input, textarea, [contenteditable="true"]'
+        )
+        for scope_name, scope in self._page_locator_scopes():
+            frame_info = {
+                "scope": scope_name,
+                "url": str(getattr(scope, "url", "") or ""),
+                "name": "",
+            }
+            try:
+                frame_name = getattr(scope, "name", "")
+                frame_info["name"] = frame_name() if callable(frame_name) else str(frame_name or "")
+            except Exception:
+                frame_info["name"] = ""
+            try:
+                inputs = scope.locator(selector)
+                count = await self._maybe_await(inputs.count()) if hasattr(inputs, "count") else 1
+                for index in range(count):
+                    locator = inputs.nth(index) if hasattr(inputs, "nth") else inputs.first
+                    try:
+                        await locator.wait_for(state="visible", timeout=100)
+                    except Exception:
+                        continue
+                    item = dict(frame_info)
+                    item["index"] = index
+                    if hasattr(locator, "evaluate"):
+                        try:
+                            attrs = await self._maybe_await(
+                                locator.evaluate(
+                                    """(element) => ({
+                                        tagName: element.tagName || '',
+                                        class: element.getAttribute('class') || '',
+                                        name: element.getAttribute('name') || '',
+                                        id: element.getAttribute('id') || '',
+                                        type: element.getAttribute('type') || '',
+                                        placeholder: element.getAttribute('placeholder') || '',
+                                        aria_label: element.getAttribute('aria-label') || '',
+                                        role: element.getAttribute('role') || '',
+                                        value: element.value || element.textContent || '',
+                                        focused: element === document.activeElement
+                                    })"""
+                                )
+                            )
+                            if isinstance(attrs, Mapping):
+                                item.update(attrs)
+                        except Exception as exc:
+                            item["error"] = repr(exc)
+                    if "value" not in item and hasattr(locator, "input_value"):
+                        try:
+                            item["value"] = await self._maybe_await(locator.input_value(timeout=100))
+                        except Exception:
+                            item["value"] = ""
+                    if hasattr(locator, "is_enabled"):
+                        try:
+                            item["enabled"] = bool(await self._maybe_await(locator.is_enabled(timeout=100)))
+                        except TypeError:
+                            item["enabled"] = bool(await self._maybe_await(locator.is_enabled()))
+                        except Exception:
+                            item["enabled"] = None
+                    if hasattr(locator, "is_editable"):
+                        try:
+                            item["editable"] = bool(await self._maybe_await(locator.is_editable(timeout=100)))
+                        except TypeError:
+                            item["editable"] = bool(await self._maybe_await(locator.is_editable()))
+                        except Exception:
+                            item["editable"] = None
+                    if hasattr(locator, "bounding_box"):
+                        try:
+                            item["bounding_box"] = await self._maybe_await(locator.bounding_box(timeout=100))
+                        except TypeError:
+                            item["bounding_box"] = await self._maybe_await(locator.bounding_box())
+                        except Exception:
+                            item["bounding_box"] = None
+                    item["visible"] = True
+                    info["inputs"].append(item)
+                    input_type = str(item.get("type") or "text").lower()
+                    if input_type in {"", "text", "search"} or item.get("role") == "textbox":
+                        info["visible_text_input_count"] += 1
+            except Exception as exc:
+                info.setdefault("errors", []).append({"scope": scope_name, "error": repr(exc)})
+            try:
+                if hasattr(scope, "evaluate"):
+                    active = await self._maybe_await(
+                        scope.evaluate(
+                            """() => {
+                            const element = document.activeElement;
+                            if (!element) return {};
+                            return {
+                                tagName: element.tagName || '',
+                                tag: element.tagName || '',
+                                class: element.getAttribute('class') || '',
+                                name: element.getAttribute('name') || '',
+                                id: element.getAttribute('id') || '',
+                                type: element.getAttribute('type') || '',
+                                placeholder: element.getAttribute('placeholder') || '',
+                                aria_label: element.getAttribute('aria-label') || '',
+                                role: element.getAttribute('role') || '',
+                                value: element.value || element.textContent || ''
+                            };
+                        }"""
+                        )
+                    )
+                    if isinstance(active, Mapping):
+                        active = {**frame_info, **active}
+                        info.setdefault("active_elements", []).append(active)
+                        if not info["active_element"]:
+                            info["active_element"] = active
+            except Exception as exc:
+                info.setdefault("active_elements", []).append({**frame_info, "error": repr(exc)})
+        return info
+
+    async def _debug_visible_text_inputs(self):
+        return await self._input_debug_info()
+
+    async def _dismiss_external_protocol_prompt(self, stage=None):
+        adapter_config = self.adapter_config()
+        if not bool(adapter_config.get("dismiss_external_protocol_dialog", True)):
+            return False
+
+        self._progress("external_protocol_dismiss_attempt", {"trigger_stage": stage})
+        method = str(adapter_config.get("external_protocol_dismiss_method", "auto") or "auto").lower()
+        strict = bool(adapter_config.get("strict_external_protocol_dismiss", False))
+        attempts = []
+
+        async def record(command, action, runner=None):
+            if runner is None:
+                runner = self._run_external_protocol_command
+            try:
+                result = runner(command, action)
+                if hasattr(result, "__await__"):
+                    result = await result
+            except Exception as exc:
+                result = {"command": command, "action": action, "success": False, "error": repr(exc)}
+            attempts.append(result)
+            return bool(result.get("success"))
+
+        if self._is_page_available():
+            keyboard = getattr(self.page, "keyboard", None)
+            press = getattr(keyboard, "press", None)
+            if press and method in {"auto", "escape", "keyboard"}:
+                try:
+                    await self._maybe_await(press("Escape"))
+                    attempts.append({"action": "page_keyboard_escape", "command": ["page.keyboard.press", "Escape"], "success": True})
+                except Exception as exc:
+                    attempts.append({"action": "page_keyboard_escape", "command": ["page.keyboard.press", "Escape"], "success": False, "error": repr(exc)})
+
+        system = platform.system()
+        if method in {"auto", "osascript", "system"} and system == "Darwin":
+            for action, script in self._macos_external_protocol_dismiss_scripts():
+                await record(["osascript", "-e", script], action)
+
+        if method in {"auto", "xdotool", "system"} and system == "Linux" and shutil.which("xdotool"):
+            display = self._configured_display()
+            if shutil.which("wmctrl"):
+                await record(["wmctrl", "-a", "Webex"], "external_protocol_prompt_linux_activate_webex")
+                await record(["wmctrl", "-a", "Chrome"], "external_protocol_prompt_linux_activate_chrome")
+            await record(["xdotool", "key", "Escape"], "external_protocol_prompt_linux_escape", runner=lambda command, action: self._run_external_protocol_command(command, action, env_display=display))
+
+        if method in {"auto", "powershell", "system"} and system == "Windows":
+            await record(
+                ["powershell", "-NoProfile", "-Command", "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('{ESC}')"],
+                "external_protocol_prompt_windows_escape",
+            )
+
+        if attempts:
+            self.external_protocol_dismiss_attempts.extend(attempts)
+            self._append_browser_log("webex_external_protocol_prompt_dismiss_attempted", json.dumps({"stage": stage, "attempts": attempts}, default=str))
+            emit_event(
+                self.config,
+                "webex_external_protocol_prompt_dismiss_attempted",
+                {"stage": stage, "attempts": attempts},
+                self.service_name,
+            )
+
+        permission_issue = self._external_protocol_permission_issue(attempts)
+        if permission_issue:
+            details = {
+                "stage": stage,
+                "attempts": attempts,
+                "permission_issue": permission_issue,
+                "message": (
+                    "macOS blocked osascript/System Events while dismissing the Webex external protocol dialog. "
+                    "Grant Automation/Accessibility permission to the terminal or Python process running this smoke test."
+                ),
+            }
+            self._append_browser_log("webex_external_protocol_prompt_permission_blocked", json.dumps(details, default=str))
+            emit_event(self.config, "webex_external_protocol_prompt_permission_blocked", details, self.service_name)
+            if strict:
+                raise RuntimeError(
+                    "Webex external protocol prompt dismissal is blocked by macOS Automation/Accessibility permission: "
+                    f"{permission_issue}"
+                )
+
+        success = any(item.get("success") for item in attempts)
+        self._progress("external_protocol_dismiss_done", {"trigger_stage": stage, "success": success, "attempt_count": len(attempts)})
+        if not success:
+            details = {"stage": stage, "attempts": attempts}
+            self._append_browser_log("webex_external_protocol_prompt_dismiss_failed", json.dumps(details, default=str))
+            emit_event(self.config, "webex_external_protocol_prompt_dismiss_failed", details, self.service_name)
+            if strict:
+                diagnostics = await self._maybe_await(
+                    self.collect_diagnostics(stage="webex_external_protocol_prompt_blocking", extra=details)
+                )
+                raise RuntimeError(f"Webex external protocol prompt could not be dismissed. Diagnostics: {diagnostics}")
+        return success
+
+    def _macos_external_protocol_dismiss_scripts(self):
+        process_names = ("Google Chrome for Testing", "Google Chrome", "Chromium")
+        scripts = []
+
+        for process_name in process_names:
+            scripts.append(
+                (
+                    f"external_protocol_prompt_macos_recursive_cancel_{process_name}",
+                    f'''
+tell application "System Events"
+    if exists process "{process_name}" then
+        tell process "{process_name}"
+            set frontmost to true
+        end tell
+        key code 53
+        delay 0.2
+        tell process "{process_name}"
+            repeat with candidateWindow in windows
+                set clickResult to my clickCancelButton(candidateWindow)
+                if clickResult starts with "clicked:" then return clickResult
+            end repeat
+        end tell
+        return "sent_escape"
+    end if
+end tell
+return "process_not_found:{process_name}"
+
+on cancelNames()
+    return {{"취소", "Cancel", "Not Now"}}
+end cancelNames
+
+on elementLabel(uiElement)
+    try
+        set candidateName to name of uiElement as text
+        if candidateName is not "" then return candidateName
+    end try
+    try
+        set candidateTitle to title of uiElement as text
+        if candidateTitle is not "" then return candidateTitle
+    end try
+    return ""
+end elementLabel
+
+on isCheckBox(uiElement)
+    try
+        if role of uiElement as text is "AXCheckBox" then return true
+    end try
+    try
+        if role description of uiElement as text contains "checkbox" then return true
+    end try
+    try
+        if class of uiElement is checkbox then return true
+    end try
+    return false
+end isCheckBox
+
+on isButton(uiElement)
+    try
+        if role of uiElement as text is "AXButton" then return true
+    end try
+    try
+        if role description of uiElement as text contains "button" then return true
+    end try
+    try
+        if class of uiElement is button then return true
+    end try
+    return false
+end isButton
+
+on clickCancelButton(uiElement)
+    if my isCheckBox(uiElement) then return "not_found"
+    if my isButton(uiElement) then
+        set candidateName to my elementLabel(uiElement)
+        if candidateName is in my cancelNames() then
+            click uiElement
+            return "clicked: " & candidateName
+        end if
+    end if
+    try
+        repeat with childElement in UI elements of uiElement
+            set childResult to my clickCancelButton(childElement)
+            if childResult starts with "clicked:" then return childResult
+        end repeat
+    end try
+    return "not_found"
+end clickCancelButton
+'''.strip(),
+                )
+            )
+
+        scripts.append(
+            (
+                "external_protocol_prompt_macos_escape_final",
+                '''
+tell application "System Events"
+    key code 53
+end tell
+return "sent_escape"
+'''.strip(),
+            )
+        )
+        return scripts
+
+    def _safe_playwright_errors(self):
+        errors = []
+        for cls in (TargetClosedError, PlaywrightError):
+            if isinstance(cls, type) and cls not in errors:
+                errors.append(cls)
+        return tuple(errors) or (Exception,)
+
+    def _is_target_closed_error(self, exc):
+        return isinstance(exc, self._safe_playwright_errors()) and "closed" in repr(exc).lower()
+
+    def _page_metadata_saw_target_closed(self):
+        return self._last_page_metadata_error is not None and self._is_target_closed_error(self._last_page_metadata_error)
+
+    def _is_page_available(self):
+        page = self.page
+        if page is None:
+            return False
+        try:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed):
+                return not bool(is_closed())
+            return True
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_availability_failed", repr(exc))
+            return False
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_availability_failed", repr(exc))
+            return False
+
+    async def _safe_page_title(self, default=""):
+        if not self._is_page_available():
+            return default
+        try:
+            self._last_page_metadata_error = None
+            return await self._maybe_await(self.page.title())
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_title_unavailable", repr(exc))
+            return default
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_title_unavailable", repr(exc))
+            return default
+
+    def _safe_page_url(self, default=""):
+        if not self._is_page_available():
+            return default
+        try:
+            return getattr(self.page, "url", default) or default
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_url_unavailable", repr(exc))
+            return default
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_url_unavailable", repr(exc))
+            return default
+
+    async def _safe_page_content(self, default=""):
+        if not self._is_page_available():
+            return default
+        try:
+            return await self._maybe_await(self.page.content())
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_content_unavailable", repr(exc))
+            return default
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_content_unavailable", repr(exc))
+            return default
+
+    async def _safe_screenshot(self, default=None, **kwargs):
+        if not self._is_page_available():
+            return default
+        try:
+            return await self._maybe_await(self.page.screenshot(**kwargs))
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_screenshot_unavailable", repr(exc))
+            return default
+        except Exception as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("page_screenshot_unavailable", repr(exc))
+            return default
+
+    async def _safe_visible_text_excerpt(self, max_chars=2000, default=""):
+        if not self._is_page_available():
+            return default
+        text = ""
+        for _scope_name, scope in self._page_locator_scopes():
+            for selector in ("body", "html"):
+                if not self._is_page_available():
+                    return default
+                try:
+                    locator = scope.locator(selector).first
+                    if hasattr(locator, "inner_text"):
+                        text = await self._maybe_await(locator.inner_text(timeout=1000))
+                    elif hasattr(locator, "text_content"):
+                        text = await self._maybe_await(locator.text_content(timeout=1000))
+                    if text:
+                        break
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("page_visible_text_unavailable", repr(exc))
+                    return default
+                except Exception as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("page_visible_text_unavailable", repr(exc))
+                    continue
+            if text:
+                break
         text = " ".join(str(text or "").split())
-        return text[:max_chars]
+        return text[:max_chars] if text else default
+
+    async def _visible_text_excerpt(self, max_chars=2000):
+        return await self._safe_visible_text_excerpt(max_chars=max_chars)
 
     async def _wait_for_join_result(self, timeout_sec):
         deadline = asyncio.get_running_loop().time() + max(0, float(timeout_sec))
         poll_timeout_ms = self.timeout_ms("join_result_poll_timeout_ms", 500)
         while asyncio.get_running_loop().time() <= deadline:
+            if await self._title_indicates_joined():
+                return {
+                    "status": "joined",
+                    "selector": "title:joined",
+                    "joined_selector": "title:joined",
+                    "visible_text": await self._visible_text_excerpt(),
+                }
             for status, group in (
+                ("waiting_for_others", "waiting_for_others_indicator"),
                 ("joined", "joined_indicator"),
                 ("lobby", "lobby_indicator"),
                 ("blocked", "blocked_indicator"),
             ):
                 selector = await self._first_visible_selector(group, timeout_ms=poll_timeout_ms)
                 if selector:
+                    joined_selector = None
+                    if status == "waiting_for_others":
+                        joined_selector = await self._first_visible_selector(
+                            "joined_indicator",
+                            timeout_ms=self.timeout_ms("join_result_secondary_poll_timeout_ms", 50),
+                        )
                     return {
                         "status": status,
                         "selector": selector,
+                        "joined_selector": joined_selector,
                         "visible_text": await self._visible_text_excerpt(),
                     }
             await asyncio.sleep(float(self.adapter_config().get("join_result_poll_interval_sec", 0.25)))
@@ -1049,6 +2791,18 @@ class WebexAdapter(BrowserMeetingAdapter):
             "selector": None,
             "visible_text": await self._visible_text_excerpt(),
         }
+
+    async def _title_indicates_joined(self):
+        title = str(await self._safe_page_title(default="") or "")
+        normalized = " ".join(title.split()).lower()
+        return any(
+            token in normalized
+            for token in (
+                "미팅 중",
+                "in meeting",
+                "meeting in progress",
+            )
+        )
 
     async def _fallback_action(self, action_name):
         fallback = self.adapter_config().get("fallback", {})
@@ -1085,6 +2839,59 @@ class WebexAdapter(BrowserMeetingAdapter):
             self.service_name,
         )
         return result.returncode == 0
+
+    def _run_external_protocol_command(self, command, action_name, env_display=None):
+        env = None
+        if env_display:
+            env = dict(os.environ)
+            env["DISPLAY"] = env_display
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False, env=env)
+            stdout = (result.stdout or "").strip()
+            stderr = (result.stderr or "").strip()
+            success = result.returncode == 0
+            if command and command[0] == "osascript" and stdout.startswith(("not_found:", "process_not_found:")):
+                success = False
+            payload = {
+                "action": action_name,
+                "command": command,
+                "returncode": result.returncode,
+                "success": success,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        except Exception as exc:
+            payload = {
+                "action": action_name,
+                "command": command,
+                "success": False,
+                "error": repr(exc),
+            }
+        return payload
+
+    def _external_protocol_permission_issue(self, attempts):
+        permission_tokens = (
+            "not allowed assistive access",
+            "not authorized to send apple events",
+            "not permitted to send keystrokes",
+            "is not allowed to send keystrokes",
+            "not allowed to control system events",
+            "access for assistive devices is disabled",
+            "(-1743)",
+            "(-25211)",
+        )
+        for attempt in attempts:
+            command = attempt.get("command") or []
+            if not command or command[0] != "osascript":
+                continue
+            text = " ".join(
+                str(attempt.get(key) or "")
+                for key in ("stdout", "stderr", "error")
+            )
+            lowered = text.lower()
+            if any(token in lowered for token in permission_tokens):
+                return text.strip() or repr(attempt)
+        return None
 
     def _has_browser_arg(self, args, desired):
         if "=" in desired:
@@ -1147,6 +2954,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             "initial_microphone_enabled",
             "initial_camera_enabled",
             "initial_screen_sharing",
+            "apply_initial_media_state_in_prejoin",
+            "strict_prejoin_media_state",
+            "fail_on_prejoin_media_state_unverified",
+            "dismiss_external_protocol_dialog",
+            "external_protocol_dismiss_method",
+            "strict_external_protocol_dismiss",
+            "suppress_external_protocol_dialog",
+            "use_persistent_browser_profile_for_webex",
+            "chrome_user_data_dir",
+            "blocked_external_protocol_schemes",
+            "protocol_handler_excluded_scheme_value",
             "verify_joined",
             "prejoin_timeout_ms",
             "joined_timeout_ms",
@@ -1159,6 +2977,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             "strict_sanity_checks",
             "diagnostic_dir",
             "diagnostics_dir",
+            "retry_navigation_on_page_closed",
+            "max_navigation_retries",
             "permissions",
             "viewport",
         }
@@ -1176,6 +2996,23 @@ class WebexAdapter(BrowserMeetingAdapter):
             page.on("console", lambda msg: self._record_browser_event("console", msg))
             page.on("pageerror", lambda exc: self._record_browser_event("pageerror", exc))
             page.on("requestfailed", lambda request: self._record_browser_event("requestfailed", request))
+            page.on("close", lambda: self._append_browser_log("page_closed", "page close event"))
+        except Exception as exc:
+            self._append_browser_log("logging_error", repr(exc))
+
+    def _attach_browser_logging(self, browser):
+        if browser is None:
+            return
+        try:
+            browser.on("disconnected", lambda: self._append_browser_log("browser_disconnected", "browser disconnected event"))
+        except Exception as exc:
+            self._append_browser_log("logging_error", repr(exc))
+
+    def _attach_context_logging(self, context):
+        if context is None:
+            return
+        try:
+            context.on("close", lambda: self._append_browser_log("context_closed", "context close event"))
         except Exception as exc:
             self._append_browser_log("logging_error", repr(exc))
 

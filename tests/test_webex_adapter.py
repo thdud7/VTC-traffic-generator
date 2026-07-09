@@ -1,5 +1,8 @@
 import asyncio
+import contextlib
+import io
 import json
+import platform
 import sys
 import tempfile
 import unittest
@@ -10,7 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
 from vtc_traffic_generator.run_experiment import generate
-from vtc_traffic_generator.vtc_automation.adapters.webex import PlaywrightTimeoutError
+from vtc_traffic_generator.vtc_automation import test_adapter
+from vtc_traffic_generator.vtc_automation.adapters.webex import PlaywrightTimeoutError, TargetClosedError
 from vtc_traffic_generator.vtc_automation.adapters.registry import get_adapter, list_supported_services
 from vtc_traffic_generator.vtc_automation.adapters.webex import WebexAdapter
 
@@ -73,6 +77,93 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.selectors("join_button"), ["button[data-test='custom-join']"])
         self.assertIn('button:has-text("Join")', WebexAdapter({"adapter_config": {}}).selectors("join_button"))
 
+    def test_test_adapter_supports_overall_and_debug_timeouts(self):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "test_adapter",
+                "--service",
+                "webex",
+                "--vtc-url",
+                "https://example.webex.com/meet/test",
+                "--display-name",
+                "bot",
+                "--prejoin-timeout-sec",
+                "45",
+                "--join-timeout-sec",
+                "45",
+                "--overall-timeout-sec",
+                "90",
+            ],
+        ):
+            args = test_adapter.parse_args()
+
+        config = test_adapter.build_config(args)
+
+        self.assertEqual(args.overall_timeout_sec, 90)
+        self.assertEqual(config["adapter_config"]["prejoin_timeout_ms"], 45000)
+        self.assertEqual(config["adapter_config"]["join_result_timeout_sec"], 45)
+        self.assertEqual(config["adapter_config"]["joined_timeout_ms"], 45000)
+
+    def test_overall_timeout_calls_collect_diagnostics_and_closes_adapter(self):
+        fake_adapter = FakeSmokeAdapter()
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "test_adapter",
+                "--service",
+                "webex",
+                "--vtc-url",
+                "https://example.webex.com/meet/test",
+                "--display-name",
+                "bot",
+                "--leave-after-sec",
+                "10",
+                "--overall-timeout-sec",
+                "0.01",
+            ],
+        ):
+            args = test_adapter.parse_args()
+
+        with patch("vtc_traffic_generator.vtc_automation.test_adapter.create_vtc_adapter", return_value=fake_adapter):
+            with self.assertRaisesRegex(RuntimeError, "overall-timeout-sec"):
+                asyncio.run(test_adapter.run_adapter(args))
+
+        self.assertIn("webex_smoke_overall_timeout", fake_adapter.diagnostic_stages)
+        self.assertTrue(fake_adapter.closed)
+
+    def test_test_adapter_exits_cleanly_after_joined_result_and_leave_delay(self):
+        fake_adapter = FakeJoinedSmokeAdapter({"status": "waiting_for_others", "leave_control_present": True})
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "test_adapter",
+                "--service",
+                "webex",
+                "--vtc-url",
+                "https://example.webex.com/meet/test",
+                "--display-name",
+                "bot",
+                "--leave-after-sec",
+                "0",
+                "--overall-timeout-sec",
+                "1",
+            ],
+        ):
+            args = test_adapter.parse_args()
+
+        stdout = io.StringIO()
+        with patch("vtc_traffic_generator.vtc_automation.test_adapter.create_vtc_adapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(stdout):
+                asyncio.run(test_adapter.run_adapter(args))
+
+        self.assertIn('"status": "waiting_for_others"', stdout.getvalue())
+        self.assertTrue(fake_adapter.left)
+        self.assertTrue(fake_adapter.closed)
+
     def test_launch_args_include_ec2_xvfb_friendly_flags(self):
         adapter = WebexAdapter({"adapter_config": {"browser_channel": "chrome", "disable_gpu": True}})
 
@@ -95,6 +186,50 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(options["env"]["DISPLAY"], ":99")
         self.assertEqual(options["channel"], "chrome")
+
+    def test_chrome_profile_preparation_writes_protocol_handler_excluded_schemes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir) / "webex-profile"
+            adapter = WebexAdapter(
+                {
+                    "adapter_config": {
+                        "chrome_user_data_dir": str(profile_dir),
+                        "blocked_external_protocol_schemes": ["webex", "wbx", "ciscospark"],
+                        "protocol_handler_excluded_scheme_value": True,
+                    }
+                }
+            )
+
+            prepared = adapter._prepare_external_protocol_suppression_profile()
+
+            self.assertEqual(prepared, profile_dir)
+            for relative_path in ("Local State", "Default/Preferences"):
+                data = json.loads((profile_dir / relative_path).read_text(encoding="utf-8"))
+                excluded = data["protocol_handler"]["excluded_schemes"]
+                self.assertEqual(excluded["webex"], True)
+                self.assertEqual(excluded["wbx"], True)
+                self.assertEqual(excluded["ciscospark"], True)
+
+    def test_webex_launch_uses_persistent_profile_by_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir) / "webex-profile"
+            fake_playwright = FakePlaywright()
+            adapter = WebexAdapter(
+                {
+                    "adapter_config": {
+                        "skip_sanity_checks": True,
+                        "chrome_user_data_dir": str(profile_dir),
+                        "browser_channel": "chrome",
+                    }
+                }
+            )
+
+            with patch("playwright.async_api.async_playwright", return_value=FakePlaywrightStarter(fake_playwright)):
+                asyncio.run(adapter.launch())
+
+            self.assertEqual(fake_playwright.chromium.persistent_user_data_dir, str(profile_dir))
+            self.assertIsNotNone(adapter.context)
+            self.assertIsNone(adapter.browser)
 
     def test_launch_args_include_auto_select_desktop_capture_source(self):
         adapter = WebexAdapter(
@@ -239,6 +374,7 @@ class WebexAdapterTests(unittest.TestCase):
         adapter = _join_test_adapter(
             "joined",
             {
+                "post_join_media_check": True,
                 "_meeting_joined_callback": lambda url: callbacks.append(("joined", list(adapter.page.clicks))),
                 "_media_ready_callback": lambda url: callbacks.append(("media", list(adapter.page.clicks))),
             },
@@ -247,6 +383,621 @@ class WebexAdapterTests(unittest.TestCase):
         asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
 
         self.assertEqual(callbacks, [("joined", ["#join"]), ("media", ["#join"])])
+
+    def test_connect_to_meeting_does_not_call_strict_media_before_joined_indicator(self):
+        adapter = _join_test_adapter("joined", {"post_join_media_check": True})
+        calls = []
+
+        async def strict_media_action(name):
+            self.assertIn("#joined", adapter.page.visible)
+            calls.append(name)
+            return True
+
+        adapter.unmute_microphone = lambda: strict_media_action("unmute")
+        adapter.start_camera = lambda: strict_media_action("camera")
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(calls, ["unmute", "camera"])
+
+    def test_connect_to_meeting_returns_joined_without_default_post_join_media_check(self):
+        adapter = _join_test_adapter("joined")
+        calls = []
+
+        async def strict_media_action(name):
+            calls.append(name)
+            raise AssertionError("post-join media action should not run by default")
+
+        adapter.unmute_microphone = lambda: strict_media_action("unmute")
+        adapter.start_camera = lambda: strict_media_action("camera")
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(calls, [])
+
+    def test_connect_to_meeting_skip_device_selection_does_not_strictly_unmute_after_joined(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {"post_join_media_check": True, "skip_device_selection": True},
+        )
+        calls = []
+
+        async def strict_media_action(name):
+            calls.append(name)
+            raise AssertionError("strict post-join media action should be skipped")
+
+        adapter.unmute_microphone = lambda: strict_media_action("unmute")
+        adapter.start_camera = lambda: strict_media_action("camera")
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertFalse(result["media_ready"])
+        self.assertEqual(calls, [])
+
+    def test_waiting_for_others_indicator_is_classified_and_returned(self):
+        adapter = _join_test_adapter(
+            "waiting_for_others",
+            {"selectors": {"waiting_for_others_indicator": "#waiting_for_others"}},
+        )
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "waiting_for_others")
+        self.assertTrue(result["leave_control_present"])
+        self.assertFalse(result["media_ready"])
+
+    def test_korean_in_meeting_title_is_classified_as_joined(self):
+        adapter = _join_test_adapter("no_selector_match")
+        adapter.page.title_after_join = "미팅 중 · 미팅 · Webex"
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(result["selector"], "title:joined")
+
+    def test_optional_post_join_microphone_timeout_is_consumed(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {"post_join_media_check": True, "post_join_media_check_timeout_sec": 0.01},
+        )
+
+        async def slow_unmute():
+            await asyncio.sleep(1)
+            return True
+
+        adapter.unmute_microphone = slow_unmute
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertFalse(result["media_ready"])
+
+    def test_prejoin_media_preference_failure_is_non_fatal_by_default(self):
+        adapter = _control_test_adapter(
+            {"mic": False},
+            transitions_enabled=False,
+            extra_adapter_config={
+                "selectors": {
+                    "prejoin_mic_on_indicator": "#mic-on",
+                    "prejoin_mic_off_indicator": "#mic-off",
+                    "prejoin_camera_on_indicator": "#camera-on",
+                    "prejoin_camera_off_indicator": "#camera-off",
+                }
+            },
+        )
+
+        self.assertFalse(asyncio.run(adapter._apply_prejoin_media_preferences()))
+
+        self.assertEqual(adapter.page.clicks, ["#mic-off"])
+        self.assertEqual(adapter.diagnostic_stages, [])
+
+    def test_strict_prejoin_media_state_collects_diagnostics_on_failure(self):
+        adapter = _control_test_adapter(
+            {"mic": False},
+            transitions_enabled=False,
+            extra_adapter_config={
+                "strict_prejoin_media_state": True,
+                "selectors": {
+                    "prejoin_mic_on_indicator": "#mic-on",
+                    "prejoin_mic_off_indicator": "#mic-off",
+                    "prejoin_camera_on_indicator": "#camera-on",
+                    "prejoin_camera_off_indicator": "#camera-off",
+                },
+            },
+        )
+
+        self.assertFalse(asyncio.run(adapter._apply_prejoin_media_preferences()))
+
+        self.assertEqual(adapter.diagnostic_stages, ["webex_prejoin_media_state_unverified"])
+
+    def test_fail_on_prejoin_media_state_unverified_can_raise(self):
+        adapter = _control_test_adapter(
+            {"mic": False},
+            transitions_enabled=False,
+            extra_adapter_config={
+                "fail_on_prejoin_media_state_unverified": True,
+                "selectors": {
+                    "prejoin_mic_on_indicator": "#mic-on",
+                    "prejoin_mic_off_indicator": "#mic-off",
+                    "prejoin_camera_on_indicator": "#camera-on",
+                    "prejoin_camera_off_indicator": "#camera-off",
+                },
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "prejoin microphone state"):
+            asyncio.run(adapter._apply_prejoin_media_preferences())
+
+    def test_browser_join_selector_is_attempted_before_final_join(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#browser", "#join"})
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertLess(adapter.page.clicks.index("#browser"), adapter.page.clicks.index("#join"))
+
+    def test_display_name_is_filled_on_guest_page(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot-local-1"))
+
+        self.assertIn(("#name", "bot-local-1"), adapter.page.fills)
+
+    def test_external_protocol_prompt_dismissed_after_goto_and_during_prejoin_loop(self):
+        adapter = _join_test_adapter("joined")
+        stages = []
+
+        async def dismiss(stage=None):
+            stages.append(stage)
+            return True
+
+        adapter._dismiss_external_protocol_prompt = dismiss
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertIn("after_goto", stages)
+        self.assertIn("prejoin_loop", stages)
+
+    def test_connect_to_meeting_retries_when_title_reports_target_closed_after_goto(self):
+        first = ClosingAfterGotoPage("joined")
+        second = FakeWebexPage("joined")
+        adapter = _join_test_adapter("joined")
+        adapter.page = first
+        adapter.context = FakeContext([second])
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(first.goto_calls, 1)
+        self.assertEqual(second.url, "https://example.webex.com/meet/test")
+        self.assertIn("page_recreated", [item["event_type"] for item in adapter.browser_log])
+
+    def test_event_after_goto_uses_safe_title_helper(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page = TitleFailsPage("joined")
+        events = []
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.emit_event") as emit:
+            emit.side_effect = lambda config, event, details, service=None: events.append((event, details))
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        opened = [details for event, details in events if event == "webex_page_opened"]
+        self.assertEqual(opened[0]["title"], "")
+        self.assertEqual(opened[0]["url"], "https://example.webex.com/meet/test")
+
+    def test_collect_diagnostics_safe_helpers_do_not_crash_when_page_closed(self):
+        class ClosedDiagnosticsPage:
+            url = "https://example.webex.com/meet/test"
+
+            def is_closed(self):
+                return True
+
+            async def title(self):
+                raise TargetClosedError("closed")
+
+            async def screenshot(self, path):
+                raise TargetClosedError("closed")
+
+            async def content(self):
+                raise TargetClosedError("closed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            adapter = WebexAdapter({"adapter_config": {"diagnostic_dir": tmpdir}})
+            adapter.page = ClosedDiagnosticsPage()
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                run.return_value = subprocess_completed(returncode=0, stdout="ok\n", stderr="")
+                result = asyncio.run(adapter.collect_diagnostics(stage="closed"))
+
+            metadata = json.loads(Path(result["files"]["metadata"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["title"], "")
+        self.assertEqual(metadata["url"], "")
+        self.assertNotIn("screenshot", result["files"])
+        self.assertNotIn("html", result["files"])
+
+    def test_navigation_retry_runs_once_when_page_closes_after_goto(self):
+        first = ClosingAfterGotoPage("joined")
+        second = FakeWebexPage("joined")
+        adapter = _join_test_adapter("joined")
+        adapter.page = first
+        adapter.context = FakeContext([second])
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(first.goto_calls, 1)
+        self.assertEqual(adapter.page, second)
+        self.assertEqual(adapter.diagnostic_stages, ["webex_page_closed_after_goto"])
+
+    def test_navigation_retry_failure_raises_clear_runtime_error(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "max_navigation_retries": 1,
+                "retry_navigation_on_page_closed": True,
+            },
+        )
+        adapter.page = ClosingAfterGotoPage("joined")
+        adapter.context = FakeContext([ClosingAfterGotoPage("joined")])
+
+        with self.assertRaisesRegex(RuntimeError, "Webex page closed after navigation before prejoin flow could start"):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+    def test_external_protocol_prompt_helper_does_not_quit_or_kill_chrome(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        commands = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: commands.append(command) or {
+            "command": command,
+            "action": action_name,
+            "success": True,
+        }
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        rendered = json.dumps(commands, ensure_ascii=False).lower()
+        self.assertNotIn(" to quit", rendered)
+        self.assertNotIn("killall", rendered)
+        self.assertNotIn("pkill", rendered)
+
+    def test_external_protocol_prompt_helper_never_clicks_open_webex(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        commands = []
+
+        def run(command, action_name, env_display=None):
+            commands.append(command)
+            return {"command": command, "action": action_name, "success": True}
+
+        adapter._run_external_protocol_command = run
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        rendered = json.dumps(commands, ensure_ascii=False)
+        self.assertNotIn("Open Webex", rendered)
+        self.assertNotIn("Webex 열기", rendered)
+
+    def test_macos_external_protocol_fallback_supports_korean_cancel(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        commands = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: commands.append(command) or {
+            "command": command,
+            "action": action_name,
+            "success": True,
+        }
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        self.assertIn("취소", json.dumps(commands, ensure_ascii=False))
+
+    def test_external_protocol_progress_uses_required_stage_names(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: {
+            "command": command,
+            "action": action_name,
+            "success": True,
+        }
+        output = io.StringIO()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            with contextlib.redirect_stdout(output):
+                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        progress = output.getvalue()
+        self.assertIn("external_protocol_dismiss_attempt", progress)
+        self.assertIn("external_protocol_dismiss_done", progress)
+        self.assertIn("trigger_stage", progress)
+
+    def test_macos_external_protocol_fallback_targets_common_chrome_processes(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        commands = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: commands.append(command) or {
+            "command": command,
+            "action": action_name,
+            "success": True,
+        }
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        script = json.dumps(commands, ensure_ascii=False)
+        self.assertIn("Google Chrome for Testing", script)
+        self.assertIn("Google Chrome", script)
+        self.assertIn("Chromium", script)
+
+    def test_macos_external_protocol_strategies_are_ordered(self):
+        adapter = WebexAdapter({"adapter_config": {}})
+
+        actions = [action for action, _script in adapter._macos_external_protocol_dismiss_scripts()]
+
+        self.assertEqual(
+            actions[:3],
+            [
+                "external_protocol_prompt_macos_recursive_cancel_Google Chrome for Testing",
+                "external_protocol_prompt_macos_recursive_cancel_Google Chrome",
+                "external_protocol_prompt_macos_recursive_cancel_Chromium",
+            ],
+        )
+        self.assertEqual(actions[-1], "external_protocol_prompt_macos_escape_final")
+
+    def test_macos_external_protocol_permission_error_is_reported(self):
+        adapter = WebexAdapter(
+            {
+                "adapter_config": {
+                    "dismiss_external_protocol_dialog": True,
+                    "strict_external_protocol_dismiss": True,
+                }
+            }
+        )
+        adapter.page = FakeWebexPage("joined")
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                run.return_value = subprocess_completed(
+                    returncode=1,
+                    stderr="System Events에 오류 발생: osascript에 보조 접근이 허용되지 않습니다. (-25211)",
+                )
+                with self.assertRaisesRegex(RuntimeError, "Automation/Accessibility"):
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+    def test_macos_external_protocol_permission_error_is_non_fatal_by_default(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter.page = FakeWebexPage("joined")
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                run.return_value = subprocess_completed(
+                    returncode=1,
+                    stderr="System Events에 오류 발생: osascript에 보조 접근이 허용되지 않습니다. (-25211)",
+                )
+                self.assertTrue(asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit")))
+
+    def test_linux_external_protocol_fallback_uses_xdotool_escape(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        commands = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: commands.append(command) or {
+            "command": command,
+            "action": action_name,
+            "success": True,
+        }
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which") as which:
+                which.side_effect = lambda name: f"/usr/bin/{name}" if name == "xdotool" else None
+                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+
+        self.assertIn(["xdotool", "key", "Escape"], commands)
+
+    def test_korean_browser_join_selector_candidates_are_supported(self):
+        selectors = WebexAdapter({"adapter_config": {}}).selectors("join_from_browser")
+
+        self.assertIn('button:has-text("이 브라우저에서 참여")', selectors)
+        self.assertIn('button:has-text("웹 앱 사용")', selectors)
+        self.assertNotIn('button:has-text("Webex 앱 다운로드")', selectors)
+
+    def test_app_download_option_is_not_clicked_when_browser_join_exists(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#browser", "#download", "#join"})
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertIn("#browser", adapter.page.clicks)
+        self.assertNotIn("#download", adapter.page.clicks)
+
+    def test_korean_name_input_selector_candidates_are_supported(self):
+        selectors = WebexAdapter({"adapter_config": {}}).selectors("display_name")
+
+        self.assertIn('input[aria-label*="이름" i]', selectors)
+        self.assertIn('input[placeholder*="참가자" i]', selectors)
+        self.assertIn('input[aria-label*="이름을 입력" i]', selectors)
+
+    def test_korean_final_join_button_selector_candidates_are_supported(self):
+        selectors = WebexAdapter({"adapter_config": {}}).selectors("join_button")
+
+        self.assertIn('button:has-text("미팅 참여")', selectors)
+        self.assertIn('button:has-text("참가")', selectors)
+
+    def test_disabled_join_button_retries_display_name_before_failing(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+        adapter.page.disabled.add("#join")
+
+        with self.assertRaisesRegex(RuntimeError, "final join button"):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "retry-name"))
+
+        self.assertGreaterEqual(adapter.page.fills.count(("#name", "retry-name")), 1)
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_join_button_disabled")
+        self.assertIn("input_debug", adapter.diagnostic_extras[-1])
+        self.assertIn("visible_text", adapter.diagnostic_extras[-1])
+
+    def test_progress_logging_emits_display_name_and_final_join_stages(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "progress-bot"))
+
+        progress = output.getvalue()
+        self.assertIn("display_name_fill_attempt", progress)
+        self.assertIn("display_name_fill_success", progress)
+        self.assertIn("visible_text_input_count", progress)
+        self.assertIn("fill_method", progress)
+        self.assertIn("final_join_button_seen", progress)
+        self.assertIn("final_join_clicked", progress)
+
+    def test_join_result_timeout_fails_with_diagnostics(self):
+        adapter = _join_test_adapter("missing_result")
+        adapter.page.visible.update({"#name", "#join"})
+
+        with self.assertRaisesRegex(RuntimeError, "status timeout"):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "timeout-bot"))
+
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_join_result_timeout")
+        self.assertIn("visible_text", adapter.diagnostic_extras[-1]["join_result"])
+
+    def test_korean_name_page_text_triggers_display_name_fill(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+        adapter.page.text = "이름을 입력하고 참여하십시오. 이름 *"
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot-local-1"))
+
+        self.assertEqual(adapter.page.values["#name"], "bot-local-1")
+
+    def test_korean_name_label_candidate_is_supported(self):
+        adapter = _join_test_adapter("joined", {"selectors": {"display_name": "#missing", "name_input": "#missing"}})
+        adapter.page.visible.update({"#label-name", "#join"})
+        adapter.page.labels["이름 *"] = "#label-name"
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "label-bot"))
+
+        self.assertEqual(adapter.page.values["#label-name"], "label-bot")
+
+    def test_single_visible_text_input_fallback_is_used(self):
+        adapter = _join_test_adapter("joined", {"selectors": {"display_name": "#missing", "name_input": "#missing"}})
+        adapter.page.visible.update({"#only-input", "#join"})
+        adapter.page.text_inputs = ["#only-input"]
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "fallback-bot"))
+
+        self.assertEqual(adapter.page.values["#only-input"], "fallback-bot")
+
+    def test_role_textbox_candidate_is_used(self):
+        adapter = _join_test_adapter("joined", {"selectors": {"display_name": "#missing", "name_input": "#missing"}})
+        adapter.page.visible.update({"#role-name", "#join"})
+        adapter.page.role_textboxes = ["#role-name"]
+        adapter.page.input_attrs["#role-name"] = {"role": "textbox", "aria-label": "이름 *"}
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "role-bot"))
+
+        self.assertEqual(adapter.page.values["#role-name"], "role-bot")
+
+    def test_active_element_fallback_works_when_name_input_is_focused(self):
+        adapter = _join_test_adapter("joined", {"selectors": {"display_name": "#missing", "name_input": "#missing"}})
+        adapter.page.visible.update({"#focused-name", "#join"})
+        adapter.page.focused_selector = "#focused-name"
+        adapter.page.text_inputs = ["#other-input", "#second-input"]
+
+        result = asyncio.run(adapter._fill_display_name("focused-bot", timeout_ms=1))
+
+        self.assertEqual(result, ':focus:is(input:not([type]), input[type="text"], input[type="search"], textarea, [role="textbox"], [contenteditable="true"])')
+        self.assertEqual(adapter.page.values["#focused-name"], "focused-bot")
+
+    def test_display_name_fill_success_is_verified(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.add("#name")
+
+        result = asyncio.run(adapter._fill_display_name("verified-bot", timeout_ms=1))
+
+        self.assertTrue(result)
+        self.assertEqual(adapter.page.input_value_calls[-1], "#name")
+        self.assertEqual(adapter.page.values["#name"], "verified-bot")
+
+    def test_keyboard_fallback_is_attempted_when_locator_fill_does_not_update_value(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.add("#name")
+        adapter.page.fill_updates_value = False
+
+        result = asyncio.run(adapter._fill_display_name("keyboard-bot", timeout_ms=1))
+
+        self.assertTrue(result)
+        self.assertIn(("press", "Meta+A" if platform.system() == "Darwin" else "Control+A"), adapter.page.keyboard.actions)
+        self.assertIn(("type", "keyboard-bot"), adapter.page.keyboard.actions)
+        self.assertEqual(adapter.page.values["#name"], "keyboard-bot")
+
+    def test_js_fallback_is_attempted_when_keyboard_type_does_not_update_value(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.add("#name")
+        adapter.page.fill_updates_value = False
+        adapter.page.keyboard_updates_value = False
+
+        result = asyncio.run(adapter._fill_display_name("js-bot", timeout_ms=1))
+
+        self.assertTrue(result)
+        self.assertIn(("#name", "js-bot"), adapter.page.js_sets)
+        self.assertEqual(adapter.page.values["#name"], "js-bot")
+
+    def test_disabled_final_join_retries_name_fill_then_clicks_when_enabled(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+        adapter.page.disabled.add("#join")
+        adapter.page.enable_join_on_name_fill = True
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "enable-bot"))
+
+        self.assertIn("#join", adapter.page.clicks)
+        self.assertEqual(adapter.page.values["#name"], "enable-bot")
+
+    def test_disabled_final_join_does_not_click_until_enabled(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible.update({"#name", "#join"})
+        adapter.page.disabled.add("#join")
+
+        with self.assertRaisesRegex(RuntimeError, "final join button"):
+            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "disabled-bot"))
+
+        self.assertNotIn("#join", adapter.page.clicks)
+
+    def test_name_fill_failed_diagnostics_include_input_debug(self):
+        adapter = _join_test_adapter("joined", {"selectors": {"display_name": "#missing", "name_input": "#missing"}})
+        adapter.page.visible.add("#join")
+
+        result = asyncio.run(adapter._fill_display_name_if_needed("missing-bot", timeout_ms=1, diagnose=True))
+
+        self.assertFalse(result["success"])
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_name_fill_failed")
+        self.assertIn("input_debug", adapter.diagnostic_extras[-1])
+
+    def test_name_input_alias_still_fills_display_name(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "selectors": {
+                    "name_input": "#alias-name",
+                }
+            },
+        )
+        adapter.page.visible.update({"#alias-name", "#join"})
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "alias-bot"))
+
+        self.assertIn(("#alias-name", "alias-bot"), adapter.page.fills)
+
+    def test_prejoin_controls_inside_webex_iframe_are_used(self):
+        adapter = _join_test_adapter("joined")
+        frame = FakeWebexPage("joined")
+        frame.visible.update({"#name", "#join"})
+        adapter.page = FakeWebexPage("joined")
+        adapter.page.visible = set()
+        adapter.page.frames = [frame]
+
+        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "frame-bot"))
+
+        self.assertIn(("#name", "frame-bot"), frame.fills)
+        self.assertIn("#join", frame.clicks)
 
     def test_unmute_microphone_clicks_off_indicator_and_updates_after_on_verification(self):
         adapter = _control_test_adapter({"mic": False})
@@ -343,14 +1094,116 @@ def subprocess_completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+class FakePlaywrightStarter:
+    def __init__(self, playwright):
+        self.playwright = playwright
+
+    async def start(self):
+        return self.playwright
+
+
+class FakePlaywright:
+    def __init__(self):
+        self.chromium = FakeChromium()
+        self.stopped = False
+
+    async def stop(self):
+        self.stopped = True
+
+
+class FakeChromium:
+    def __init__(self):
+        self.persistent_user_data_dir = None
+        self.persistent_options = None
+
+    async def launch_persistent_context(self, user_data_dir, **options):
+        self.persistent_user_data_dir = user_data_dir
+        self.persistent_options = options
+        return FakePersistentContext()
+
+
+class FakePersistentContext:
+    browser = None
+
+    def on(self, event_name, callback):
+        return None
+
+    async def new_page(self):
+        return FakeWebexPage("joined")
+
+    async def close(self):
+        return None
+
+
+class FakeSmokeAdapter:
+    def __init__(self):
+        self.diagnostic_stages = []
+        self.closed = False
+
+    async def launch(self):
+        return None
+
+    async def connect_to_meeting(self, vtc_url, display_name):
+        await asyncio.sleep(60)
+
+    async def is_in_meeting(self):
+        return False
+
+    async def leave(self):
+        return True
+
+    async def close(self):
+        self.closed = True
+
+    async def collect_diagnostics(self, stage=None, extra=None):
+        self.diagnostic_stages.append(stage)
+        return {"stage": stage, "files": {"metadata": "/tmp/fake.metadata.json"}}
+
+
+class FakeJoinedSmokeAdapter:
+    def __init__(self, join_result):
+        self.join_result = join_result
+        self.left = False
+        self.closed = False
+
+    async def launch(self):
+        return None
+
+    async def connect_to_meeting(self, vtc_url, display_name):
+        return self.join_result
+
+    async def is_in_meeting(self):
+        return True
+
+    async def leave(self):
+        self.left = True
+        return True
+
+    async def close(self):
+        self.closed = True
+
+
 class FakeWebexLocator:
-    def __init__(self, page, selector):
+    def __init__(self, page, selector, matches=None):
         self.page = page
         self.selector = selector
+        self.matches = matches
 
     @property
     def first(self):
+        if self.matches:
+            return FakeWebexLocator(self.page, self.matches[0])
         return self
+
+    def nth(self, index):
+        if self.matches:
+            return FakeWebexLocator(self.page, self.matches[index])
+        return self
+
+    async def count(self):
+        if self.matches is not None:
+            return len(self.matches)
+        return 1
 
     async def wait_for(self, state="visible", timeout=0):
         if self.selector in self.page.visible:
@@ -359,15 +1212,78 @@ class FakeWebexLocator:
 
     async def click(self):
         self.page.clicks.append(self.selector)
+        self.page.focused_selector = self.selector
+        self.page.select_all = False
         if self.selector == "#join":
             self.page.visible.discard("#join")
             self.page.visible.add(f"#{self.page.join_result}")
+            if self.page.join_result == "waiting_for_others":
+                self.page.visible.add("#joined")
+            if self.page.title_after_join is not None:
+                self.page.title_text = self.page.title_after_join
 
     async def fill(self, value):
         self.page.fills.append((self.selector, value))
+        if self.page.fill_updates_value:
+            self.page.set_value(self.selector, value)
+
+    async def input_value(self, timeout=0):
+        self.page.input_value_calls.append(self.selector)
+        return self.page.values.get(self.selector, "")
+
+    async def is_enabled(self, timeout=0):
+        return self.selector not in self.page.disabled
 
     async def inner_text(self, timeout=1000):
         return self.page.text
+
+    async def evaluate(self, script, value=None):
+        if value is not None:
+            self.page.js_sets.append((self.selector, value))
+            self.page.set_value(self.selector, value)
+            return self.page.values.get(self.selector, "")
+        if "getAttribute" in script:
+            attrs = self.page.input_attrs.get(self.selector, {})
+            return {
+                "name": attrs.get("name", ""),
+                "id": attrs.get("id", self.selector.lstrip("#")),
+                "type": attrs.get("type", "text"),
+                "placeholder": attrs.get("placeholder", ""),
+                "aria_label": attrs.get("aria-label", ""),
+                "role": attrs.get("role", ""),
+                "value": self.page.values.get(self.selector, ""),
+                "focused": self.page.focused_selector == self.selector,
+            }
+        return self.page.values.get(self.selector, "")
+
+
+class FakeKeyboard:
+    def __init__(self, page=None):
+        self.page = page
+        self.presses = []
+        self.actions = []
+
+    async def press(self, key):
+        self.presses.append(key)
+        self.actions.append(("press", key))
+        if key in {"Control+A", "Meta+A"} and self.page is not None:
+            self.page.select_all = True
+        if key == "Backspace" and self.page is not None and self.page.select_all:
+            selector = self.page.focused_selector
+            if selector:
+                self.page.set_value(selector, "")
+            self.page.select_all = False
+
+    async def type(self, value):
+        self.actions.append(("type", value))
+        if self.page is None or not self.page.keyboard_updates_value:
+            return
+        selector = self.page.focused_selector
+        if not selector:
+            return
+        current = "" if self.page.select_all else self.page.values.get(selector, "")
+        self.page.set_value(selector, f"{current}{value}")
+        self.page.select_all = False
 
 
 class FakeWebexPage:
@@ -376,18 +1292,105 @@ class FakeWebexPage:
     def __init__(self, join_result):
         self.join_result = join_result
         self.visible = {"#join"}
+        self.disabled = set()
         self.clicks = []
         self.fills = []
+        self.values = {}
+        self.input_value_calls = []
+        self.js_sets = []
+        self.labels = {}
+        self.text_inputs = ["#name"]
+        self.role_textboxes = []
+        self.input_attrs = {}
+        self.fill_updates_value = True
+        self.keyboard_updates_value = True
+        self.enable_join_on_name_fill = False
+        self.focused_selector = None
+        self.select_all = False
+        self.title_text = "Fake Webex"
+        self.title_after_join = None
         self.text = f"visible {join_result} screen"
+        self.keyboard = FakeKeyboard(self)
 
     async def goto(self, url, wait_until=None, timeout=None):
         self.url = url
 
     async def title(self):
-        return "Fake Webex"
+        return self.title_text
 
     def locator(self, selector):
+        if selector.startswith(":focus"):
+            return FakeWebexLocator(self, self.focused_selector or "#missing-focus")
+        if "input:not([type])" in selector or selector == "input, textarea, [contenteditable=\"true\"]":
+            return FakeWebexLocator(self, selector, matches=list(self.text_inputs))
         return FakeWebexLocator(self, selector)
+
+    def get_by_label(self, pattern):
+        for label, selector in self.labels.items():
+            if pattern.search(label):
+                return FakeWebexLocator(self, selector)
+        return FakeWebexLocator(self, "#missing-label")
+
+    def get_by_role(self, role, name=None):
+        if role != "textbox":
+            return FakeWebexLocator(self, "#missing-role")
+        if name is None:
+            return FakeWebexLocator(self, "role=textbox", matches=list(self.role_textboxes))
+        for selector in self.role_textboxes:
+            attrs = self.input_attrs.get(selector, {})
+            accessible_name = " ".join(
+                str(attrs.get(key, "")) for key in ("aria-label", "placeholder", "name", "id")
+            )
+            if name.search(accessible_name):
+                return FakeWebexLocator(self, selector)
+        return FakeWebexLocator(self, "#missing-role")
+
+    async def evaluate(self, script):
+        selector = self.focused_selector
+        attrs = self.input_attrs.get(selector, {}) if selector else {}
+        return {
+            "tag": "INPUT" if selector else "",
+            "name": attrs.get("name", ""),
+            "id": (selector or "").lstrip("#"),
+            "type": attrs.get("type", "text") if selector else "",
+            "placeholder": attrs.get("placeholder", ""),
+            "aria_label": attrs.get("aria-label", ""),
+            "role": attrs.get("role", ""),
+            "value": self.values.get(selector, "") if selector else "",
+        }
+
+    def set_value(self, selector, value):
+        self.values[selector] = str(value)
+        if self.enable_join_on_name_fill and str(value):
+            self.disabled.discard("#join")
+
+
+class TitleFailsPage(FakeWebexPage):
+    async def title(self):
+        raise RuntimeError("title unavailable")
+
+
+class ClosingAfterGotoPage(FakeWebexPage):
+    def __init__(self, join_result):
+        super().__init__(join_result)
+        self.goto_calls = 0
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.goto_calls += 1
+        self.url = url
+
+    async def title(self):
+        raise TargetClosedError("Target page, context or browser has been closed")
+
+
+class FakeContext:
+    def __init__(self, pages):
+        self.pages = list(pages)
+
+    async def new_page(self):
+        if not self.pages:
+            raise TargetClosedError("Target page, context or browser has been closed")
+        return self.pages.pop(0)
 
 
 class FakeControlLocator:
@@ -488,6 +1491,7 @@ def _join_test_adapter(join_result, extra_config=None):
     config = {
         "adapter_config": {
             "skip_sanity_checks": True,
+            "dismiss_external_protocol_dialog": False,
             "page_load_wait_sec": 0,
             "prejoin_timeout_ms": 100,
             "joined_timeout_ms": 100,
@@ -514,12 +1518,26 @@ def _join_test_adapter(join_result, extra_config=None):
         }
     }
     extra_config = dict(extra_config or {})
+    selectors_update = extra_config.pop("selectors", None)
     adapter_config_updates = {
         key: extra_config.pop(key)
         for key in list(extra_config)
-        if key in {"accept_lobby_as_joined", "allow_lobby_media_ready"}
+        if key
+        in {
+            "accept_lobby_as_joined",
+            "allow_lobby_media_ready",
+            "fail_on_post_join_media_unverified",
+            "retry_navigation_on_page_closed",
+            "max_navigation_retries",
+            "post_join_media_check",
+            "post_join_media_check_timeout_sec",
+            "skip_device_selection",
+            "strict_post_join_media_state",
+        }
     }
     config["adapter_config"].update(adapter_config_updates)
+    if selectors_update:
+        config["adapter_config"]["selectors"].update(selectors_update)
     config.update(extra_config)
     adapter = WebexAdapter(config)
     adapter.page = FakeWebexPage(join_result)
@@ -529,9 +1547,11 @@ def _join_test_adapter(join_result, extra_config=None):
     adapter.start_camera = _async_true
     adapter.stop_camera = _async_true
     adapter.diagnostic_stages = []
+    adapter.diagnostic_extras = []
 
     async def collect_diagnostics(stage=None, extra=None):
         adapter.diagnostic_stages.append(stage)
+        adapter.diagnostic_extras.append(extra or {})
         return {"stage": stage, "extra": extra}
 
     adapter.collect_diagnostics = collect_diagnostics
