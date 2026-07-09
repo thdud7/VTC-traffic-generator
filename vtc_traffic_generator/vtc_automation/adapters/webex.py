@@ -327,6 +327,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             'input[placeholder*="참가자" i]',
             'input[aria-label*="이름을 입력" i]',
             'input[placeholder*="이름을 입력" i]',
+            'mdc-input input',
+            'mdc-input textarea',
             'input[type="text"]',
             "input:not([type])",
             "textarea",
@@ -350,6 +352,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             'input[placeholder*="참가자" i]',
             'input[aria-label*="이름을 입력" i]',
             'input[placeholder*="이름을 입력" i]',
+            'mdc-input input',
+            'mdc-input textarea',
             'input[type="text"]',
             "input:not([type])",
             "textarea",
@@ -1498,7 +1502,68 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _snapshot_scope(self, scope, scope_name, timeout_sec=0.5):
         if scope is None or not hasattr(scope, "evaluate"):
             return {"scope": scope_name, "url": "", "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": "scope_unavailable"}
-        script = r"""
+        snapshot = {
+            "scope": scope_name,
+            "url": str(getattr(scope, "url", "") or ""),
+            "title": "",
+            "visible_text": "",
+            "hidden_text": "",
+            "visible_inputs": [],
+            "visible_buttons_links": [],
+            "frame_urls": [],
+            "error": "",
+            "errors": [],
+        }
+        if hasattr(scope, "title"):
+            try:
+                snapshot["title"] = str(await asyncio.wait_for(self._maybe_await(scope.title()), timeout=timeout_sec))
+            except Exception:
+                snapshot["title"] = ""
+        self._progress("frame_url_seen", {"scope": scope_name, "url": snapshot["url"], "title": snapshot["title"]})
+
+        url_result = await self._snapshot_eval_step(
+            scope,
+            scope_name,
+            "url_title",
+            r"""() => ({
+              title: document.title || "",
+              url: location.href || "",
+              frame_urls: Array.from(document.querySelectorAll("iframe, frame")).slice(0, 40).map((el) => el.src || "")
+            })""",
+            timeout_sec,
+        )
+        if isinstance(url_result, Mapping):
+            snapshot["title"] = str(url_result.get("title") or snapshot["title"] or "")
+            snapshot["url"] = str(url_result.get("url") or snapshot["url"] or "")
+            snapshot["frame_urls"] = list(url_result.get("frame_urls") or [])
+
+        input_result = await self._snapshot_eval_step(scope, scope_name, "input", self._visible_input_scan_script(), timeout_sec)
+        if isinstance(input_result, list):
+            snapshot["visible_inputs"] = input_result
+        self._progress(
+            "frame_input_probe_result",
+            {"scope": scope_name, "url": snapshot["url"], "visible_text_input_count": len(snapshot["visible_inputs"])},
+        )
+
+        button_result = await self._snapshot_eval_step(scope, scope_name, "button", self._visible_button_scan_script(), timeout_sec)
+        if isinstance(button_result, list):
+            snapshot["visible_buttons_links"] = button_result
+        self._progress(
+            "frame_button_probe_result",
+            {"scope": scope_name, "url": snapshot["url"], "visible_button_link_count": len(snapshot["visible_buttons_links"])},
+        )
+
+        text_result = await self._snapshot_eval_step(scope, scope_name, "text", self._visible_text_scan_script(), timeout_sec)
+        if isinstance(text_result, Mapping):
+            snapshot["visible_text"] = str(text_result.get("visible_text") or "")
+            snapshot["hidden_text"] = str(text_result.get("hidden_text") or "")
+        errors = [value for value in snapshot.get("errors", []) if value]
+        if errors:
+            snapshot["error"] = ",".join(errors)
+        return snapshot
+
+    def _visible_input_scan_script(self):
+        return r"""
         () => {
           const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
           const visible = (el) => {
@@ -1519,34 +1584,61 @@ class WebexAdapter(BrowserMeetingAdapter):
             placeholder: el.getAttribute("placeholder") || "",
             href: el.getAttribute("href") || "",
           });
+          return Array.from(document.querySelectorAll(
+            'mdc-input input, mdc-input textarea, input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="password"], textarea, [role="textbox"], [contenteditable="true"]'
+          )).filter(visible).slice(0, 30).map(summarize);
+        }
+        """
+
+    def _visible_button_scan_script(self):
+        return r"""
+        () => {
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const visible = (el) => {
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          };
+          const textOf = (el) => norm(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "");
+          const summarize = (el) => ({
+            tag: el.tagName || "",
+            role: el.getAttribute("role") || "",
+            type: el.getAttribute("type") || "",
+            name: el.getAttribute("name") || "",
+            id: el.getAttribute("id") || "",
+            text: textOf(el).slice(0, 300),
+            aria_label: el.getAttribute("aria-label") || "",
+            placeholder: el.getAttribute("placeholder") || "",
+            href: el.getAttribute("href") || "",
+          });
+          return Array.from(document.querySelectorAll("button, a, [role='button'], [role='link']"))
+            .filter(visible).slice(0, 80).map(summarize);
+        }
+        """
+
+    def _visible_text_scan_script(self):
+        return r"""
+        () => {
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
           const visibleText = norm(document.body && document.body.innerText || "");
           const hiddenText = norm(document.body && document.body.textContent || "");
-          const visibleInputs = Array.from(document.querySelectorAll(
-            'input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="password"], textarea, [role="textbox"], [contenteditable="true"]'
-          )).filter(visible).slice(0, 30).map(summarize);
-          const visibleButtonsLinks = Array.from(document.querySelectorAll("button, a, [role='button'], [role='link']"))
-            .filter(visible).slice(0, 80).map(summarize);
-          const frameUrls = Array.from(document.querySelectorAll("iframe, frame")).slice(0, 40).map((el) => el.src || "");
           return {
-            title: document.title || "",
-            url: location.href || "",
             visible_text: visibleText.slice(0, 6000),
             hidden_text: hiddenText.slice(0, 6000),
-            visible_inputs: visibleInputs,
-            visible_buttons_links: visibleButtonsLinks,
-            frame_urls: frameUrls,
           };
         }
         """
+
+    async def _snapshot_eval_step(self, scope, scope_name, step, script, timeout_sec):
         try:
-            result = await asyncio.wait_for(self._maybe_await(scope.evaluate(script)), timeout=timeout_sec)
-            if not isinstance(result, Mapping):
-                result = {}
-            return {"scope": scope_name, **dict(result), "error": ""}
+            return await asyncio.wait_for(self._maybe_await(scope.evaluate(script)), timeout=timeout_sec)
         except asyncio.TimeoutError:
-            return {"scope": scope_name, "url": str(getattr(scope, "url", "") or ""), "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": "snapshot_timeout"}
+            self._progress("frame_snapshot_timeout", {"scope": scope_name, "step": step})
+            return None
         except Exception as exc:
-            return {"scope": scope_name, "url": str(getattr(scope, "url", "") or ""), "title": "", "visible_text": "", "hidden_text": "", "visible_inputs": [], "visible_buttons_links": [], "frame_urls": [], "error": repr(exc)}
+            self._append_browser_log("frame_snapshot_step_failed", f"{scope_name}:{step}:{exc!r}")
+            return None
 
     def _webclient_frame_from_snapshot(self, snapshot):
         best = None
@@ -1568,7 +1660,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 for token in ("join", "next", "continue", "name", "meeting", "참여", "참가", "이름", "계속")
             )
             score = url_score + (10 if visible_inputs else 0) + (6 if join_button else 0) + (3 if prejoin_text else 0)
-            detected = url_score > 0 and (visible_inputs or join_button or prejoin_text)
+            detected = url_score >= 10 or (url_score > 0 and (visible_inputs or join_button or prejoin_text))
             if not detected:
                 continue
             candidate = {
@@ -1581,6 +1673,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "prejoin_text": prejoin_text,
                 "score": score,
             }
+            self._progress("webex_webclient_frame_candidate", candidate)
             if best is None or candidate["score"] > best["details"]["score"]:
                 best = {"index": index, "details": candidate}
         if not best:
@@ -1613,11 +1706,34 @@ class WebexAdapter(BrowserMeetingAdapter):
         text = f"{url} {name}".lower()
         if "unified-webclient-iframe" in text:
             return 8
+        if "web.webex.com/guest-join-meeting" in text:
+            return 12
         if "web.webex.com/meeting" in text:
             return 10
+        if "web.webex.com" in text and "join" in text:
+            return 11
         if "/meeting" in text:
             return 5
         return 0
+
+    def _is_strong_webex_guest_join_frame_url(self, url):
+        return self._webex_meeting_frame_url_score(str(url or "")) >= 10
+
+    def _select_live_webclient_frame_candidate(self):
+        best = None
+        for scope_name, frame in self._page_locator_scopes(prefer_meeting_frame=False)[1:]:
+            url = str(getattr(frame, "url", "") or "")
+            name = self._safe_frame_name(frame)
+            score = self._webex_meeting_frame_url_score(url, name)
+            if score <= 0:
+                continue
+            candidate = {"scope": scope_name, "url": url, "name": name, "score": score}
+            self._progress("webex_webclient_frame_candidate", candidate)
+            if best is None or score > best["score"]:
+                best = {**candidate, "frame": frame}
+        if best:
+            self._preferred_webex_meeting_frame = best["frame"]
+        return best
 
     def _safe_frame_name(self, frame):
         try:
@@ -3212,8 +3328,27 @@ class WebexAdapter(BrowserMeetingAdapter):
         return {"success": False, "selector": None}
 
     async def _fill_display_name(self, display_name, timeout_ms=None):
+        total_timeout_ms = self.timeout_ms("display_name_fill_total_timeout_ms", 8000)
+        if timeout_ms is not None:
+            total_timeout_ms = min(int(total_timeout_ms), max(1, int(timeout_ms) * 10))
+        try:
+            return await asyncio.wait_for(
+                self._fill_display_name_bounded(display_name, timeout_ms=timeout_ms),
+                timeout=max(0.001, total_timeout_ms / 1000),
+            )
+        except asyncio.TimeoutError:
+            self._progress("webex_display_name_fill_timeout", {"timeout_ms": total_timeout_ms})
+            return None
+
+    async def _fill_display_name_bounded(self, display_name, timeout_ms=None):
         display_name = str(display_name or self._display_name())
         self._last_display_name_fill_method = None
+        frame_candidate = self._select_live_webclient_frame_candidate()
+        if frame_candidate:
+            self._progress(
+                "webex_display_name_frame_selected",
+                {key: frame_candidate.get(key) for key in ("scope", "url", "name", "score")},
+            )
         input_debug = await self._input_debug_info()
         self._progress(
             "display_name_fill_attempt",
@@ -3222,6 +3357,12 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
             },
         )
+        strong_guest_frame = bool(frame_candidate and self._is_strong_webex_guest_join_frame_url(frame_candidate.get("url")))
+        if input_debug.get("visible_text_input_count", 0) == 0 and not strong_guest_frame:
+            self._progress(
+                "webex_display_name_input_not_found",
+                {"reason": "no_visible_text_input", "strong_guest_frame": False},
+            )
         found = await self._find_display_name_input(timeout_ms=timeout_ms)
         if found:
             self._progress(
@@ -3260,6 +3401,15 @@ class WebexAdapter(BrowserMeetingAdapter):
                         "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
                     },
                 )
+                self._progress(
+                    "webex_display_name_fill_success",
+                    {
+                        "selector": found["selector"],
+                        "scope": found.get("scope"),
+                        "strategy": found.get("strategy"),
+                        "fill_method": verified_method,
+                    },
+                )
                 return found["selector"]
             self._progress(
                 "display_name_fill_failed",
@@ -3273,15 +3423,20 @@ class WebexAdapter(BrowserMeetingAdapter):
                 },
             )
             return None
-        self._progress(
-            "display_name_fill_failed",
-            {
-                "selector": None,
-                "fill_method": None,
-                "verification_result": False,
-                "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
-            },
-        )
+        details = {
+            "selector": None,
+            "fill_method": None,
+            "verification_result": False,
+            "visible_text_input_count": input_debug.get("visible_text_input_count", 0),
+            "webclient_frame": {key: frame_candidate.get(key) for key in ("scope", "url", "name", "score")} if frame_candidate else None,
+        }
+        self._progress("display_name_fill_failed", details)
+        self._progress("webex_display_name_input_not_found", details)
+        if strong_guest_frame:
+            await self._maybe_await(
+                self.collect_diagnostics(stage="webex_display_name_input_not_found", extra=details)
+            )
+            raise RuntimeError("webex_display_name_input_not_found")
         return None
 
     async def _name_entry_text_visible(self):
@@ -3292,12 +3447,29 @@ class WebexAdapter(BrowserMeetingAdapter):
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
         candidate_timeout = min(int(timeout), int(self.adapter_config().get("display_name_candidate_timeout_ms", 200)))
 
+        self._progress("webex_display_name_input_probe_start", {"timeout_ms": candidate_timeout})
+        found = await self._find_display_name_input_by_selectors(timeout_ms=candidate_timeout)
+        if found:
+            self._progress(
+                "webex_display_name_input_probe_result",
+                {"found": True, "selector": found["selector"], "scope": found.get("scope"), "strategy": found.get("strategy")},
+            )
+            return found
+
         found = await self._find_single_visible_text_like_input(timeout_ms=candidate_timeout)
         if found:
+            self._progress(
+                "webex_display_name_input_probe_result",
+                {"found": True, "selector": found["selector"], "scope": found.get("scope"), "strategy": found.get("strategy")},
+            )
             return found
 
         found = await self._find_active_text_like_input(timeout_ms=candidate_timeout)
         if found:
+            self._progress(
+                "webex_display_name_input_probe_result",
+                {"found": True, "selector": found["selector"], "scope": found.get("scope"), "strategy": found.get("strategy")},
+            )
             return found
 
         label_patterns = (
@@ -3306,7 +3478,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             r"Your name",
             r"Display name",
         )
-        for scope_name, scope in self._page_locator_scopes():
+        for scope_name, scope in self._display_name_locator_scopes():
             get_by_label = getattr(scope, "get_by_label", None)
             if not get_by_label:
                 continue
@@ -3335,7 +3507,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             r"Your name",
             r"Display name",
         )
-        for scope_name, scope in self._page_locator_scopes():
+        for scope_name, scope in self._display_name_locator_scopes():
             get_by_role = getattr(scope, "get_by_role", None)
             if not get_by_role:
                 continue
@@ -3364,17 +3536,11 @@ class WebexAdapter(BrowserMeetingAdapter):
                 except Exception:
                     continue
 
-        for group in ("display_name", "name_input"):
-            found = await self._first_visible_locator(group, timeout_ms=candidate_timeout)
-            if found:
-                found["strategy"] = group
-                return found
-
         for selector in (
             'label:has-text("이름") >> xpath=following::input[1]',
             'text="이름" >> xpath=following::input[1]',
         ):
-            for scope_name, scope in self._page_locator_scopes():
+            for scope_name, scope in self._display_name_locator_scopes():
                 try:
                     locator = scope.locator(selector).first
                     await locator.wait_for(state="visible", timeout=candidate_timeout)
@@ -3390,16 +3556,87 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         found = await self._find_active_text_like_input(timeout_ms=timeout)
         if found:
+            self._progress(
+                "webex_display_name_input_probe_result",
+                {"found": True, "selector": found["selector"], "scope": found.get("scope"), "strategy": found.get("strategy")},
+            )
             return found
 
-        return await self._find_single_visible_text_like_input(timeout_ms=timeout)
+        found = await self._find_single_visible_text_like_input(timeout_ms=timeout)
+        self._progress(
+            "webex_display_name_input_probe_result",
+            {"found": bool(found), "selector": found.get("selector") if found else None, "scope": found.get("scope") if found else None, "strategy": found.get("strategy") if found else None},
+        )
+        return found
+
+    def _display_name_input_selectors(self):
+        selectors = []
+        for selector in (
+            'mdc-input input',
+            'mdc-input textarea',
+            'input[type="text"]',
+            'input:not([type])',
+            'textarea',
+            '[contenteditable="true"]',
+            'input[aria-label*="display name" i]',
+            'input[aria-label*="your name" i]',
+            'input[aria-label*="name" i]',
+            'input[aria-label*="이름" i]',
+            'input[name*="display name" i]',
+            'input[name*="display" i]',
+            'input[name*="name" i]',
+            'input[name*="이름" i]',
+            'input[placeholder*="display name" i]',
+            'input[placeholder*="your name" i]',
+            'input[placeholder*="name" i]',
+            'input[placeholder*="이름" i]',
+        ):
+            if selector not in selectors:
+                selectors.append(selector)
+        for group in ("display_name", "name_input"):
+            for selector in self.selectors(group):
+                if selector not in selectors:
+                    selectors.append(selector)
+        return selectors
+
+    def _display_name_locator_scopes(self):
+        scopes = self._page_locator_scopes(prefer_meeting_frame=True)
+        preferred = self._preferred_webex_meeting_frame
+        if preferred is None:
+            return scopes
+        preferred_items = [item for item in scopes if item[1] is preferred]
+        other_items = [item for item in scopes if item[1] is not preferred]
+        return preferred_items + other_items
+
+    async def _find_display_name_input_by_selectors(self, timeout_ms=None):
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        for scope_name, scope in self._display_name_locator_scopes():
+            for selector in self._display_name_input_selectors():
+                try:
+                    locator = scope.locator(selector).first
+                    await locator.wait_for(state="visible", timeout=timeout)
+                    return {
+                        "selector": selector,
+                        "locator": locator,
+                        "scope": scope_name,
+                        "strategy": "display_name_selector_probe",
+                    }
+                except PlaywrightTimeoutError:
+                    continue
+                except self._safe_playwright_errors() as exc:
+                    self._last_page_metadata_error = exc
+                    self._append_browser_log("display_name_selector_probe_unavailable", repr(exc))
+                    continue
+                except Exception:
+                    continue
+        return None
 
     async def _find_active_text_like_input(self, timeout_ms=None):
         if not self._is_page_available():
             return None
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
         selector = ':focus:is(input:not([type]), input[type="text"], input[type="search"], textarea, [role="textbox"], [contenteditable="true"])'
-        for scope_name, scope in self._page_locator_scopes():
+        for scope_name, scope in self._display_name_locator_scopes():
             try:
                 locator = scope.locator(selector).first
                 await locator.wait_for(state="visible", timeout=timeout)
@@ -3436,7 +3673,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             'input:not([type]), input[type="text"], input[type="search"], '
             'textarea, [role="textbox"], [contenteditable="true"]'
         )
-        for _scope_name, scope in self._page_locator_scopes():
+        for _scope_name, scope in self._display_name_locator_scopes():
             inputs = scope.locator(text_like_selector)
             visible = []
             try:
@@ -3504,7 +3741,10 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _fill_locator_with_fill(self, locator, value, timeout):
         await locator.wait_for(state="visible", timeout=timeout)
-        await locator.fill(value)
+        try:
+            await locator.fill(value, timeout=timeout)
+        except TypeError:
+            await locator.fill(value)
 
     async def _fill_locator_with_keyboard_select_type(self, locator, value, timeout):
         await locator.wait_for(state="visible", timeout=timeout)
@@ -3566,7 +3806,7 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _click_locator_force(self, locator):
         try:
-            await locator.click(force=True)
+            await locator.click(force=True, timeout=self.timeout_ms("optional_selector_timeout_ms", 1000))
         except TypeError:
             await locator.click()
 

@@ -923,6 +923,113 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertIn("webex_frame_scan_start", output.getvalue())
         self.assertIn("webex_webclient_frame_detected", output.getvalue())
 
+    def test_guest_join_frame_url_is_webclient_candidate_without_dom_snapshot(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text = ""
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertTrue(result["webclient_frame_detected"])
+        self.assertEqual(result["webclient_frame"]["url"], "https://web.webex.com/guest-join-meeting")
+        self.assertIs(adapter._preferred_webex_meeting_frame, frame)
+        self.assertIn("webex_webclient_frame_candidate", output.getvalue())
+
+    def test_guest_join_text_snapshot_timeout_still_probes_frame_input(self):
+        adapter = _join_test_adapter("joined", {"frame_snapshot_timeout_sec": 0.001})
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        frame = TextSnapshotTimeoutFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = {'input[type="text"]'}
+        frame.text_inputs = ['input[type="text"]']
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+            filled = asyncio.run(adapter._fill_display_name_if_needed("bot-frame", timeout_ms=5))
+
+        self.assertTrue(result["webclient_frame_detected"])
+        self.assertTrue(filled["success"])
+        self.assertIn(('input[type="text"]', "bot-frame"), frame.fills)
+        self.assertIn("frame_snapshot_timeout", output.getvalue())
+        self.assertIn("webex_display_name_input_probe_start", output.getvalue())
+
+    def test_display_name_frame_input_type_text_is_filled(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = {'input[type="text"]'}
+        frame.text_inputs = ['input[type="text"]']
+        outer.frames = [outer, frame]
+
+        result = asyncio.run(adapter._fill_display_name("typed-bot", timeout_ms=5))
+
+        self.assertEqual(result, 'input[type="text"]')
+        self.assertIn(('input[type="text"]', "typed-bot"), frame.fills)
+
+    def test_display_name_frame_mdc_input_is_filled(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = {"mdc-input input"}
+        frame.text_inputs = ["mdc-input input"]
+        outer.frames = [outer, frame]
+
+        result = asyncio.run(adapter._fill_display_name("mdc-bot", timeout_ms=5))
+
+        self.assertEqual(result, "mdc-input input")
+        self.assertIn(("mdc-input input", "mdc-bot"), frame.fills)
+
+    def test_guest_join_frame_without_fillable_input_fails_fast_with_diagnostic(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.visible = set()
+        outer.text_inputs = []
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError, "webex_display_name_input_not_found"):
+                asyncio.run(adapter._fill_display_name("missing-bot", timeout_ms=5))
+
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_display_name_input_not_found")
+        self.assertIn("webex_display_name_input_not_found", output.getvalue())
+
+    def test_textarea_probe_timeout_has_no_unhandled_future_exception(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.visible = set()
+        outer.text_inputs = []
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        frame.timeout_selectors.add("textarea")
+        outer.frames = [outer, frame]
+
+        async def run_fill():
+            loop = asyncio.get_running_loop()
+            unhandled = []
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            with self.assertRaisesRegex(RuntimeError, "webex_display_name_input_not_found"):
+                await adapter._fill_display_name("timeout-bot", timeout_ms=5)
+            await asyncio.sleep(0)
+            return unhandled
+
+        self.assertEqual(asyncio.run(run_fill()), [])
+
     def test_webex_page_state_detection_timeout_has_no_unhandled_future_exception(self):
         adapter = _join_test_adapter(
             "joined",
@@ -1815,7 +1922,7 @@ class FakeWebexLocator:
             if self.page.title_after_join is not None:
                 self.page.title_text = self.page.title_after_join
 
-    async def fill(self, value):
+    async def fill(self, value, timeout=None):
         self.page.fills.append((self.selector, value))
         if self.page.fill_updates_value:
             self.page.set_value(self.selector, value)
@@ -1992,10 +2099,22 @@ class FakeWebexPage:
         return FakeWebexLocator(self, "#missing-role")
 
     async def evaluate(self, script, payload=None):
-        if "visible_inputs" in script and "visible_buttons_links" in script:
+        if "dom-near-problem-text" in script:
+            return self.dom_try_again_result
+        if "js_text_click" in script or "js_text_diagnostic" in script:
+            if "const shouldClick = false" in script:
+                return list(self.js_text_action_candidates)
+            result = self.js_text_action_result or self.dom_try_again_result
+            return {**result, "ok": True, "method": "js_text_click"} if isinstance(result, dict) else result
+        if "location.href" in script and "frame_urls" in script:
+            frame_urls = [
+                str(getattr(frame, "url", "") or "")
+                for frame in self.frames
+                if frame is not self
+            ]
+            return {"title": self.title_text, "url": self.url, "frame_urls": frame_urls}
+        if "mdc-input input" in script or "visible_inputs" in script:
             visible_inputs = []
-            visible_buttons_links = []
-            visible_text = self.text or WebexAdapter({"adapter_config": {}})._sanitize_html_text(self.html)
             for selector in sorted(self.visible):
                 text = self.text_for_selector(selector)
                 item = {
@@ -2011,29 +2130,28 @@ class FakeWebexPage:
                 }
                 if selector in self.text_inputs or selector in self.role_textboxes or "input" in selector or selector == "#name":
                     visible_inputs.append(item)
+            return visible_inputs
+        if "visible_buttons_links" in script or "button, a, [role='button']" in script or "button, a, [role='button'], [role='link']" in script:
+            visible_buttons_links = []
+            for selector in sorted(self.visible):
+                text = self.text_for_selector(selector)
+                item = {
+                    "tag": self.tags.get(selector, "BUTTON" if "button" in selector or "join" in selector else "DIV"),
+                    "role": self.roles.get(selector, ""),
+                    "type": self.input_attrs.get(selector, {}).get("type", ""),
+                    "name": self.input_attrs.get(selector, {}).get("name", ""),
+                    "id": selector.lstrip("#"),
+                    "text": text,
+                    "aria_label": self.input_attrs.get(selector, {}).get("aria-label", ""),
+                    "placeholder": self.input_attrs.get(selector, {}).get("placeholder", ""),
+                    "href": self.hrefs.get(selector, ""),
+                }
                 if selector in {"#join", "#start", "#browser", "#continue", "#try-again", "#got-it"} or "button" in selector or text:
                     visible_buttons_links.append(item)
-            frame_urls = [
-                str(getattr(frame, "url", "") or "")
-                for frame in self.frames
-                if frame is not self
-            ]
-            return {
-                "title": self.title_text,
-                "url": self.url,
-                "visible_text": visible_text,
-                "hidden_text": visible_text or self.html,
-                "visible_inputs": visible_inputs,
-                "visible_buttons_links": visible_buttons_links,
-                "frame_urls": frame_urls,
-            }
-        if "dom-near-problem-text" in script:
-            return self.dom_try_again_result
-        if "js_text_click" in script or "js_text_diagnostic" in script:
-            if "const shouldClick = false" in script:
-                return list(self.js_text_action_candidates)
-            result = self.js_text_action_result or self.dom_try_again_result
-            return {**result, "ok": True, "method": "js_text_click"} if isinstance(result, dict) else result
+            return visible_buttons_links
+        if "visible_text" in script and "hidden_text" in script:
+            visible_text = self.text or WebexAdapter({"adapter_config": {}})._sanitize_html_text(self.html)
+            return {"visible_text": visible_text, "hidden_text": visible_text or self.html}
         if "querySelectorAll(\"button, a, [role='button']\")" in script:
             return list(self.links_buttons_debug)
         selector = self.focused_selector
@@ -2097,6 +2215,13 @@ class FakeWebexFrame(FakeWebexPage):
 class SlowSnapshotPage(FakeWebexPage):
     async def evaluate(self, script, payload=None):
         if "visible_inputs" in script and "visible_buttons_links" in script:
+            await asyncio.sleep(1)
+        return await super().evaluate(script, payload=payload)
+
+
+class TextSnapshotTimeoutFrame(FakeWebexFrame):
+    async def evaluate(self, script, payload=None):
+        if "visible_text" in script and "hidden_text" in script:
             await asyncio.sleep(1)
         return await super().evaluate(script, payload=payload)
 
