@@ -470,6 +470,78 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "waiting_for_others")
 
+    def test_post_final_join_waiting_for_others_text_succeeds_without_prejoin_retry(self):
+        adapter = _join_test_adapter("waiting_for_others", {"post_final_join_result_timeout_sec": 0.2})
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        progress = output.getvalue()
+        self.assertEqual(result["status"], "waiting_for_others")
+        self.assertIn("webex_post_final_join_wait_start", progress)
+        self.assertIn("webex_waiting_for_others_detected", progress)
+        self.assertIn("webex_join_success", progress)
+        self.assertLess(progress.index("final_join_clicked"), progress.index("webex_post_final_join_wait_start"))
+        self.assertNotIn("webex_prejoin_loop_iteration_start", progress[progress.index("final_join_clicked"):])
+
+    def test_post_final_join_waiting_for_host_text_succeeds(self):
+        adapter = _join_test_adapter("waiting_for_host", {"post_final_join_result_timeout_sec": 0.2})
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "waiting_for_host")
+        self.assertIn("webex_waiting_for_host_detected", output.getvalue())
+        self.assertIn("webex_join_success", output.getvalue())
+
+    def test_post_final_join_lobby_text_succeeds(self):
+        adapter = _join_test_adapter("lobby", {"post_final_join_result_timeout_sec": 0.2})
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "lobby")
+        self.assertIn("webex_lobby_detected", output.getvalue())
+        self.assertIn("webex_join_success", output.getvalue())
+
+    def test_post_final_join_window_fallback_candidate_succeeds(self):
+        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.2})
+        adapter.page.text = ""
+        output = io.StringIO()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot4 Get ready to join · Meeting · Webex - Chromium\n",
+                        stderr="",
+                    )
+                    with contextlib.redirect_stdout(output):
+                        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(result["selector"], "window_fallback")
+        self.assertIn("webex_post_final_join_window_fallback_success", output.getvalue())
+        self.assertIn("webex_join_success", output.getvalue())
+
+    def test_post_final_join_unknown_state_times_out_with_specific_stage(self):
+        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.01})
+        adapter.page.text = ""
+        output = io.StringIO()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value=None):
+                with contextlib.redirect_stdout(output):
+                    with self.assertRaisesRegex(RuntimeError, "timeout"):
+                        asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertIn("webex_post_final_join_result_timeout", output.getvalue())
+        self.assertIn("webex_post_final_join_result_timeout", adapter.diagnostic_stages)
+
     def test_context_popup_waiting_for_others_text_is_scanned(self):
         adapter = _join_test_adapter("joined")
         adapter.page.visible = set()
@@ -1296,14 +1368,36 @@ class WebexAdapterTests(unittest.TestCase):
         adapter = _join_test_adapter("joined")
         outer = adapter.page
         frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
-        frame.visible = {"mdc-input input"}
-        frame.text_inputs = ["mdc-input input"]
+        frame.visible = {'mdc-input input:not([type="hidden"])'}
+        frame.text_inputs = ['mdc-input input:not([type="hidden"])']
         outer.frames = [outer, frame]
 
         result = asyncio.run(adapter._fill_display_name("mdc-bot", timeout_ms=5))
 
-        self.assertEqual(result, "mdc-input input")
-        self.assertIn(("mdc-input input", "mdc-bot"), frame.fills)
+        self.assertEqual(result, 'mdc-input input:not([type="hidden"])')
+        self.assertIn(('mdc-input input:not([type="hidden"])', "mdc-bot"), frame.fills)
+
+    def test_display_name_probe_ignores_hidden_webex_form_inputs(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#name"}
+        adapter.page.text_inputs = ["#hidden-return", "#name"]
+        adapter.page.input_attrs["#hidden-return"] = {"type": "hidden", "name": "Par_ReturnURL"}
+        adapter.page.input_attrs["#name"] = {"type": "text", "name": "displayName"}
+
+        with patch("asyncio.create_task") as create_task:
+            result = asyncio.run(adapter._fill_display_name("visible-bot", timeout_ms=1))
+
+        self.assertTrue(result)
+        self.assertNotIn(("#hidden-return", "visible-bot"), adapter.page.fills)
+        self.assertIn(("#name", "visible-bot"), adapter.page.fills)
+        self.assertNotIn("#hidden-return", adapter.page.input_value_calls)
+        create_task.assert_not_called()
+
+    def test_display_name_input_selectors_exclude_plain_hidden_input_patterns(self):
+        selectors = WebexAdapter({"adapter_config": {}})._display_name_input_selectors()
+
+        self.assertIn('input:not([type="hidden"])[name*="name" i]', selectors)
+        self.assertNotIn('input[name*="name" i]', selectors)
 
     def test_guest_join_frame_without_fillable_input_fails_fast_with_diagnostic(self):
         adapter = _join_test_adapter("joined")
@@ -1811,9 +1905,9 @@ class WebexAdapterTests(unittest.TestCase):
     def test_korean_name_input_selector_candidates_are_supported(self):
         selectors = WebexAdapter({"adapter_config": {}}).selectors("display_name")
 
-        self.assertIn('input[aria-label*="이름" i]', selectors)
-        self.assertIn('input[placeholder*="참가자" i]', selectors)
-        self.assertIn('input[aria-label*="이름을 입력" i]', selectors)
+        self.assertIn('input:not([type="hidden"])[aria-label*="이름" i]', selectors)
+        self.assertIn('input:not([type="hidden"])[placeholder*="참가자" i]', selectors)
+        self.assertIn('input:not([type="hidden"])[aria-label*="이름을 입력" i]', selectors)
 
     def test_korean_final_join_button_selector_candidates_are_supported(self):
         selectors = WebexAdapter({"adapter_config": {}}).selectors("join_button")
@@ -1857,7 +1951,7 @@ class WebexAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "status timeout"):
             asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "timeout-bot"))
 
-        self.assertEqual(adapter.diagnostic_stages[-1], "webex_join_result_timeout")
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_post_final_join_result_timeout")
         self.assertIn("visible_text", adapter.diagnostic_extras[-1]["join_result"])
 
     def test_korean_name_page_text_triggers_display_name_fill(self):
@@ -2234,6 +2328,13 @@ class FakeWebexLocator:
             self.page.visible.add(f"#{self.page.join_result}")
             if self.page.join_result == "waiting_for_others":
                 self.page.visible.add("#joined")
+            post_click_text = {
+                "waiting_for_others": "Waiting for others to join",
+                "waiting_for_host": "Waiting for the host",
+                "lobby": "You're in the lobby",
+            }.get(self.page.join_result)
+            if post_click_text:
+                self.page.text = post_click_text
             if self.page.title_after_join is not None:
                 self.page.title_text = self.page.title_after_join
 
@@ -2377,7 +2478,10 @@ class FakeWebexPage:
     def locator(self, selector):
         if selector.startswith(":focus"):
             return FakeWebexLocator(self, self.focused_selector or "#missing-focus")
-        if "input:not([type])" in selector or selector == "input, textarea, [contenteditable=\"true\"]":
+        if selector.startswith("input:not([type") or selector in {
+            "input, textarea, [contenteditable=\"true\"]",
+            "input:not([type=\"hidden\"]), textarea, [contenteditable=\"true\"]",
+        }:
             return FakeWebexLocator(self, selector, matches=list(self.text_inputs))
         return FakeWebexLocator(self, selector)
 
@@ -2723,6 +2827,7 @@ def _join_test_adapter(join_result, extra_config=None):
             "max_navigation_retries",
             "post_join_media_check",
             "post_join_media_check_timeout_sec",
+            "post_final_join_result_timeout_sec",
             "skip_device_selection",
             "strict_post_join_media_state",
             "webclient_frame_ready_wait_sec",

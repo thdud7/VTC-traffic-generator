@@ -317,23 +317,23 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[aria-label*="guest"]',
         ],
         "display_name": [
-            'input[name="displayName"]',
-            'input[name*="display" i]',
-            'input[name="name"]',
-            'input[name*="name" i]',
-            'input[id*="display" i]',
-            'input[id*="name" i]',
-            'input[aria-label*="name" i]',
-            'input[placeholder*="name" i]',
-            'input[placeholder*="Your name" i]',
-            'input[placeholder*="Display name" i]',
-            'input[aria-label*="이름" i]',
-            'input[placeholder*="이름" i]',
-            'input[aria-label*="참가자" i]',
-            'input[placeholder*="참가자" i]',
-            'input[aria-label*="이름을 입력" i]',
-            'input[placeholder*="이름을 입력" i]',
-            'mdc-input input',
+            'input:not([type="hidden"])[name="displayName"]',
+            'input:not([type="hidden"])[name*="display" i]',
+            'input:not([type="hidden"])[name="name"]',
+            'input:not([type="hidden"])[name*="name" i]',
+            'input:not([type="hidden"])[id*="display" i]',
+            'input:not([type="hidden"])[id*="name" i]',
+            'input:not([type="hidden"])[aria-label*="name" i]',
+            'input:not([type="hidden"])[placeholder*="name" i]',
+            'input:not([type="hidden"])[placeholder*="Your name" i]',
+            'input:not([type="hidden"])[placeholder*="Display name" i]',
+            'input:not([type="hidden"])[aria-label*="이름" i]',
+            'input:not([type="hidden"])[placeholder*="이름" i]',
+            'input:not([type="hidden"])[aria-label*="참가자" i]',
+            'input:not([type="hidden"])[placeholder*="참가자" i]',
+            'input:not([type="hidden"])[aria-label*="이름을 입력" i]',
+            'input:not([type="hidden"])[placeholder*="이름을 입력" i]',
+            'mdc-input input:not([type="hidden"])',
             'mdc-input textarea',
             'input[type="text"]',
             "input:not([type])",
@@ -342,23 +342,23 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[contenteditable="true"]',
         ],
         "name_input": [
-            'input[name="displayName"]',
-            'input[name*="display" i]',
-            'input[name="name"]',
-            'input[name*="name" i]',
-            'input[id*="display" i]',
-            'input[id*="name" i]',
-            'input[aria-label*="name" i]',
-            'input[placeholder*="name" i]',
-            'input[placeholder*="Your name" i]',
-            'input[placeholder*="Display name" i]',
-            'input[aria-label*="이름" i]',
-            'input[placeholder*="이름" i]',
-            'input[aria-label*="참가자" i]',
-            'input[placeholder*="참가자" i]',
-            'input[aria-label*="이름을 입력" i]',
-            'input[placeholder*="이름을 입력" i]',
-            'mdc-input input',
+            'input:not([type="hidden"])[name="displayName"]',
+            'input:not([type="hidden"])[name*="display" i]',
+            'input:not([type="hidden"])[name="name"]',
+            'input:not([type="hidden"])[name*="name" i]',
+            'input:not([type="hidden"])[id*="display" i]',
+            'input:not([type="hidden"])[id*="name" i]',
+            'input:not([type="hidden"])[aria-label*="name" i]',
+            'input:not([type="hidden"])[placeholder*="name" i]',
+            'input:not([type="hidden"])[placeholder*="Your name" i]',
+            'input:not([type="hidden"])[placeholder*="Display name" i]',
+            'input:not([type="hidden"])[aria-label*="이름" i]',
+            'input:not([type="hidden"])[placeholder*="이름" i]',
+            'input:not([type="hidden"])[aria-label*="참가자" i]',
+            'input:not([type="hidden"])[placeholder*="참가자" i]',
+            'input:not([type="hidden"])[aria-label*="이름을 입력" i]',
+            'input:not([type="hidden"])[placeholder*="이름을 입력" i]',
+            'mdc-input input:not([type="hidden"])',
             'mdc-input textarea',
             'input[type="text"]',
             "input:not([type])",
@@ -756,6 +756,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._last_display_name_fill_method = None
         self._preferred_webex_meeting_frame = None
         self._browser_join_clicked_once = False
+        self._final_join_clicked_success = False
         self._empty_display_name_frame_attempts = set()
 
     def _progress(self, stage, details=None):
@@ -1054,11 +1055,19 @@ class WebexAdapter(BrowserMeetingAdapter):
         if prejoin_result["status"] == "final_join":
             self._progress("final_join_button_seen", {"selector": prejoin_result.get("selector")})
         join_selector = await self._click_final_join_control(display_name)
+        self._final_join_clicked_success = True
         self._progress("final_join_clicked", {"selector": join_selector, "success": True})
 
-        self._progress("waiting_for_join_result")
-        result = await self._wait_for_join_result(
-            float(self.adapter_config().get("join_result_timeout_sec", self.timeout_ms("joined_timeout_ms", 45000) / 1000))
+        result = await self._wait_for_post_final_join_result(
+            float(
+                self.adapter_config().get(
+                    "post_final_join_result_timeout_sec",
+                    self.adapter_config().get(
+                        "join_result_timeout_sec",
+                        self.timeout_ms("joined_timeout_ms", 45000) / 1000,
+                    ),
+                )
+            )
         )
         return await self._handle_join_result(vtc_url, result)
 
@@ -1179,16 +1188,71 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._progress("webex_join_success", status)
             return status
 
+        if result["status"] == "waiting_for_host":
+            self._progress(
+                "webex_waiting_for_host_detected",
+                {
+                    "selector": result.get("selector"),
+                    "scope": result.get("scope"),
+                    "url": result.get("url"),
+                    "title": result.get("title"),
+                    "source": result.get("source"),
+                },
+            )
+            if hasattr(self, "joined"):
+                self.joined = True
+            if hasattr(self, "in_meeting"):
+                self.in_meeting = True
+            emit_event(self.config, "webex_waiting_for_host_detected", result, self.service_name)
+            self._notify_meeting_joined(vtc_url)
+            status = {
+                "status": "waiting_for_host",
+                "selector": result.get("selector"),
+                "joined_selector": result.get("joined_selector"),
+                "scope": result.get("scope"),
+                "url": result.get("url"),
+                "title": result.get("title"),
+                "source": result.get("source"),
+                "leave_control_present": bool(result.get("joined_selector")),
+                "visible_text": result.get("visible_text", ""),
+                "media_ready": False,
+            }
+            self._progress("webex_join_success", status)
+            return status
+
         if result["status"] == "lobby":
             self._progress("lobby_detected", {"selector": result.get("selector")})
-            diagnostics = await self._maybe_await(
-                self.collect_diagnostics(stage="lobby", extra={"join_result": result})
-            )
-            if self.adapter_config().get("accept_lobby_as_joined") is True:
+            if result.get("source") == "post_final_join" or self.adapter_config().get("accept_lobby_as_joined") is True:
+                self._progress(
+                    "webex_lobby_detected",
+                    {
+                        "selector": result.get("selector"),
+                        "scope": result.get("scope"),
+                        "url": result.get("url"),
+                        "title": result.get("title"),
+                        "source": result.get("source"),
+                    },
+                )
                 self._notify_meeting_joined(vtc_url)
                 if self.adapter_config().get("allow_lobby_media_ready") is True:
                     self._notify_media_ready(vtc_url)
-                return {"status": "lobby", "diagnostics": diagnostics}
+                status = {
+                    "status": "lobby",
+                    "selector": result.get("selector"),
+                    "joined_selector": result.get("joined_selector"),
+                    "scope": result.get("scope"),
+                    "url": result.get("url"),
+                    "title": result.get("title"),
+                    "source": result.get("source"),
+                    "leave_control_present": bool(result.get("joined_selector")),
+                    "visible_text": result.get("visible_text", ""),
+                    "media_ready": False,
+                }
+                self._progress("webex_join_success", status)
+                return status
+            diagnostics = await self._maybe_await(
+                self.collect_diagnostics(stage="lobby", extra={"join_result": result})
+            )
             raise RuntimeError(
                 f"Webex join stopped in lobby/waiting screen. Visible text: {result.get('visible_text', '')}"
             )
@@ -1198,7 +1262,7 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         if result["status"] == "timeout":
             self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
-        stage = "webex_join_result_timeout" if result["status"] == "timeout" else f"join_{result['status']}"
+        stage = result.get("stage") or ("webex_join_result_timeout" if result["status"] == "timeout" else f"join_{result['status']}")
         diagnostics = await self._maybe_await(
             self.collect_diagnostics(stage=stage, extra={"join_result": result})
         )
@@ -1210,7 +1274,7 @@ class WebexAdapter(BrowserMeetingAdapter):
     def _is_terminal_join_state(self, state):
         if not isinstance(state, Mapping):
             return False
-        return bool(state.get("joined")) or state.get("status") in {"joined", "waiting_for_others", "lobby", "blocked"}
+        return bool(state.get("joined")) or state.get("status") in {"joined", "waiting_for_others", "waiting_for_host", "lobby", "blocked"}
 
     def _terminal_join_state_from_fill_result(self, fill_result):
         if not isinstance(fill_result, Mapping):
@@ -1223,7 +1287,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             return state
         normalized = dict(state)
         status = normalized.get("status")
-        if status in {"joined", "waiting_for_others"}:
+        if status in {"joined", "waiting_for_others", "waiting_for_host"}:
             normalized["joined"] = True
             normalized.setdefault(
                 "joined_source",
@@ -1842,7 +1906,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             href: el.getAttribute("href") || "",
           });
           return Array.from(document.querySelectorAll(
-            'mdc-input input, mdc-input textarea, input:not([type]), input[type="text"], input[type="search"], input[type="email"], input[type="password"], textarea, [role="textbox"], [contenteditable="true"]'
+            'mdc-input input:not([type="hidden"]), mdc-input textarea, input:not([type="hidden"]), textarea, [role="textbox"], [contenteditable="true"]'
           )).filter(visible).slice(0, 30).map(summarize);
         }
         """
@@ -2918,6 +2982,10 @@ class WebexAdapter(BrowserMeetingAdapter):
                 state = self._normalize_join_state(state)
                 if state["status"] == "waiting_for_others":
                     self._progress("webex_waiting_for_others_detected", state)
+                elif state["status"] == "waiting_for_host":
+                    self._progress("webex_waiting_for_host_detected", state)
+                elif state["status"] == "lobby":
+                    self._progress("webex_lobby_detected", state)
                 else:
                     self._progress("webex_joined_state_scan_result", state)
                 return state
@@ -2956,6 +3024,38 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "matched_text": waiting_phrase,
                 **source,
             }
+        waiting_host_phrase = self._waiting_for_host_phrase(visible_text) or self._waiting_for_host_phrase(hidden_text)
+        if waiting_host_phrase:
+            return {
+                "status": "waiting_for_host",
+                "joined": True,
+                "joined_source": "waiting_for_host_text",
+                "selector": f"text:{waiting_host_phrase}",
+                "joined_selector": self._media_control_selector_from_snapshot(details),
+                "matched_text": waiting_host_phrase,
+                **source,
+            }
+        lobby_phrase = self._lobby_phrase(visible_text) or self._lobby_phrase(hidden_text)
+        if lobby_phrase:
+            return {
+                "status": "lobby",
+                "joined": False,
+                "joined_source": "lobby_text",
+                "selector": f"text:{lobby_phrase}",
+                "joined_selector": self._media_control_selector_from_snapshot(details),
+                "matched_text": lobby_phrase,
+                **source,
+            }
+        error_phrase = self._join_error_phrase(visible_text) or self._join_error_phrase(hidden_text)
+        if error_phrase:
+            return {
+                "status": "join_error",
+                "joined": False,
+                "joined_source": "join_error_text",
+                "selector": f"text:{error_phrase}",
+                "matched_text": error_phrase,
+                **source,
+            }
         media_selector = self._media_control_selector_from_snapshot(details)
         if media_selector:
             return {
@@ -2992,6 +3092,60 @@ class WebexAdapter(BrowserMeetingAdapter):
             "다른 사람이 참여할 때까지 기다리는 중",
             "참여할 때까지 기다리는 중",
             "기다리는 중",
+        )
+        for phrase in phrases:
+            if phrase.lower() in lowered:
+                return phrase
+        return None
+
+    def _waiting_for_host_phrase(self, text):
+        normalized = " ".join(str(text or "").split())
+        lowered = normalized.lower()
+        phrases = (
+            "Waiting for the host",
+            "Waiting for host",
+            "Waiting for the organizer",
+            "Waiting for organizer",
+            "The host has not joined",
+            "호스트가 참여할 때까지 기다리는 중",
+            "호스트를 기다리는 중",
+        )
+        for phrase in phrases:
+            if phrase.lower() in lowered:
+                return phrase
+        return None
+
+    def _lobby_phrase(self, text):
+        normalized = " ".join(str(text or "").split())
+        lowered = normalized.lower()
+        phrases = (
+            "You're in the lobby",
+            "You are in the lobby",
+            "Please wait, the host will let you in",
+            "waiting room",
+            "로비",
+            "대기실",
+            "호스트가 곧 입장시켜",
+        )
+        for phrase in phrases:
+            if phrase.lower() in lowered:
+                return phrase
+        return None
+
+    def _join_error_phrase(self, text):
+        normalized = " ".join(str(text or "").split())
+        lowered = normalized.lower()
+        phrases = (
+            "unable to join",
+            "cannot join",
+            "meeting is locked",
+            "removed from the meeting",
+            "meeting has ended",
+            "invalid meeting",
+            "미팅에 참여할 수",
+            "회의에 참여할 수",
+            "미팅이 잠겼",
+            "회의가 잠겼",
         )
         for phrase in phrases:
             if phrase.lower() in lowered:
@@ -4266,24 +4420,24 @@ class WebexAdapter(BrowserMeetingAdapter):
     def _display_name_input_selectors(self):
         selectors = []
         for selector in (
-            'mdc-input input',
+            'mdc-input input:not([type="hidden"])',
             'mdc-input textarea',
             'input[type="text"]',
             'input:not([type])',
             'textarea',
             '[contenteditable="true"]',
-            'input[aria-label*="display name" i]',
-            'input[aria-label*="your name" i]',
-            'input[aria-label*="name" i]',
-            'input[aria-label*="이름" i]',
-            'input[name*="display name" i]',
-            'input[name*="display" i]',
-            'input[name*="name" i]',
-            'input[name*="이름" i]',
-            'input[placeholder*="display name" i]',
-            'input[placeholder*="your name" i]',
-            'input[placeholder*="name" i]',
-            'input[placeholder*="이름" i]',
+            'input:not([type="hidden"])[aria-label*="display name" i]',
+            'input:not([type="hidden"])[aria-label*="your name" i]',
+            'input:not([type="hidden"])[aria-label*="name" i]',
+            'input:not([type="hidden"])[aria-label*="이름" i]',
+            'input:not([type="hidden"])[name*="display name" i]',
+            'input:not([type="hidden"])[name*="display" i]',
+            'input:not([type="hidden"])[name*="name" i]',
+            'input:not([type="hidden"])[name*="이름" i]',
+            'input:not([type="hidden"])[placeholder*="display name" i]',
+            'input:not([type="hidden"])[placeholder*="your name" i]',
+            'input:not([type="hidden"])[placeholder*="name" i]',
+            'input:not([type="hidden"])[placeholder*="이름" i]',
         ):
             if selector not in selectors:
                 selectors.append(selector)
@@ -4530,9 +4684,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         }
         if not self._is_page_available():
             return info
-        selector = (
-            'input, textarea, [contenteditable="true"]'
-        )
+        selector = 'input:not([type="hidden"]), textarea, [contenteditable="true"]'
         for scope_name, scope in self._page_locator_scopes():
             frame_info = {
                 "scope": scope_name,
@@ -5021,6 +5173,132 @@ return "sent_escape"
             "selector": None,
             "visible_text": await self._visible_text_excerpt(),
         }
+
+    async def _wait_for_post_final_join_result(self, timeout_sec):
+        timeout_sec = max(0.1, float(timeout_sec))
+        deadline = asyncio.get_running_loop().time() + timeout_sec
+        poll_timeout_ms = self.timeout_ms("join_result_poll_timeout_ms", 500)
+        self._progress(
+            "webex_post_final_join_wait_start",
+            {"timeout_sec": timeout_sec, "final_join_clicked": bool(getattr(self, "_final_join_clicked_success", False))},
+        )
+        while asyncio.get_running_loop().time() <= deadline:
+            state = await self._scan_joined_state_all_surfaces(timeout_ms=poll_timeout_ms)
+            state = self._post_final_join_state_from_scan(state)
+            if state["status"] == "continue":
+                selector_state = await self._post_final_join_selector_state(timeout_ms=poll_timeout_ms)
+                if selector_state["status"] != "continue":
+                    state = selector_state
+            elif state["status"] in {"waiting_for_others", "waiting_for_host"} and not state.get("joined_selector"):
+                state["joined_selector"] = await self._first_visible_selector(
+                    "joined_indicator",
+                    timeout_ms=self.timeout_ms("join_result_secondary_poll_timeout_ms", 50),
+                )
+            self._progress("webex_post_final_join_scan_result", state)
+            if state["status"] in {"joined", "waiting_for_others", "waiting_for_host", "lobby", "join_error", "blocked"}:
+                self._progress("webex_join_result_detected", state)
+                return state
+            await asyncio.sleep(float(self.adapter_config().get("join_result_poll_interval_sec", 0.25)))
+
+        diagnostics = await self._post_final_join_timeout_diagnostics()
+        result = {
+            "status": "timeout",
+            "stage": "webex_post_final_join_result_timeout",
+            "selector": None,
+            "visible_text": diagnostics.get("visible_text", ""),
+            "source": "post_final_join",
+            "final_join_clicked": bool(getattr(self, "_final_join_clicked_success", False)),
+            "diagnostics": diagnostics,
+        }
+        self._progress("webex_post_final_join_result_timeout", result)
+        return result
+
+    def _post_final_join_state_from_scan(self, state):
+        state = self._normalize_join_state(state or {"status": "continue", "selector": None, "visible_text": ""})
+        if not isinstance(state, Mapping):
+            return {"status": "continue", "selector": None, "visible_text": "", "source": "post_final_join"}
+        state = dict(state)
+        state["source"] = "post_final_join"
+        if state.get("status") == "candidate" and state.get("selector") == "window_fallback":
+            state.update(
+                {
+                    "status": "joined",
+                    "joined": True,
+                    "joined_source": "post_final_join_window_fallback",
+                    "joined_selector": "window_fallback",
+                    "selector": "window_fallback",
+                }
+            )
+            self._progress("webex_post_final_join_window_fallback_success", state)
+        return state
+
+    async def _post_final_join_selector_state(self, timeout_ms=None):
+        for status, group in (
+            ("waiting_for_others", "waiting_for_others_indicator"),
+            ("joined", "joined_indicator"),
+            ("lobby", "lobby_indicator"),
+            ("blocked", "blocked_indicator"),
+        ):
+            selector = await self._first_visible_selector(group, timeout_ms=timeout_ms)
+            if selector:
+                return {
+                    "status": status,
+                    "joined": status in {"joined", "waiting_for_others"},
+                    "selector": selector,
+                    "joined_selector": selector if status in {"joined", "waiting_for_others"} else None,
+                    "visible_text": await self._visible_text_excerpt(),
+                    "source": "post_final_join",
+                }
+        return {"status": "continue", "selector": None, "visible_text": "", "source": "post_final_join"}
+
+    async def _post_final_join_timeout_diagnostics(self):
+        visible_text = await self._visible_text_excerpt()
+        hidden_text = await self._html_text_excerpt()
+        diagnostics = {
+            "final_join_clicked": bool(getattr(self, "_final_join_clicked_success", False)),
+            "page_url": self._safe_page_url(),
+            "page_title": await self._safe_page_title(default=""),
+            "context_page_urls": await self._context_page_urls(),
+            "window_list": self._webex_window_list(),
+            "visible_text": visible_text[:2000],
+            "hidden_text": hidden_text[:2000],
+        }
+        return diagnostics
+
+    async def _context_page_urls(self):
+        pages = [self.page]
+        if self.context is not None:
+            pages_attr = getattr(self.context, "pages", None)
+            if pages_attr is not None:
+                try:
+                    pages = list(pages_attr() if callable(pages_attr) else pages_attr)
+                except Exception:
+                    pages = [self.page]
+        urls = []
+        for page in pages:
+            if page is None:
+                continue
+            try:
+                urls.append(str(getattr(page, "url", "") or ""))
+            except Exception:
+                urls.append("")
+        return urls
+
+    def _webex_window_list(self):
+        if platform.system() != "Linux" or not shutil.which("wmctrl"):
+            return []
+        display = self._configured_display()
+        env = dict(os.environ)
+        if display:
+            env["DISPLAY"] = display
+        try:
+            result = subprocess.run(["wmctrl", "-lG"], capture_output=True, text=True, timeout=2, check=False, env=env)
+        except Exception as exc:
+            self._append_browser_log("webex_window_list_unavailable", repr(exc))
+            return []
+        if result.returncode != 0:
+            return []
+        return [line for line in (result.stdout or "").splitlines() if line.strip()]
 
     async def _title_indicates_joined(self):
         title = str(await self._safe_page_title(default="") or "")
