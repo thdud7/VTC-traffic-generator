@@ -1407,6 +1407,107 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertTrue(fill["success"])
         self.assertIn(("#name", "bot-webex"), meeting_page.fills)
 
+    def test_post_browser_join_detached_old_frame_is_rescanned_without_unhandled_exception(self):
+        adapter = _join_test_adapter("joined", {"post_browser_join_transition_timeout_sec": 0.3})
+        old_frame = DetachedWebexFrame("joined", url="https://example.webex.com/meeting/download/frame")
+        adapter.page.frames = [adapter.page, old_frame]
+        output = io.StringIO()
+
+        async def run_transition():
+            loop = asyncio.get_running_loop()
+            unhandled = []
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            with contextlib.redirect_stdout(output):
+                result = await adapter._post_browser_join_transition_loop("bot-webex", timeout_ms=1)
+            await asyncio.sleep(0)
+            return result, unhandled
+
+        result, unhandled = asyncio.run(run_transition())
+
+        self.assertEqual(unhandled, [])
+        self.assertEqual(result["status"], "timeout")
+        self.assertIn("webex_frame_detached_during_transition", output.getvalue())
+        self.assertIn("webex_post_browser_join_rescan_start", output.getvalue())
+
+    def test_post_browser_join_cancels_pending_browser_join_locator_probe_task(self):
+        adapter = _join_test_adapter("joined", {"post_browser_join_transition_timeout_sec": 0.1})
+        adapter.page.visible = set()
+        adapter.page.text_inputs = []
+        cancelled = []
+
+        async def stale_probe():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        async def run_transition():
+            loop = asyncio.get_running_loop()
+            unhandled = []
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            adapter._track_probe_task(asyncio.create_task(stale_probe()))
+            await asyncio.sleep(0)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                result = await adapter._post_browser_join_transition_loop("bot-webex", timeout_ms=1)
+            await asyncio.sleep(0)
+            return result, unhandled, output.getvalue()
+
+        result, unhandled, progress = asyncio.run(run_transition())
+
+        self.assertEqual(unhandled, [])
+        self.assertTrue(cancelled)
+        self.assertEqual(result["status"], "timeout")
+        self.assertIn("webex_stale_probe_tasks_cancelled", progress)
+
+    def test_post_browser_join_fresh_meeting_frame_continues_to_final_join(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/meeting/test")
+        frame.visible = {"#name", "#join"}
+        frame.text_inputs = ["#name"]
+        frame.text = "Name Join"
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._post_browser_join_transition_loop("bot-webex", timeout_ms=5))
+
+        self.assertEqual(result["status"], "final_join")
+        self.assertIn(("#name", "bot-webex"), frame.fills)
+        self.assertIn("webex_post_browser_join_transition_start", output.getvalue())
+        self.assertIn("webex_post_browser_join_rescan_result", output.getvalue())
+
+    def test_post_browser_join_joined_waiting_state_returns_success_state(self):
+        adapter = _join_test_adapter("waiting_for_others")
+        adapter.page.visible = {"#waiting"}
+        adapter.page.text = "Waiting for others to join"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._post_browser_join_transition_loop("bot-webex", timeout_ms=1))
+
+        self.assertEqual(result["status"], "waiting_for_others")
+        self.assertTrue(result["joined"])
+        self.assertIn("webex_post_browser_join_transition_start", output.getvalue())
+
+    def test_post_browser_join_timeout_is_bounded_specific_diagnostic(self):
+        adapter = _join_test_adapter("joined", {"post_browser_join_transition_timeout_sec": 0.05})
+        adapter.page.visible = set()
+        adapter.page.text_inputs = []
+        adapter.page.text = "Get ready to join"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._post_browser_join_transition_loop("bot-webex", timeout_ms=1))
+
+        self.assertEqual(result["status"], "timeout")
+        self.assertEqual(result["stage"], "webex_post_browser_join_transition_timeout")
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_post_browser_join_transition_timeout")
+        self.assertIn("webex_post_browser_join_transition_timeout", output.getvalue())
+
     def test_visible_button_scope_wins_over_url_only_frame_score(self):
         adapter = _join_test_adapter("joined")
         outer = adapter.page
@@ -2794,6 +2895,11 @@ class TextSnapshotTimeoutFrame(FakeWebexFrame):
         return await super().evaluate(script, payload=payload)
 
 
+class DetachedWebexFrame(FakeWebexFrame):
+    async def evaluate(self, script, payload=None):
+        raise RuntimeError("Frame was detached")
+
+
 class FakeMouse:
     def __init__(self, page):
         self.page = page
@@ -2977,6 +3083,7 @@ def _join_test_adapter(join_result, extra_config=None):
             "max_navigation_retries",
             "post_join_media_check",
             "post_join_media_check_timeout_sec",
+            "post_browser_join_transition_timeout_sec",
             "post_final_join_result_timeout_sec",
             "skip_device_selection",
             "strict_post_join_media_state",

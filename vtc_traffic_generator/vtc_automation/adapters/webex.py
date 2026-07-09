@@ -757,6 +757,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._preferred_webex_meeting_frame = None
         self._browser_join_clicked_once = False
         self._final_join_clicked_success = False
+        self._webex_probe_tasks = set()
         self._empty_display_name_frame_attempts = set()
 
     def _progress(self, stage, details=None):
@@ -1037,9 +1038,10 @@ class WebexAdapter(BrowserMeetingAdapter):
             return await self._handle_join_result(vtc_url, existing_result)
 
         if prejoin_result["status"] == "timeout":
+            diagnostic_stage = prejoin_result.get("stage") or "webex_prejoin_failed"
             diagnostics = await self._maybe_await(
                 self.collect_diagnostics(
-                    stage="webex_prejoin_failed",
+                    stage=diagnostic_stage,
                     extra={
                         "join_result": prejoin_result,
                         "url": self._safe_page_url(),
@@ -1048,7 +1050,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 )
             )
             raise RuntimeError(
-                f"Webex prejoin timed out before final Join button. "
+                f"Webex prejoin timed out before final Join button ({diagnostic_stage}). "
                 f"Visible text: {prejoin_result.get('visible_text', '')}. Diagnostics: {diagnostics}"
             )
 
@@ -1328,6 +1330,17 @@ class WebexAdapter(BrowserMeetingAdapter):
                     progressed = True
                 else:
                     download_retry_attempts += 1
+                if download_retry_result.get("browser_join_clicked"):
+                    post_browser_join_state = await self._post_browser_join_transition_loop(
+                        display_name,
+                        timeout_ms=timeout,
+                    )
+                    if post_browser_join_state["status"] == "final_join" or self._is_terminal_join_state(post_browser_join_state):
+                        return post_browser_join_state
+                    if post_browser_join_state["status"] == "timeout":
+                        return post_browser_join_state
+                    progressed = True
+                    continue
                 if download_retry_result.get("clicked"):
                     await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
                     await asyncio.sleep(self._download_retry_settle_sec())
@@ -1520,8 +1533,10 @@ class WebexAdapter(BrowserMeetingAdapter):
             )
             clicked = await self._click_browser_join_from_state(state, timeout_ms=timeout_ms)
             if clicked:
+                await self._cancel_stale_probe_tasks(reason="browser_join_click_success")
+                self._discard_browser_join_snapshot_state()
                 await self._dismiss_external_protocol_prompt(stage="after_browser_join_click")
-                return {**state, "detected": True, "clicked": True, "click": clicked}
+                return {**state, "detected": True, "clicked": True, "browser_join_clicked": True, "click": clicked}
             self._progress("browser_join_click_not_found", {"browser_join_action": state.get("browser_join_action")})
             await self._raise_browser_join_click_not_found(state)
         if state.get("webclient_frame_exists"):
@@ -1530,6 +1545,8 @@ class WebexAdapter(BrowserMeetingAdapter):
                 {"action": "wait_for_webclient_frame_ready", "reason": "guest_frame_exists_but_not_ready"},
             )
             ready_state = await self._wait_for_webclient_frame_ready(timeout_ms=timeout_ms)
+            if ready_state.get("browser_join_clicked"):
+                return {**ready_state, "detected": True}
             if ready_state.get("webclient_frame_ready"):
                 frame = ready_state.get("webclient_frame") or {}
                 self._progress("webex_webclient_frame_detected", frame)
@@ -1614,10 +1631,16 @@ class WebexAdapter(BrowserMeetingAdapter):
                 clicked = await self._click_browser_join_from_state(last_state, timeout_ms=timeout_ms)
                 if clicked:
                     self._browser_join_clicked_once = True
+                    await self._cancel_stale_probe_tasks(reason="browser_join_click_success")
+                    self._discard_browser_join_snapshot_state()
                     await self._dismiss_external_protocol_prompt(stage="after_browser_join_click")
-                    last_state = await self._download_retry_page_state(timeout_ms=timeout_ms)
-                    if last_state.get("webclient_frame_ready"):
-                        return last_state
+                    return {
+                        **last_state,
+                        "detected": True,
+                        "clicked": True,
+                        "browser_join_clicked": True,
+                        "click": clicked,
+                    }
             await asyncio.sleep(0.5)
         self._progress("webex_wait_for_webclient_frame_ready_done", {"ready": False, "timeout_sec": wait_sec})
         return last_state
@@ -1627,6 +1650,90 @@ class WebexAdapter(BrowserMeetingAdapter):
             return max(0.1, float(self.adapter_config().get("webclient_frame_ready_wait_sec", 15.0)))
         except (TypeError, ValueError):
             return 15.0
+
+    def _post_browser_join_transition_timeout_sec(self):
+        try:
+            return max(0.1, float(self.adapter_config().get("post_browser_join_transition_timeout_sec", 45.0)))
+        except (TypeError, ValueError):
+            return 45.0
+
+    def _discard_browser_join_snapshot_state(self):
+        self._preferred_webex_meeting_frame = None
+        self._empty_display_name_frame_attempts.clear()
+
+    def _track_probe_task(self, task):
+        if task is not None:
+            self._webex_probe_tasks.add(task)
+        return task
+
+    async def _cancel_stale_probe_tasks(self, reason="phase_transition"):
+        tasks = [task for task in list(getattr(self, "_webex_probe_tasks", set())) if task is not None and not task.done()]
+        for task in tasks:
+            task.cancel()
+        results = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        self._webex_probe_tasks.difference_update(tasks)
+        self._progress(
+            "webex_stale_probe_tasks_cancelled",
+            {"reason": reason, "task_count": len(tasks), "exception_count": sum(1 for item in results if isinstance(item, BaseException))},
+        )
+        return results
+
+    async def _post_browser_join_transition_loop(self, display_name, timeout_ms=None):
+        timeout_sec = self._post_browser_join_transition_timeout_sec()
+        deadline = asyncio.get_running_loop().time() + timeout_sec
+        self._progress("webex_post_browser_join_transition_start", {"timeout_sec": timeout_sec})
+        await self._cancel_stale_probe_tasks(reason="post_browser_join_transition_start")
+        self._discard_browser_join_snapshot_state()
+        last_result = {"status": "continue", "selector": None, "visible_text": ""}
+        while asyncio.get_running_loop().time() < deadline:
+            await self._dismiss_external_protocol_prompt(stage="post_browser_join_transition")
+            self._progress("webex_post_browser_join_rescan_start", {"page_count": len(self._known_playwright_pages())})
+            result = await self._post_browser_join_rescan(display_name, timeout_ms=timeout_ms)
+            last_result = result
+            self._progress("webex_post_browser_join_rescan_result", result)
+            if result.get("detached") or result.get("retry_rescan"):
+                await asyncio.sleep(0.25)
+                continue
+            if result["status"] == "final_join" or self._is_terminal_join_state(result):
+                return result
+            await asyncio.sleep(float(self.adapter_config().get("post_browser_join_poll_interval_sec", 0.5)))
+
+        result = {
+            "status": "timeout",
+            "stage": "webex_post_browser_join_transition_timeout",
+            "selector": None,
+            "visible_text": await self._visible_text_excerpt(),
+            "last_result": last_result,
+        }
+        self._progress("webex_post_browser_join_transition_timeout", result)
+        await self._maybe_await(self.collect_diagnostics(stage="webex_post_browser_join_transition_timeout", extra=result))
+        return result
+
+    async def _post_browser_join_rescan(self, display_name, timeout_ms=None):
+        joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout_ms or 250)
+        if self._is_terminal_join_state(joined_state):
+            return joined_state
+
+        state = await self._download_retry_page_state(timeout_ms=timeout_ms)
+        if state.get("detached") or state.get("retry_rescan"):
+            return {"status": "continue", "detached": True, "retry_rescan": True}
+        if state.get("webclient_frame_detected"):
+            frame = state.get("webclient_frame") or {}
+            self._progress("webex_webclient_frame_detected", frame)
+
+        fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout_ms)
+        terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+        if terminal_state:
+            return terminal_state
+
+        prejoin_state = await self._prejoin_state(timeout_ms=timeout_ms or 250)
+        if prejoin_state["status"] == "final_join" or self._is_terminal_join_state(prejoin_state):
+            return prejoin_state
+        if fill_result.get("success"):
+            return {"status": "continue", "selector": fill_result.get("selector"), "display_name_filled": True, "visible_text": await self._visible_text_excerpt()}
+        return prejoin_state
 
     async def _download_retry_page_state(self, timeout_ms=None):
         timeout_sec = self._page_state_detection_timeout_sec()
@@ -1662,6 +1769,22 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _download_retry_page_state_from_snapshot(self, timeout_ms=None):
         self._progress("webex_page_state_snapshot_start", {"url": self._safe_page_url()})
         snapshot = await self._page_state_snapshot(timeout_ms=timeout_ms)
+        if snapshot.get("detached"):
+            return {
+                "detected": False,
+                "indicators": {},
+                "visible_text": "",
+                "keyword_hits": [],
+                "classification_timeout": False,
+                "webclient_frame_exists": False,
+                "webclient_frame_ready": False,
+                "webclient_frame_detected": False,
+                "webclient_frame": None,
+                "browser_join_action": None,
+                "try_again_action": None,
+                "detached": True,
+                "retry_rescan": True,
+            }
         page_snapshot = snapshot.get("page", {})
         text = str(page_snapshot.get("visible_text") or "")
         hits = {}
@@ -1755,9 +1878,11 @@ class WebexAdapter(BrowserMeetingAdapter):
         frames = []
         frame_scopes = self._page_locator_scopes(prefer_meeting_frame=False)[1:]
         self._progress("webex_frame_scan_start", {"frame_count": len(frame_scopes)})
+        detached = bool(page_snapshot.get("detached"))
         for scope_name, frame in frame_scopes:
             snapshot = await self._snapshot_scope(frame, scope_name, timeout_sec=self._frame_snapshot_timeout_sec())
             frames.append(snapshot)
+            detached = detached or bool(snapshot.get("detached"))
             self._progress(
                 "webex_frame_scan_result",
                 {
@@ -1766,10 +1891,11 @@ class WebexAdapter(BrowserMeetingAdapter):
                     "visible_text_input_count": len(snapshot.get("visible_inputs") or []),
                     "visible_button_link_count": len(snapshot.get("visible_buttons_links") or []),
                     "error": snapshot.get("error", ""),
+                    "detached": bool(snapshot.get("detached")),
                 },
             )
         self._progress("webex_frame_scan_done", {"frame_count": len(frames)})
-        snapshot = {"page": page_snapshot, "frames": frames}
+        snapshot = {"page": page_snapshot, "frames": frames, "detached": detached, "retry_rescan": detached}
         self._progress(
             "webex_page_state_snapshot_done",
             {
@@ -1778,6 +1904,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "visible_text_chars": len(str(page_snapshot.get("visible_text") or "")),
                 "hidden_text_chars": len(str(page_snapshot.get("hidden_text") or "")),
                 "frame_count": len(frames),
+                "detached": detached,
             },
         )
         return snapshot
@@ -1838,7 +1965,10 @@ class WebexAdapter(BrowserMeetingAdapter):
         if hasattr(scope, "title"):
             try:
                 snapshot["title"] = str(await asyncio.wait_for(self._maybe_await(scope.title()), timeout=timeout_sec))
-            except Exception:
+            except Exception as exc:
+                if self._is_transient_frame_transition_error(exc):
+                    self._mark_snapshot_detached(snapshot, scope_name, "title", exc)
+                    return snapshot
                 snapshot["title"] = ""
         self._progress("frame_url_seen", {"scope": scope_name, "url": snapshot["url"], "title": snapshot["title"]})
 
@@ -1854,11 +1984,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             timeout_sec,
         )
         if isinstance(url_result, Mapping):
+            if url_result.get("detached"):
+                self._mark_snapshot_detached(snapshot, scope_name, "url_title", url_result.get("error", "detached"))
+                return snapshot
             snapshot["title"] = str(url_result.get("title") or snapshot["title"] or "")
             snapshot["url"] = str(url_result.get("url") or snapshot["url"] or "")
             snapshot["frame_urls"] = list(url_result.get("frame_urls") or [])
 
         input_result = await self._snapshot_eval_step(scope, scope_name, "input", self._visible_input_scan_script(), timeout_sec)
+        if isinstance(input_result, Mapping) and input_result.get("detached"):
+            self._mark_snapshot_detached(snapshot, scope_name, "input", input_result.get("error", "detached"))
+            return snapshot
         if isinstance(input_result, list):
             snapshot["visible_inputs"] = input_result
         self._progress(
@@ -1867,6 +2003,9 @@ class WebexAdapter(BrowserMeetingAdapter):
         )
 
         button_result = await self._snapshot_eval_step(scope, scope_name, "button", self._visible_button_scan_script(), timeout_sec)
+        if isinstance(button_result, Mapping) and button_result.get("detached"):
+            self._mark_snapshot_detached(snapshot, scope_name, "button", button_result.get("error", "detached"))
+            return snapshot
         if isinstance(button_result, list):
             snapshot["visible_buttons_links"] = button_result
         self._progress(
@@ -1875,6 +2014,9 @@ class WebexAdapter(BrowserMeetingAdapter):
         )
 
         text_result = await self._snapshot_eval_step(scope, scope_name, "text", self._visible_text_scan_script(), timeout_sec)
+        if isinstance(text_result, Mapping) and text_result.get("detached"):
+            self._mark_snapshot_detached(snapshot, scope_name, "text", text_result.get("error", "detached"))
+            return snapshot
         if isinstance(text_result, Mapping):
             snapshot["visible_text"] = str(text_result.get("visible_text") or "")
             snapshot["hidden_text"] = str(text_result.get("hidden_text") or "")
@@ -1958,8 +2100,24 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._progress("frame_snapshot_timeout", {"scope": scope_name, "step": step})
             return None
         except Exception as exc:
+            if self._is_transient_frame_transition_error(exc):
+                self._progress(
+                    "webex_frame_detached_during_transition",
+                    {"scope": scope_name, "step": step, "error": repr(exc), "retry_rescan": True},
+                )
+                return {"detached": True, "retry_rescan": True, "error": repr(exc)}
             self._append_browser_log("frame_snapshot_step_failed", f"{scope_name}:{step}:{exc!r}")
             return None
+
+    def _mark_snapshot_detached(self, snapshot, scope_name, step, exc):
+        snapshot["detached"] = True
+        snapshot["retry_rescan"] = True
+        snapshot["error"] = "detached"
+        snapshot.setdefault("errors", []).append("detached")
+        self._progress(
+            "webex_frame_detached_during_transition",
+            {"scope": scope_name, "step": step, "error": repr(exc), "retry_rescan": True},
+        )
 
     def _webclient_frame_from_snapshot(self, snapshot):
         best = None
@@ -5165,6 +5323,17 @@ return "sent_escape"
             if isinstance(cls, type) and cls not in errors:
                 errors.append(cls)
         return tuple(errors) or (Exception,)
+
+    def _is_transient_frame_transition_error(self, exc):
+        text = f"{exc!r} {exc}".lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "frame was detached",
+                "target closed",
+                "execution context was destroyed",
+            )
+        )
 
     def _is_target_closed_error(self, exc):
         return isinstance(exc, self._safe_playwright_errors()) and "closed" in repr(exc).lower()
