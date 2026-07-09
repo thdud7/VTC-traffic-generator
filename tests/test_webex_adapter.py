@@ -814,7 +814,9 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertIn('text="Webex Installer.dmg"', adapter.selectors("installer_download_indicator"))
         self.assertIn('text="Problem joining from browser?"', adapter.selectors("problem_joining_from_browser"))
         self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_browser_join"))
+        self.assertNotIn('a:has-text("Try again")', adapter.selectors("try_again_browser_join"))
         self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_button"))
+        self.assertNotIn('a:has-text("Try again")', adapter.selectors("try_again_button"))
         self.assertIn('button:has-text("Got it")', adapter.selectors("got_it_button"))
         self.assertIn('text="Join on mobile"', adapter.selectors("join_on_mobile_indicator"))
         self.assertIn('text="Download"', adapter.selectors("app_download_indicator"))
@@ -892,7 +894,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot-aws-4"))
 
-        self.assertIn("#try-again", adapter.page.clicks)
+        self.assertTrue(any(click == "#try-again" or "Try again" in str(click) for click in adapter.page.clicks))
         self.assertIn(("#name", "bot-aws-4"), adapter.page.fills)
         self.assertIn("#join", adapter.page.clicks)
         self.assertNotIn("#download-button", adapter.page.clicks)
@@ -937,6 +939,80 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertLess(adapter.page.clicks.index("#got-it"), adapter.page.clicks.index("#try-again"))
 
+    def test_webex_download_retry_clicks_try_again_as_div_or_span(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {'div:has-text("Try again")'}
+
+        result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertEqual(result["selector"], 'div:has-text("Try again")')
+        self.assertIn('div:has-text("Try again")', adapter.page.clicks)
+
+    def test_webex_download_retry_clicks_try_again_role_button(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#try-again-role"}
+        adapter.page.text_roles = {"button": {"Try again": "#try-again-role"}}
+        adapter.page.selector_texts["#try-again-role"] = "Try again"
+        adapter.page.roles["#try-again-role"] = "button"
+
+        result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertEqual(result["selector"], "role=button[name=/Try\\ again/i]")
+        self.assertIn("#try-again-role", adapter.page.clicks)
+
+    def test_webex_download_retry_clicks_got_it_as_plain_span(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {'span:has-text("Got it")'}
+
+        result = asyncio.run(adapter._click_got_it_button(timeout_ms=1))
+
+        self.assertEqual(result["selector"], 'span:has-text("Got it")')
+        self.assertIn('span:has-text("Got it")', adapter.page.clicks)
+
+    def test_webex_download_retry_js_text_fallback_clicks_shadow_candidate(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.js_text_action_result = {
+            "ok": True,
+            "method": "js_text_click",
+            "text": "Try again",
+            "tag": "SPAN",
+            "role": "button",
+            "shadow": True,
+        }
+
+        result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertEqual(result["method"], "js_text_click")
+        self.assertTrue(result["shadow"])
+
+    def test_webex_download_retry_coordinate_fallback_only_for_allowed_texts(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.text = "Try again Download"
+        adapter.page.rects["text=Try again"] = {"x": 10, "y": 20, "width": 40, "height": 20}
+
+        result = asyncio.run(
+            adapter._coordinate_text_action_click(
+                ["Try again"],
+                forbidden_texts=adapter._download_retry_forbidden_texts(),
+                exact=True,
+                timeout_ms=1,
+            )
+        )
+
+        self.assertEqual(result["method"], "coordinate_text_click")
+        self.assertEqual(adapter.page.mouse.clicks, [(30.0, 30.0)])
+        self.assertFalse(adapter._coordinate_text_fallback_allowed(["Download"]))
+
+    def test_webex_download_retry_optional_click_does_not_create_wait_tasks(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.text = "Open Webex Installer.dmg after it downloads"
+
+        with patch("asyncio.create_task") as create_task:
+            result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertIsNone(result)
+        create_task.assert_not_called()
+
     def test_webex_download_retry_dom_click_does_not_click_download_or_mobile(self):
         adapter = _join_test_adapter(
             "joined",
@@ -951,6 +1027,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
 
+        self.assertEqual(result["method"], "js_text_click")
         self.assertEqual(result["selector"], "dom-near-problem-text")
         self.assertNotIn("#download-button", adapter.page.clicks)
         self.assertNotIn("#mobile", adapter.page.clicks)
@@ -980,7 +1057,7 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertNotIn('button:has-text("Download Webex")', adapter.page.clicks)
         self.assertNotIn('button:has-text("Join on mobile")', adapter.page.clicks)
 
-    def test_webex_download_retry_page_timeout_uses_specific_diagnostic_stage(self):
+    def test_webex_download_retry_click_failure_uses_specific_diagnostic_stage(self):
         adapter = _join_test_adapter(
             "joined",
             {
@@ -995,12 +1072,12 @@ class WebexAdapterTests(unittest.TestCase):
             },
         )
         adapter.page.visible = {"#download-indicator", "#problem"}
-        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser? Try again"
+        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
 
-        with self.assertRaisesRegex(RuntimeError, "download/retry page remained"):
+        with self.assertRaisesRegex(RuntimeError, "Try again was not clickable"):
             asyncio.run(adapter._run_prejoin_transition_loop("bot"))
 
-        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_page_timeout")
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
         self.assertIn("links_buttons_debug", adapter.diagnostic_extras[-1])
         self.assertIn("download_retry_keyword_hits", adapter.diagnostic_extras[-1])
 
@@ -1420,23 +1497,24 @@ class FakeWebexLocator:
         return 1
 
     async def wait_for(self, state="visible", timeout=0):
-        if self.selector in self.page.visible:
+        if self.selector in self.page.visible or self.page.selector_text_visible(self.selector):
             return None
         raise PlaywrightTimeoutError(f"{self.selector} is not visible")
 
-    async def click(self):
+    async def click(self, **kwargs):
         self.page.clicks.append(self.selector)
         self.page.focused_selector = self.selector
         self.page.select_all = False
-        if self.selector == "#got-it":
+        if self.selector == "#got-it" or "Got it" in self.selector or "확인" in self.selector or "알겠습니다" in self.selector:
             self.page.visible.discard("#got-it")
-        if self.selector == "#try-again":
+        if self.selector == "#try-again" or "Try again" in self.selector or "Retry" in self.selector or "다시 시도" in self.selector:
             self.page.visible.discard("#download-indicator")
             self.page.visible.discard("#problem")
             self.page.visible.discard("#try-again")
             self.page.visible.discard("#download-button")
             self.page.visible.discard("#mobile")
             self.page.visible.update(self.page.try_again_reveals)
+            self.page.text = f"visible {self.page.join_result} screen"
         if self.selector == "#join":
             self.page.visible.discard("#join")
             self.page.visible.add(f"#{self.page.join_result}")
@@ -1461,6 +1539,18 @@ class FakeWebexLocator:
         return self.page.text
 
     async def evaluate(self, script, value=None):
+        if "candidate_text" in script:
+            text = self.page.text_for_selector(self.selector)
+            return {
+                "candidate_text": text,
+                "container_text": self.page.container_texts.get(self.selector, text),
+                "tag": self.page.tags.get(self.selector, "SPAN"),
+                "role": self.page.roles.get(self.selector, ""),
+                "href": self.page.hrefs.get(self.selector, ""),
+                "onclick": self.selector in self.page.onclick_selectors,
+                "tabindex": self.page.tabindexes.get(self.selector, ""),
+                "rect": self.page.rects.get(self.selector),
+            }
         if value is not None:
             self.page.js_sets.append((self.selector, value))
             self.page.set_value(self.selector, value)
@@ -1478,6 +1568,9 @@ class FakeWebexLocator:
                 "focused": self.page.focused_selector == self.selector,
             }
         return self.page.values.get(self.selector, "")
+
+    async def bounding_box(self):
+        return self.page.rects.get(self.selector)
 
 
 class FakeKeyboard:
@@ -1537,7 +1630,19 @@ class FakeWebexPage:
         self.keyboard = FakeKeyboard(self)
         self.try_again_reveals = set()
         self.dom_try_again_result = None
+        self.js_text_action_result = None
+        self.js_text_action_candidates = []
         self.links_buttons_debug = []
+        self.text_roles = {}
+        self.selector_texts = {}
+        self.container_texts = {}
+        self.tags = {}
+        self.roles = {}
+        self.hrefs = {}
+        self.onclick_selectors = set()
+        self.tabindexes = {}
+        self.rects = {}
+        self.mouse = FakeMouse(self)
 
     async def goto(self, url, wait_until=None, timeout=None):
         self.url = url
@@ -1555,6 +1660,13 @@ class FakeWebexPage:
             return FakeWebexLocator(self, selector, matches=list(self.text_inputs))
         return FakeWebexLocator(self, selector)
 
+    def get_by_text(self, text, exact=True):
+        if text in {"Try again", "Retry", "다시 시도"} and "#try-again" in self.visible:
+            return FakeWebexLocator(self, "#try-again")
+        if text in {"Got it", "확인", "알겠습니다"} and "#got-it" in self.visible:
+            return FakeWebexLocator(self, "#got-it")
+        return FakeWebexLocator(self, f"text={text}")
+
     def get_by_label(self, pattern):
         for label, selector in self.labels.items():
             if pattern.search(label):
@@ -1562,6 +1674,11 @@ class FakeWebexPage:
         return FakeWebexLocator(self, "#missing-label")
 
     def get_by_role(self, role, name=None):
+        if role in {"button", "link"}:
+            for text, selector in self.text_roles.get(role, {}).items():
+                if name is None or name.search(text):
+                    return FakeWebexLocator(self, selector)
+            return FakeWebexLocator(self, f"#missing-role-{role}")
         if role != "textbox":
             return FakeWebexLocator(self, "#missing-role")
         if name is None:
@@ -1575,9 +1692,14 @@ class FakeWebexPage:
                 return FakeWebexLocator(self, selector)
         return FakeWebexLocator(self, "#missing-role")
 
-    async def evaluate(self, script):
+    async def evaluate(self, script, payload=None):
         if "dom-near-problem-text" in script:
             return self.dom_try_again_result
+        if "js_text_click" in script or "js_text_diagnostic" in script:
+            if "const shouldClick = false" in script:
+                return list(self.js_text_action_candidates)
+            result = self.js_text_action_result or self.dom_try_again_result
+            return {**result, "ok": True, "method": "js_text_click"} if isinstance(result, dict) else result
         if "querySelectorAll(\"button, a, [role='button']\")" in script:
             return list(self.links_buttons_debug)
         selector = self.focused_selector
@@ -1597,6 +1719,34 @@ class FakeWebexPage:
         self.values[selector] = str(value)
         if self.enable_join_on_name_fill and str(value):
             self.disabled.discard("#join")
+
+    def selector_text_visible(self, selector):
+        text = self.text_for_selector(selector)
+        return bool(text and text in self.text)
+
+    def text_for_selector(self, selector):
+        if selector in self.selector_texts:
+            return self.selector_texts[selector]
+        if selector == "#try-again":
+            return "Try again"
+        if selector == "#got-it":
+            return "Got it"
+        if selector.startswith("text="):
+            return selector.split("=", 1)[1].strip('"')
+        for marker in ("Try again", "Retry", "다시 시도", "Got it", "확인", "알겠습니다"):
+            if marker in selector:
+                return marker
+        return ""
+
+
+class FakeMouse:
+    def __init__(self, page):
+        self.page = page
+        self.clicks = []
+
+    async def click(self, x, y):
+        self.clicks.append((x, y))
+        self.page.clicks.append(("mouse", x, y))
 
 
 class TitleFailsPage(FakeWebexPage):

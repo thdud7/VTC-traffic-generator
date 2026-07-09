@@ -207,12 +207,22 @@ class WebexAdapter(BrowserMeetingAdapter):
             'text=/브라우저에서 참가하는 데 문제가 있/',
         ],
         "try_again_browser_join": [
+            'text="Try again"',
+            'text="Retry"',
+            'text="다시 시도"',
+            ':text("Try again")',
+            ':text("Retry")',
+            ':text("다시 시도")',
             'button:has-text("Try again")',
-            'a:has-text("Try again")',
             '[role="button"]:has-text("Try again")',
+            '[role="link"]:has-text("Try again")',
+            'div:has-text("Try again")',
+            'span:has-text("Try again")',
             'button:has-text("Retry")',
-            'a:has-text("Retry")',
             '[role="button"]:has-text("Retry")',
+            '[role="link"]:has-text("Retry")',
+            'div:has-text("Retry")',
+            'span:has-text("Retry")',
             'button:has-text("Try again from browser")',
             'a:has-text("Try again from browser")',
             'button:has-text("Join from browser")',
@@ -231,23 +241,50 @@ class WebexAdapter(BrowserMeetingAdapter):
             'a:has-text("이 브라우저에서 참여")',
         ],
         "got_it_button": [
+            'text="Got it"',
+            'text="확인"',
+            'text="알겠습니다"',
+            ':text("Got it")',
+            ':text("확인")',
+            ':text("알겠습니다")',
             'button:has-text("Got it")',
             '[role="button"]:has-text("Got it")',
+            '[role="link"]:has-text("Got it")',
+            'div:has-text("Got it")',
+            'span:has-text("Got it")',
             'button:has-text("확인")',
             '[role="button"]:has-text("확인")',
+            '[role="link"]:has-text("확인")',
+            'div:has-text("확인")',
+            'span:has-text("확인")',
             'button:has-text("알겠습니다")',
             '[role="button"]:has-text("알겠습니다")',
+            '[role="link"]:has-text("알겠습니다")',
+            'div:has-text("알겠습니다")',
+            'span:has-text("알겠습니다")',
         ],
         "try_again_button": [
+            'text="Try again"',
+            'text="Retry"',
+            'text="다시 시도"',
+            ':text("Try again")',
+            ':text("Retry")',
+            ':text("다시 시도")',
             'button:has-text("Try again")',
-            'a:has-text("Try again")',
             '[role="button"]:has-text("Try again")',
+            '[role="link"]:has-text("Try again")',
+            'div:has-text("Try again")',
+            'span:has-text("Try again")',
             'button:has-text("Retry")',
-            'a:has-text("Retry")',
             '[role="button"]:has-text("Retry")',
+            '[role="link"]:has-text("Retry")',
+            'div:has-text("Retry")',
+            'span:has-text("Retry")',
             'button:has-text("다시 시도")',
-            'a:has-text("다시 시도")',
             '[role="button"]:has-text("다시 시도")',
+            '[role="link"]:has-text("다시 시도")',
+            'div:has-text("다시 시도")',
+            'span:has-text("다시 시도")',
         ],
         "join_on_mobile_indicator": [
             'text="Join on mobile"',
@@ -1283,9 +1320,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         if clicked:
             self._progress("webex_try_again_clicked", clicked)
             return {**state, "clicked": True, "got_it_clicked": got_it, "click": clicked}
-        if await self._download_retry_page_visible(timeout_ms=timeout_ms):
-            self._progress("webex_download_retry_page_still_visible", state)
-        return {**state, "clicked": False, "got_it_clicked": got_it}
+        await self._raise_download_retry_try_again_not_clickable({**state, "got_it_clicked": got_it})
 
     async def _download_retry_page_state(self, timeout_ms=None):
         hits = {}
@@ -1330,29 +1365,452 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _click_try_again_browser_join(self, timeout_ms=None):
         self._progress("webex_try_again_click_attempt")
-        clicked = await self._click_try_again_near_problem_text()
-        if clicked:
-            return clicked
-
-        candidates = []
-        for group in ("try_again_button", "try_again_browser_join"):
-            candidates.extend(await self._visible_candidates(group, timeout_ms=timeout_ms, include_locator=True))
-        for candidate in candidates:
-            selector = str(candidate.get("selector", ""))
-            if self._unsafe_download_retry_selector(selector):
-                continue
-            if not candidate.get("enabled", True):
-                continue
-            await candidate["_locator"].click()
-            return {key: value for key, value in candidate.items() if key != "_locator"}
-        return None
+        return await self._click_text_action(
+            ["Try again", "Retry", "다시 시도"],
+            forbidden_texts=self._download_retry_forbidden_texts(),
+            stage="webex_try_again",
+            exact=True,
+            frames=True,
+            allow_js_fallback=True,
+            allow_coordinate_fallback=True,
+            timeout_ms=timeout_ms,
+        )
 
     async def _click_got_it_button(self, timeout_ms=None):
         self._progress("webex_got_it_click_attempt")
-        clicked = await self._click_first_visible("got_it_button", timeout_ms=timeout_ms)
+        clicked = await self._click_text_action(
+            ["Got it", "확인", "알겠습니다"],
+            forbidden_texts=self._download_retry_forbidden_texts(),
+            stage="webex_got_it",
+            exact=True,
+            frames=True,
+            allow_js_fallback=True,
+            allow_coordinate_fallback=True,
+            timeout_ms=timeout_ms,
+        )
         if clicked:
-            self._progress("webex_got_it_clicked", {"selector": clicked})
+            self._progress("webex_got_it_clicked", clicked)
         return clicked
+
+    async def _raise_download_retry_try_again_not_clickable(self, state):
+        text = await self._visible_text_excerpt()
+        extra = {
+            "download_retry": state,
+            "download_retry_keyword_hits": self._download_retry_keyword_hits(text),
+            "visible_text": text,
+            "html_snippet": await self._download_retry_html_snippet(),
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+            "links_buttons_debug": await self._links_buttons_debug_info(),
+            "text_action_candidates": await self._text_action_diagnostics(
+                ["Got it", "확인", "알겠습니다", "Try again", "Retry", "다시 시도"],
+                forbidden_texts=self._download_retry_forbidden_texts(),
+            ),
+            "input_debug": await self._input_debug_info(),
+        }
+        self._progress("webex_download_retry_try_again_not_clickable", extra)
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage="webex_download_retry_try_again_not_clickable", extra=extra)
+        )
+        raise RuntimeError(
+            "Webex download/retry page Try again was not clickable. "
+            f"Visible text: {text}. Diagnostics: {diagnostics}"
+        )
+
+    async def _click_text_action(
+        self,
+        texts,
+        forbidden_texts=None,
+        stage=None,
+        exact=True,
+        frames=True,
+        allow_js_fallback=True,
+        allow_coordinate_fallback=True,
+        timeout_ms=None,
+    ):
+        timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
+        forbidden_texts = list(forbidden_texts or [])
+        safe_texts = [str(text) for text in texts if str(text or "").strip()]
+        if not safe_texts or not self._is_page_available():
+            return None
+
+        for text in safe_texts:
+            for selector, locator_factory in self._text_action_locator_factories(text, exact=exact):
+                for scope_name, scope in self._text_action_scopes(frames=frames):
+                    try:
+                        locator = locator_factory(scope).first
+                        await locator.wait_for(state="visible", timeout=timeout)
+                        details = await self._text_action_locator_details(locator, selector, text)
+                        if self._text_action_rejected_reason(details, safe_texts, forbidden_texts, exact=exact):
+                            continue
+                        if not await self._text_action_locator_enabled(locator, timeout=timeout):
+                            continue
+                        result = {
+                            "ok": True,
+                            "method": "locator_text_click",
+                            "text": text,
+                            "selector": selector,
+                            "scope": scope_name,
+                            **details,
+                        }
+                        try:
+                            await locator.click()
+                        except TypeError:
+                            await locator.click(force=True)
+                            result["method"] = "locator_force_text_click"
+                        except self._safe_playwright_errors():
+                            await locator.click(force=True)
+                            result["method"] = "locator_force_text_click"
+                        self._progress(f"{stage or 'text_action'}_clicked", result)
+                        return result
+                    except PlaywrightTimeoutError:
+                        continue
+                    except self._safe_playwright_errors() as exc:
+                        self._last_page_metadata_error = exc
+                        self._append_browser_log("text_action_locator_unavailable", repr(exc))
+                        continue
+                    except Exception as exc:
+                        self._append_browser_log("text_action_locator_unavailable", repr(exc))
+                        continue
+
+        if allow_js_fallback:
+            clicked = await self._js_text_action_click(
+                safe_texts,
+                forbidden_texts=forbidden_texts,
+                exact=exact,
+                frames=frames,
+            )
+            if clicked:
+                self._progress(f"{stage or 'text_action'}_clicked", clicked)
+                return clicked
+
+        if allow_coordinate_fallback and self._coordinate_text_fallback_allowed(safe_texts):
+            clicked = await self._coordinate_text_action_click(
+                safe_texts,
+                forbidden_texts=forbidden_texts,
+                exact=exact,
+                frames=frames,
+                timeout_ms=timeout,
+            )
+            if clicked:
+                self._progress(f"{stage or 'text_action'}_clicked", clicked)
+                return clicked
+        return None
+
+    def _text_action_scopes(self, frames=True):
+        scopes = self._page_locator_scopes()
+        return scopes if frames else scopes[:1]
+
+    def _text_action_locator_factories(self, text, exact=True):
+        escaped = self._css_string(text)
+        regex = re.compile(rf"^\s*{re.escape(text)}\s*$" if exact else re.escape(text), re.IGNORECASE)
+        factories = []
+        factories.append((f"role=button[name=/{re.escape(text)}/i]", lambda scope: scope.get_by_role("button", name=regex)))
+        factories.append((f"role=link[name=/{re.escape(text)}/i]", lambda scope: scope.get_by_role("link", name=regex)))
+        factories.append((f'get_by_text("{text}", exact={exact})', lambda scope: scope.get_by_text(text, exact=exact)))
+        factories.append((f"text={text}", lambda scope: scope.locator(f"text={text}")))
+        factories.append((f":text({escaped})", lambda scope: scope.locator(f":text({escaped})")))
+        for prefix in ("button", "a", '[role="button"]', '[role="link"]', "div", "span"):
+            selector = f"{prefix}:has-text({escaped})"
+            factories.append((selector, lambda scope, selector=selector: scope.locator(selector)))
+        return factories
+
+    def _css_string(self, text):
+        return json.dumps(str(text), ensure_ascii=False)
+
+    async def _text_action_locator_enabled(self, locator, timeout=1000):
+        if not hasattr(locator, "is_enabled"):
+            return True
+        try:
+            return bool(await self._maybe_await(locator.is_enabled(timeout=timeout)))
+        except TypeError:
+            return bool(await self._maybe_await(locator.is_enabled()))
+        except Exception:
+            return True
+
+    async def _text_action_locator_details(self, locator, selector, desired_text):
+        details = {
+            "candidate_text": self._selector_text_hint(selector) or desired_text,
+            "tag": "",
+            "role": "",
+            "href": "",
+            "onclick": False,
+            "tabindex": "",
+            "rect": None,
+            "container_text": "",
+        }
+        if hasattr(locator, "evaluate"):
+            script = r"""
+            (el) => {
+              const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+              const text = norm(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+              const container = el.closest("button, a, [role='button'], [role='link'], [onclick], [tabindex], main, section, article, body") || el;
+              const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+              return {
+                candidate_text: text,
+                container_text: norm(container.innerText || container.textContent || container.getAttribute("aria-label") || ""),
+                tag: el.tagName || "",
+                role: el.getAttribute("role") || "",
+                href: el.getAttribute("href") || "",
+                onclick: !!el.onclick || el.hasAttribute("onclick"),
+                tabindex: el.getAttribute("tabindex") || "",
+                rect: rect ? {x: rect.x, y: rect.y, width: rect.width, height: rect.height} : null
+              };
+            }
+            """
+            try:
+                result = await self._maybe_await(locator.evaluate(script))
+                if isinstance(result, Mapping):
+                    details.update(result)
+            except Exception:
+                pass
+        return details
+
+    def _selector_text_hint(self, selector):
+        selector = str(selector or "")
+        for pattern in (r'has-text\((".*?")\)', r':text\((".*?")\)', r'^text="?([^"]+)"?$'):
+            match = re.search(pattern, selector)
+            if not match:
+                continue
+            value = match.group(1)
+            if value.startswith('"'):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return value.strip('"')
+            return value
+        return ""
+
+    def _text_action_rejected_reason(self, details, desired_texts, forbidden_texts, exact=True):
+        text = " ".join(str(details.get("candidate_text") or "").split())
+        container = " ".join(str(details.get("container_text") or "").split())
+        if not text:
+            return "empty_text"
+        if exact and not any(text.lower() == desired.lower() for desired in desired_texts):
+            return "desired_text_not_exact"
+        if not exact and not any(desired.lower() in text.lower() for desired in desired_texts):
+            return "desired_text_missing"
+        for forbidden in forbidden_texts:
+            forbidden_lower = str(forbidden).lower()
+            if forbidden_lower and (forbidden_lower in text.lower() or forbidden_lower in container.lower()):
+                return f"forbidden_text:{forbidden}"
+        return None
+
+    async def _js_text_action_click(self, texts, forbidden_texts=None, exact=True, frames=True):
+        for scope_name, scope in self._text_action_scopes(frames=frames):
+            if not hasattr(scope, "evaluate"):
+                continue
+            try:
+                result = await self._maybe_await(
+                    scope.evaluate(self._text_action_js_script(click=True), {
+                        "texts": list(texts),
+                        "forbiddenTexts": list(forbidden_texts or []),
+                        "exact": bool(exact),
+                    })
+                )
+            except TypeError:
+                try:
+                    result = await self._maybe_await(scope.evaluate(self._text_action_js_script(click=True)))
+                except Exception as exc:
+                    self._append_browser_log("webex_text_action_js_click_failed", repr(exc))
+                    continue
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("webex_text_action_js_click_failed", repr(exc))
+                continue
+            except Exception as exc:
+                self._append_browser_log("webex_text_action_js_click_failed", repr(exc))
+                continue
+            if isinstance(result, Mapping) and result.get("ok"):
+                return {**dict(result), "scope": scope_name}
+        return None
+
+    async def _coordinate_text_action_click(self, texts, forbidden_texts=None, exact=True, frames=True, timeout_ms=1000):
+        for text in texts:
+            for selector, locator_factory in self._text_action_locator_factories(text, exact=exact):
+                for scope_name, scope in self._text_action_scopes(frames=frames):
+                    try:
+                        locator = locator_factory(scope).first
+                        await locator.wait_for(state="visible", timeout=timeout_ms)
+                        details = await self._text_action_locator_details(locator, selector, text)
+                        if self._text_action_rejected_reason(details, texts, forbidden_texts or [], exact=exact):
+                            continue
+                        box = None
+                        if hasattr(locator, "bounding_box"):
+                            box = await self._maybe_await(locator.bounding_box())
+                        box = box or details.get("rect")
+                        if not box or float(box.get("width", 0)) <= 0 or float(box.get("height", 0)) <= 0:
+                            continue
+                        mouse = getattr(self.page, "mouse", None)
+                        if not mouse or not hasattr(mouse, "click"):
+                            continue
+                        x = float(box.get("x", 0)) + (float(box.get("width", 0)) / 2)
+                        y = float(box.get("y", 0)) + (float(box.get("height", 0)) / 2)
+                        await self._maybe_await(mouse.click(x, y))
+                        return {
+                            "ok": True,
+                            "method": "coordinate_text_click",
+                            "text": text,
+                            "selector": selector,
+                            "scope": scope_name,
+                            "x": x,
+                            "y": y,
+                            **details,
+                        }
+                    except PlaywrightTimeoutError:
+                        continue
+                    except Exception as exc:
+                        self._append_browser_log("webex_text_action_coordinate_click_failed", repr(exc))
+                        continue
+        return None
+
+    def _coordinate_text_fallback_allowed(self, texts):
+        allowed = {"got it", "try again", "retry", "다시 시도", "확인", "알겠습니다"}
+        return all(str(text).strip().lower() in allowed for text in texts)
+
+    async def _text_action_diagnostics(self, texts, forbidden_texts=None, frames=True):
+        results = []
+        for scope_name, scope in self._text_action_scopes(frames=frames):
+            if not hasattr(scope, "evaluate"):
+                continue
+            try:
+                result = await self._maybe_await(
+                    scope.evaluate(self._text_action_js_script(click=False), {
+                        "texts": list(texts),
+                        "forbiddenTexts": list(forbidden_texts or []),
+                        "exact": False,
+                    })
+                )
+                if isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, Mapping):
+                            results.append({**dict(item), "scope": scope_name})
+            except TypeError:
+                continue
+            except Exception as exc:
+                self._append_browser_log("webex_text_action_diagnostics_failed", repr(exc))
+                continue
+        return results[:120]
+
+    def _text_action_js_script(self, click=False):
+        action = "true" if click else "false"
+        return rf"""
+        (payload) => {{
+          const texts = (payload && payload.texts) || [];
+          const forbiddenTexts = (payload && payload.forbiddenTexts) || [];
+          const exact = payload ? !!payload.exact : true;
+          const shouldClick = {action};
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const lower = (value) => norm(value).toLowerCase();
+          const desiredMatch = (text) => exact
+            ? texts.some((item) => lower(text) === lower(item))
+            : texts.some((item) => lower(text).includes(lower(item)));
+          const forbiddenHit = (text) => forbiddenTexts.find((item) => item && lower(text).includes(lower(item)));
+          const isVisible = (el) => {{
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          }};
+          const rectInfo = (el) => {{
+            const rect = el.getBoundingClientRect();
+            return {{x: rect.x, y: rect.y, width: rect.width, height: rect.height}};
+          }};
+          const tagScore = (el) => {{
+            const tag = (el.tagName || "").toLowerCase();
+            const role = lower(el.getAttribute("role"));
+            if (tag === "button") return 0;
+            if (tag === "a") return 1;
+            if (role === "button") return 2;
+            if (role === "link") return 3;
+            if (el.onclick || el.hasAttribute("onclick")) return 4;
+            if (el.hasAttribute("tabindex")) return 5;
+            return 20;
+          }};
+          const clickableParent = (el) => el.closest("button, a, [role='button'], [role='link'], [onclick], [tabindex]") || el;
+          const visit = (root, out) => {{
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+            let node = root.nodeType === Node.ELEMENT_NODE ? root : walker.nextNode();
+            while (node) {{
+              out.push(node);
+              if (node.shadowRoot) visit(node.shadowRoot, out);
+              node = walker.nextNode();
+            }}
+          }};
+          const elements = [];
+          visit(document.documentElement || document.body, elements);
+          const candidates = [];
+          for (const el of elements) {{
+            const text = norm(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+            if (!text || !desiredMatch(text)) continue;
+            const target = clickableParent(el);
+            const targetText = norm(target.innerText || target.textContent || target.getAttribute("aria-label") || text);
+            const combinedText = `${{text}} ${{targetText}}`;
+            const forbidden = forbiddenHit(combinedText);
+            const item = {{
+              ok: false,
+              method: shouldClick ? "js_text_click" : "js_text_diagnostic",
+              text,
+              tag: el.tagName || "",
+              role: el.getAttribute("role") || "",
+              href: el.getAttribute("href") || "",
+              onclick: !!el.onclick || el.hasAttribute("onclick"),
+              tabindex: el.getAttribute("tabindex") || "",
+              rect: rectInfo(el),
+              target_tag: target.tagName || "",
+              target_role: target.getAttribute("role") || "",
+              target_href: target.getAttribute("href") || "",
+              target_onclick: !!target.onclick || target.hasAttribute("onclick"),
+              target_tabindex: target.getAttribute("tabindex") || "",
+              target_rect: rectInfo(target),
+              rejected_reason: forbidden ? `forbidden_text:${{forbidden}}` : ""
+            }};
+            if (!isVisible(el) || !isVisible(target)) item.rejected_reason = item.rejected_reason || "not_visible";
+            candidates.push({{item, target, score: tagScore(target), area: item.target_rect.width * item.target_rect.height}});
+          }}
+          candidates.sort((a, b) => a.score - b.score || a.area - b.area);
+          if (!shouldClick) return candidates.slice(0, 120).map((entry) => entry.item);
+          const selected = candidates.find((entry) => !entry.item.rejected_reason);
+          if (!selected) return null;
+          selected.target.click();
+          return {{...selected.item, ok: true, text: selected.item.text, tag: selected.item.target_tag || selected.item.tag, role: selected.item.target_role || selected.item.role}};
+        }}
+        """
+
+    def _download_retry_forbidden_texts(self):
+        return [
+            "Download",
+            "Download Webex",
+            "Webex 앱 다운로드",
+            "Join on mobile",
+            "모바일에서 참여",
+            "모바일에서 참가",
+            "Open Webex",
+            "Webex 열기",
+        ]
+
+    async def _download_retry_html_snippet(self, radius=500):
+        html_text = await self._safe_page_content(default="")
+        if not html_text:
+            return ""
+        needles = [
+            "Got it",
+            "Try again",
+            "Retry",
+            "Join on mobile",
+            "Download",
+            "Webex Installer.dmg",
+            "다시 시도",
+            "모바일에서 참여",
+            "Webex 앱 다운로드",
+        ]
+        lowered = html_text.lower()
+        positions = [lowered.find(needle.lower()) for needle in needles if lowered.find(needle.lower()) >= 0]
+        if not positions:
+            return html_text[: min(len(html_text), radius * 2)]
+        start = max(0, min(positions) - radius)
+        end = min(len(html_text), max(positions) + radius)
+        return html_text[start:end]
 
     async def _raise_download_retry_page_timeout(self, state):
         text = await self._visible_text_excerpt()
