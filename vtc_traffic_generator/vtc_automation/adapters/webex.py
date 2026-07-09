@@ -179,6 +179,65 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[aria-label*="Not Now"]',
             '[aria-label*="취소"]',
         ],
+        "download_page_indicator": [
+            'text="Open \\"Webex Installer.dmg\\" after it downloads"',
+            'text="Open Webex Installer.dmg after it downloads"',
+            'text="Webex Installer.dmg"',
+            'text="Download Webex"',
+            'text="Webex 앱 다운로드"',
+            'text="Download the Webex app"',
+            'text="Open Webex after it downloads"',
+        ],
+        "problem_joining_from_browser": [
+            'text="Problem joining from browser?"',
+            'text="Problem joining from your browser?"',
+            'text="Having trouble joining from browser?"',
+            'text=/브라우저에서 참여하는 데 문제가 있/',
+            'text=/브라우저에서 참가하는 데 문제가 있/',
+        ],
+        "try_again_browser_join": [
+            'button:has-text("Try again")',
+            'a:has-text("Try again")',
+            '[role="button"]:has-text("Try again")',
+            'button:has-text("Retry")',
+            'a:has-text("Retry")',
+            '[role="button"]:has-text("Retry")',
+            'button:has-text("Try again from browser")',
+            'a:has-text("Try again from browser")',
+            'button:has-text("Join from browser")',
+            'a:has-text("Join from browser")',
+            'button:has-text("Join from your browser")',
+            'a:has-text("Join from your browser")',
+            'button:has-text("Continue in browser")',
+            'a:has-text("Continue in browser")',
+            'button:has-text("브라우저에서 다시 시도")',
+            'a:has-text("브라우저에서 다시 시도")',
+            'button:has-text("다시 시도")',
+            'a:has-text("다시 시도")',
+            'button:has-text("브라우저에서 참여")',
+            'a:has-text("브라우저에서 참여")',
+            'button:has-text("이 브라우저에서 참여")',
+            'a:has-text("이 브라우저에서 참여")',
+        ],
+        "got_it_button": [
+            'button:has-text("Got it")',
+            '[role="button"]:has-text("Got it")',
+            'button:has-text("확인")',
+            '[role="button"]:has-text("확인")',
+            'button:has-text("알겠습니다")',
+            '[role="button"]:has-text("알겠습니다")',
+        ],
+        "join_on_mobile_indicator": [
+            'text="Join on mobile"',
+            'text="모바일에서 참여"',
+            'text="모바일에서 참가"',
+        ],
+        "app_download_indicator": [
+            'text="Webex Installer.dmg"',
+            'text="Download"',
+            'text="Webex 앱 다운로드"',
+            'text="Download Webex app"',
+        ],
         "join_as_guest": [
             'button:has-text("Join as a guest")',
             'button:has-text("Continue as guest")',
@@ -1059,6 +1118,16 @@ class WebexAdapter(BrowserMeetingAdapter):
                 return state
 
             progressed = False
+            progressed = bool(await self._click_first_visible("got_it_button", timeout_ms=timeout)) or progressed
+            download_retry_result = await self._handle_download_retry_page(timeout_ms=timeout)
+            if download_retry_result.get("detected"):
+                if download_retry_result.get("clicked"):
+                    await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
+                    await asyncio.sleep(float(self.adapter_config().get("download_retry_settle_sec", 0.5)))
+                    if await self._browser_join_after_retry_seen(timeout_ms=timeout):
+                        self._progress("webex_browser_join_after_retry_seen")
+                    continue
+                progressed = True
             if await self._name_entry_text_visible():
                 self._progress("display_name_page_detected")
                 if await self._fill_display_name(display_name, timeout_ms=timeout):
@@ -1142,17 +1211,228 @@ class WebexAdapter(BrowserMeetingAdapter):
         await self._fill_display_name_if_needed(display_name, timeout_ms=timeout, diagnose=True)
         result = {"status": "timeout", "selector": None, "visible_text": await self._visible_text_excerpt()}
         self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
+        download_retry = await self._download_retry_page_state(timeout_ms=timeout)
+        stage = "webex_download_retry_page_timeout" if download_retry.get("detected") else "webex_prejoin_timeout"
+        extra = {
+            "join_result": result,
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+        }
+        if download_retry.get("detected"):
+            extra.update(
+                {
+                    "download_retry": download_retry,
+                    "download_retry_keyword_hits": self._download_retry_keyword_hits(result.get("visible_text", "")),
+                    "links_buttons_debug": await self._links_buttons_debug_info(),
+                }
+            )
         await self._maybe_await(
             self.collect_diagnostics(
-                stage="webex_prejoin_timeout",
-                extra={
-                    "join_result": result,
-                    "url": self._safe_page_url(),
-                    "title": await self._safe_page_title(),
-                },
+                stage=stage,
+                extra=extra,
             )
         )
         return result
+
+    async def _handle_download_retry_page(self, timeout_ms=None):
+        state = await self._download_retry_page_state(timeout_ms=timeout_ms)
+        if not state.get("detected"):
+            return state
+        self._progress("webex_download_retry_page_detected", state)
+        clicked = await self._click_try_again_browser_join(timeout_ms=timeout_ms)
+        if clicked:
+            self._progress("webex_try_again_browser_join_clicked", clicked)
+            return {**state, "clicked": True, "click": clicked}
+        if await self._download_retry_page_visible(timeout_ms=timeout_ms):
+            self._progress("webex_download_retry_page_still_visible", state)
+        return {**state, "clicked": False}
+
+    async def _download_retry_page_state(self, timeout_ms=None):
+        hits = {}
+        for group in (
+            "download_page_indicator",
+            "problem_joining_from_browser",
+            "join_on_mobile_indicator",
+            "app_download_indicator",
+        ):
+            selector = await self._first_visible_selector(group, timeout_ms=timeout_ms)
+            if selector:
+                hits[group] = selector
+        detected = bool(hits.get("download_page_indicator") or hits.get("problem_joining_from_browser"))
+        return {"detected": detected, "indicators": hits}
+
+    async def _download_retry_page_visible(self, timeout_ms=None):
+        return bool((await self._download_retry_page_state(timeout_ms=timeout_ms)).get("detected"))
+
+    async def _browser_join_after_retry_seen(self, timeout_ms=None):
+        for group in (
+            "join_from_browser",
+            "join_from_this_browser",
+            "continue_in_browser",
+            "use_web_app",
+            "open_in_browser",
+            "display_name",
+            "name_input",
+        ):
+            if await self._first_visible_selector(group, timeout_ms=timeout_ms):
+                return True
+        return False
+
+    async def _click_try_again_browser_join(self, timeout_ms=None):
+        self._progress("webex_try_again_browser_join_attempt")
+        clicked = await self._click_try_again_near_problem_text()
+        if clicked:
+            return clicked
+
+        candidates = await self._visible_candidates("try_again_browser_join", timeout_ms=timeout_ms, include_locator=True)
+        for candidate in candidates:
+            selector = str(candidate.get("selector", ""))
+            if self._unsafe_download_retry_selector(selector):
+                continue
+            if not candidate.get("enabled", True):
+                continue
+            await candidate["_locator"].click()
+            return {key: value for key, value in candidate.items() if key != "_locator"}
+        return None
+
+    async def _click_try_again_near_problem_text(self):
+        if not self._is_page_available() or not hasattr(self.page, "evaluate"):
+            return None
+        script = r"""
+        () => {
+          const problemPatterns = [
+            /Problem joining from (your )?browser\?/i,
+            /Having trouble joining from browser\?/i,
+            /브라우저에서 (참여|참가)하는 데 문제가 있/
+          ];
+          const actionPatterns = [
+            /^(Try again|Retry|Try again from browser)$/i,
+            /^(Join from (your )?browser|Continue in browser)$/i,
+            /^(브라우저에서 다시 시도|다시 시도|브라우저에서 참여|이 브라우저에서 참여)$/
+          ];
+          const unsafePatterns = [
+            /Download/i,
+            /Open Webex/i,
+            /Join on mobile/i,
+            /Webex 앱 다운로드/,
+            /Webex 열기/,
+            /모바일에서 (참여|참가)/
+          ];
+          const textOf = (el) => (el && (el.innerText || el.textContent || el.getAttribute("aria-label") || "") || "").replace(/\s+/g, " ").trim();
+          const isVisible = (el) => {
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          };
+          const clickables = (root) => Array.from(root.querySelectorAll("button, a, [role='button']"));
+          const problem = Array.from(document.querySelectorAll("body *")).find((el) => {
+            const text = textOf(el);
+            return text && problemPatterns.some((pattern) => pattern.test(text));
+          });
+          const roots = [];
+          if (problem) {
+            let node = problem;
+            for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+              roots.push(node);
+            }
+          }
+          roots.push(document.body);
+          for (const root of roots) {
+            const candidates = clickables(root).filter((el) => {
+              const text = textOf(el);
+              return isVisible(el)
+                && text
+                && actionPatterns.some((pattern) => pattern.test(text))
+                && !unsafePatterns.some((pattern) => pattern.test(text));
+            });
+            if (candidates.length) {
+              const el = candidates[0];
+              const text = textOf(el);
+              el.click();
+              return {
+                selector: "dom-near-problem-text",
+                text,
+                tag: el.tagName,
+                href: el.getAttribute("href") || "",
+                role: el.getAttribute("role") || "",
+                aria_label: el.getAttribute("aria-label") || ""
+              };
+            }
+          }
+          return null;
+        }
+        """
+        try:
+            return await self._maybe_await(self.page.evaluate(script))
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("webex_try_again_dom_click_failed", repr(exc))
+            return None
+        except Exception as exc:
+            self._append_browser_log("webex_try_again_dom_click_failed", repr(exc))
+            return None
+
+    def _unsafe_download_retry_selector(self, selector):
+        lowered = str(selector or "").lower()
+        unsafe_tokens = (
+            "download",
+            "open webex",
+            "webex 열기",
+            "webex 앱 다운로드",
+            "join on mobile",
+            "모바일에서 참여",
+            "모바일에서 참가",
+        )
+        return any(token in lowered for token in unsafe_tokens)
+
+    def _download_retry_keyword_hits(self, text):
+        text = str(text or "")
+        keywords = (
+            "Problem joining from browser?",
+            "Problem joining from your browser?",
+            "Try again",
+            "Join on mobile",
+            "Webex Installer.dmg",
+            "Download Webex",
+            "Download",
+            "Webex 앱 다운로드",
+            "브라우저에서 참여하는 데 문제가 있",
+            "브라우저에서 참가하는 데 문제가 있",
+            "다시 시도",
+            "모바일에서 참여",
+            "모바일에서 참가",
+        )
+        return [keyword for keyword in keywords if keyword in text]
+
+    async def _links_buttons_debug_info(self):
+        if not self._is_page_available() or not hasattr(self.page, "evaluate"):
+            return []
+        script = r"""
+        () => Array.from(document.querySelectorAll("button, a, [role='button']")).slice(0, 80).map((el) => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return {
+            text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim(),
+            tag: el.tagName,
+            href: el.getAttribute("href") || "",
+            role: el.getAttribute("role") || "",
+            aria_label: el.getAttribute("aria-label") || "",
+            visible: style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0,
+            enabled: !el.disabled && el.getAttribute("aria-disabled") !== "true"
+          };
+        })
+        """
+        try:
+            result = await self._maybe_await(self.page.evaluate(script))
+            return result if isinstance(result, list) else []
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("links_buttons_debug_unavailable", repr(exc))
+            return []
+        except Exception as exc:
+            self._append_browser_log("links_buttons_debug_unavailable", repr(exc))
+            return []
 
     async def _prejoin_state(self, timeout_ms=250):
         for status, group in (
