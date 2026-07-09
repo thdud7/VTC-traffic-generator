@@ -1028,11 +1028,11 @@ class WebexAdapter(BrowserMeetingAdapter):
             await self._dismiss_external_protocol_prompt(stage="after_goto_settle")
 
         prejoin_result = await self._run_prejoin_transition_loop(display_name)
-        if prejoin_result["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+        if self._is_terminal_join_state(prejoin_result):
             return await self._handle_join_result(vtc_url, prejoin_result)
 
         existing_result = await self._wait_for_join_result(0)
-        if existing_result["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+        if self._is_terminal_join_state(existing_result):
             return await self._handle_join_result(vtc_url, existing_result)
 
         if prejoin_result["status"] == "timeout":
@@ -1126,6 +1126,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             return False
 
     async def _handle_join_result(self, vtc_url, result):
+        result = self._normalize_join_state(result)
         emit_event(self.config, "webex_join_result", result, self.service_name)
 
         if result["status"] == "joined":
@@ -1206,6 +1207,35 @@ class WebexAdapter(BrowserMeetingAdapter):
             f"Visible text: {result.get('visible_text', '')}. Diagnostics: {diagnostics}"
         )
 
+    def _is_terminal_join_state(self, state):
+        if not isinstance(state, Mapping):
+            return False
+        return bool(state.get("joined")) or state.get("status") in {"joined", "waiting_for_others", "lobby", "blocked"}
+
+    def _terminal_join_state_from_fill_result(self, fill_result):
+        if not isinstance(fill_result, Mapping):
+            return None
+        join_state = fill_result.get("join_state")
+        return join_state if self._is_terminal_join_state(join_state) else None
+
+    def _normalize_join_state(self, state):
+        if not isinstance(state, Mapping):
+            return state
+        normalized = dict(state)
+        status = normalized.get("status")
+        if status in {"joined", "waiting_for_others"}:
+            normalized["joined"] = True
+            normalized.setdefault(
+                "joined_source",
+                normalized.get("source")
+                or normalized.get("action")
+                or normalized.get("joined_selector")
+                or normalized.get("selector"),
+            )
+        elif status in {"lobby", "blocked"}:
+            normalized.setdefault("joined", False)
+        return normalized
+
     async def _run_prejoin_transition_loop(self, display_name):
         deadline = asyncio.get_running_loop().time() + (
             self.timeout_ms("prejoin_timeout_ms", 30000) / 1000
@@ -1221,10 +1251,10 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration})
             await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
             joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=250)
-            if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            if self._is_terminal_join_state(joined_state):
                 return joined_state
             state = await self._prejoin_state(timeout_ms=250)
-            if state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            if self._is_terminal_join_state(state):
                 return state
 
             progressed = False
@@ -1261,63 +1291,99 @@ class WebexAdapter(BrowserMeetingAdapter):
                 if await self._fill_display_name(display_name, timeout_ms=timeout):
                     progressed = True
                     state = await self._prejoin_state(timeout_ms=75)
-                    if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                    if state["status"] == "final_join" or self._is_terminal_join_state(state):
                         return state
             progressed = bool(await self._click_first_visible("cookie_close", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_first_visible("cookie_reject", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_first_visible("cookie_accept", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_browser_prejoin_selector("cancel_open_app_prompt", timeout_ms=timeout)) or progressed
             await self._dismiss_external_protocol_prompt(stage="before_browser_join")
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             self._progress("browser_join_click_attempt")
             progressed = bool(await self._click_browser_prejoin_selector("join_from_browser", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_browser_prejoin_selector("join_from_this_browser", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_browser_prejoin_selector("continue_in_browser", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_browser_prejoin_selector("use_web_app", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_browser_prejoin_selector("open_in_browser", timeout_ms=timeout)) or progressed
-            if (await self._fill_display_name_if_needed(display_name, timeout_ms=timeout))["success"]:
+            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
+            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+            if terminal_state:
+                return terminal_state
+            if fill_result["success"]:
                 progressed = True
                 state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+                if state["status"] == "final_join" or self._is_terminal_join_state(state):
                     return state
             progressed = bool(await self._click_first_visible("join_as_guest", timeout_ms=timeout)) or progressed
             progressed = bool(await self._fill_display_name(display_name, timeout_ms=timeout)) or progressed
@@ -1330,16 +1396,19 @@ class WebexAdapter(BrowserMeetingAdapter):
             progressed = bool(await self._apply_prejoin_media_preferences()) or progressed
 
             state = await self._prejoin_state(timeout_ms=250)
-            if state["status"] in {"final_join", "joined", "waiting_for_others", "lobby", "blocked"}:
+            if state["status"] == "final_join" or self._is_terminal_join_state(state):
                 return state
 
             await asyncio.sleep(0.2 if progressed else 0.5)
 
         await self._dismiss_external_protocol_prompt(stage="prejoin_timeout")
         joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout)
-        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+        if self._is_terminal_join_state(joined_state):
             return joined_state
-        await self._fill_display_name_if_needed(display_name, timeout_ms=timeout, diagnose=True)
+        fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout, diagnose=True)
+        terminal_state = self._terminal_join_state_from_fill_result(fill_result)
+        if terminal_state:
+            return terminal_state
         result = {"status": "timeout", "selector": None, "visible_text": await self._visible_text_excerpt()}
         self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
         download_retry = await self._download_retry_page_state(timeout_ms=timeout)
@@ -2846,6 +2915,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         for details in scopes:
             state = self._joined_state_from_snapshot_scope(details)
             if state:
+                state = self._normalize_join_state(state)
                 if state["status"] == "waiting_for_others":
                     self._progress("webex_waiting_for_others_detected", state)
                 else:
@@ -2854,7 +2924,10 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         window_state = self._detect_webex_meeting_window_state()
         if window_state:
+            window_state = self._normalize_join_state(window_state)
             self._progress("webex_joined_state_detected_by_window_fallback", window_state)
+            if self._is_terminal_join_state(window_state):
+                self._progress("webex_joined_state_scan_result", window_state)
             return window_state
 
         self._progress("webex_joined_state_scan_result", {"status": "continue"})
@@ -2876,6 +2949,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         if waiting_phrase:
             return {
                 "status": "waiting_for_others",
+                "joined": True,
+                "joined_source": "waiting_for_others_text",
                 "selector": f"text:{waiting_phrase}",
                 "joined_selector": self._media_control_selector_from_snapshot(details),
                 "matched_text": waiting_phrase,
@@ -2885,6 +2960,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         if media_selector:
             return {
                 "status": "joined",
+                "joined": True,
+                "joined_source": "media_controls",
                 "selector": media_selector,
                 "joined_selector": media_selector,
                 "action": "joined_media_controls",
@@ -2894,6 +2971,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         if "미팅 중" in lowered_title or re.search(r"(?<![a-z])in meeting\b", lowered_title) or "meeting in progress" in lowered_title:
             return {
                 "status": "joined",
+                "joined": True,
+                "joined_source": "title",
                 "selector": "title:joined",
                 "joined_selector": "title:joined",
                 **source,
@@ -2984,15 +3063,28 @@ class WebexAdapter(BrowserMeetingAdapter):
                 continue
             if not any(token in lower for token in ("webex", "meeting", "미팅", "회의")):
                 continue
-            details = {"status": "joined", "selector": "window_fallback", "joined_selector": "window_fallback", "window": line}
+            is_get_ready = "get ready to join" in lower
+            joined = (
+                self._browser_join_clicked_once
+                and not is_get_ready
+                and ("cisco webex" in lower or "webex meeting" in lower or "webex - chromium" in lower)
+            )
+            status = "joined" if joined else "candidate"
+            details = {
+                "status": status,
+                "joined": bool(joined),
+                "joined_source": "window_fallback" if joined else None,
+                "selector": "window_fallback",
+                "joined_selector": "window_fallback" if joined else None,
+                "window": line,
+            }
             self._progress("webex_meeting_window_detected", details)
-            if self._browser_join_clicked_once or any(token in lower for token in ("meeting", "미팅", "회의")):
-                return details
+            return details
         return None
 
     async def _prejoin_state(self, timeout_ms=250):
         joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout_ms)
-        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+        if self._is_terminal_join_state(joined_state):
             return joined_state
         for status, group in (
             ("final_join", "final_join_fast"),
@@ -3134,10 +3226,35 @@ class WebexAdapter(BrowserMeetingAdapter):
             await self._click_optional("leave_confirm", "webex_leave_confirmed")
         else:
             fallback_success = await self._fallback_action("leave")
+            if not fallback_success:
+                fallback_success = await self._fallback_close_meeting_surface()
         success = bool(clicked or fallback_success)
         self._progress("webex_leave_done", {"success": success, "clicked": bool(clicked), "fallback_success": bool(fallback_success)})
         emit_event(self.config, "webex_left_meeting", {"success": success}, self.service_name)
         return success
+
+    async def _fallback_close_meeting_surface(self):
+        details = {"success": False}
+        try:
+            if self._is_page_available() and hasattr(self.page, "close"):
+                await self._maybe_await(self.page.close())
+                details = {"success": True, "target": "page"}
+                self.page = None
+            elif self.context is not None and hasattr(self.context, "close"):
+                await self._maybe_await(self.context.close())
+                details = {"success": True, "target": "context"}
+                self.context = None
+                self.page = None
+            elif self.browser is not None and hasattr(self.browser, "close"):
+                await self._maybe_await(self.browser.close())
+                details = {"success": True, "target": "browser"}
+                self.browser = None
+                self.page = None
+        except Exception as exc:
+            details = {"success": False, "error": repr(exc)}
+            self._append_browser_log("webex_leave_fallback_close_failed", repr(exc))
+        self._progress("webex_leave_fallback_close", details)
+        return bool(details.get("success"))
 
     async def close(self):
         self._flush_browser_log()
@@ -3869,7 +3986,7 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _fill_display_name_if_needed(self, display_name, timeout_ms=None, diagnose=False):
         joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=min(50, int(timeout_ms or 50)))
-        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+        if self._is_terminal_join_state(joined_state):
             self._progress("display_name_fill_skipped", {"reason": "joined_state_detected", "status": joined_state["status"]})
             return {"success": False, "selector": None, "skipped": True, "join_state": joined_state}
         result = await self._fill_display_name(display_name, timeout_ms=timeout_ms)
@@ -4866,11 +4983,13 @@ return "sent_escape"
         poll_timeout_ms = self.timeout_ms("join_result_poll_timeout_ms", 500)
         while asyncio.get_running_loop().time() <= deadline:
             joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=poll_timeout_ms)
-            if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            if self._is_terminal_join_state(joined_state):
                 return joined_state
             if await self._title_indicates_joined():
                 return {
                     "status": "joined",
+                    "joined": True,
+                    "joined_source": "title",
                     "selector": "title:joined",
                     "joined_selector": "title:joined",
                     "visible_text": await self._visible_text_excerpt(),

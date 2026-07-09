@@ -512,6 +512,101 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(state["status"], "joined")
         self.assertEqual(state["selector"], "window_fallback")
+        self.assertTrue(state["joined"])
+        self.assertEqual(state["joined_source"], "window_fallback")
+
+    def test_prejoin_window_fallback_join_returns_without_display_name_or_browser_join(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#join"}
+        adapter._browser_join_clicked_once = True
+
+        async def fail_fill(*args, **kwargs):
+            raise AssertionError("display name fill should not run after joined fallback")
+
+        async def fail_browser_join(*args, **kwargs):
+            raise AssertionError("browser join should not be clicked after joined fallback")
+
+        adapter._fill_display_name = fail_fill
+        adapter._fill_display_name_if_needed = fail_fill
+        adapter._click_browser_prejoin_selector = fail_browser_join
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot4 Cisco Webex - Chromium\n",
+                        stderr="",
+                    )
+                    result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(result["selector"], "window_fallback")
+        self.assertEqual(adapter.page.clicks, [])
+        self.assertEqual(adapter.page.fills, [])
+
+    def test_window_fallback_joined_progress_emits_success_and_exits(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#join"}
+        adapter._browser_join_clicked_once = True
+        output = io.StringIO()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot4 Cisco Webex - Chromium\n",
+                        stderr="",
+                    )
+                    with contextlib.redirect_stdout(output):
+                        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        progress = output.getvalue()
+        self.assertEqual(result["status"], "joined")
+        self.assertIn("webex_joined_state_detected_by_window_fallback", progress)
+        self.assertIn('"status": "joined"', progress)
+        self.assertIn("webex_joined_state_scan_result", progress)
+        self.assertIn("webex_join_success", progress)
+        self.assertNotIn("display_name_fill_skipped", progress)
+
+    def test_get_ready_window_fallback_is_candidate_not_terminal_success(self):
+        adapter = _join_test_adapter("joined")
+        adapter._browser_join_clicked_once = True
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot4 Get ready to join · Meeting · Webex - Chromium\n",
+                        stderr="",
+                    )
+                    state = adapter._detect_webex_meeting_window_state()
+
+        self.assertEqual(state["status"], "candidate")
+        self.assertFalse(state["joined"])
+        self.assertFalse(adapter._is_terminal_join_state(state))
+
+    def test_leave_without_button_falls_back_to_close_and_logs(self):
+        adapter = _join_test_adapter("joined")
+        closed = []
+
+        async def close_page():
+            closed.append(True)
+
+        adapter.page.close = close_page
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter.leave())
+
+        self.assertTrue(result)
+        self.assertEqual(closed, [True])
+        progress = output.getvalue()
+        self.assertIn("webex_leave_attempt", progress)
+        self.assertIn("webex_leave_fallback_close", progress)
+        self.assertIn("webex_leave_done", progress)
 
     def test_korean_in_meeting_title_is_classified_as_joined(self):
         adapter = _join_test_adapter("no_selector_match")
@@ -756,6 +851,22 @@ class WebexAdapterTests(unittest.TestCase):
             asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
 
         self.assertIn("취소", json.dumps(commands, ensure_ascii=False))
+
+    def test_korean_cancel_locator_timeout_is_observed(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        adapter.page.timeout_selectors.add('button:has-text("취소")')
+        loop_errors = []
+
+        async def run_probe():
+            loop = asyncio.get_running_loop()
+            loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+            return await adapter._click_browser_prejoin_selector("cancel_open_app_prompt", timeout_ms=1)
+
+        result = asyncio.run(run_probe())
+
+        self.assertIsNone(result)
+        self.assertEqual(loop_errors, [])
 
     def test_external_protocol_progress_uses_required_stage_names(self):
         adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
