@@ -80,6 +80,12 @@ class WebexAdapter(BrowserMeetingAdapter):
             'a:has-text("Use browser")',
             'button:has-text("Open in browser")',
             'a:has-text("Open in browser")',
+            'button:has-text("Join meeting")',
+            'a:has-text("Join meeting")',
+            'button:has-text("Join Meeting")',
+            'a:has-text("Join Meeting")',
+            'button:has-text("Join")',
+            'a:has-text("Join")',
             'button:has-text("Join using browser")',
             'a:has-text("Join using browser")',
             'text="Having trouble? Join from your browser"',
@@ -722,6 +728,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             adapter_config.setdefault("max_download_retry_attempts", 3)
             adapter_config.setdefault("download_retry_settle_ms", 2000)
             adapter_config.setdefault("download_retry_click_total_timeout_sec", 5.0)
+            adapter_config.setdefault("webclient_frame_ready_wait_sec", 15.0)
             adapter_config.setdefault("page_state_detection_timeout_sec", 3.0)
             adapter_config.setdefault("frame_snapshot_timeout_sec", 0.5)
         self._playwright = None
@@ -1328,12 +1335,12 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _handle_download_retry_page(self, timeout_ms=None):
         state = await self._download_retry_page_state(timeout_ms=timeout_ms)
-        if state.get("webclient_frame_detected"):
+        if state.get("webclient_frame_ready"):
             frame = state.get("webclient_frame") or {}
             self._progress("webex_webclient_frame_detected", frame)
             self._progress(
                 "webex_next_action_selected",
-                {"action": "continue_webclient_prejoin", "reason": "webclient_frame_detected"},
+                {"action": "continue_webclient_prejoin", "reason": "ready_webclient_frame"},
             )
             return {
                 **state,
@@ -1341,16 +1348,48 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "clicked": False,
                 "got_it_clicked": False,
             }
+        if (state.get("detected") or state.get("webclient_frame_exists")) and state.get("browser_join_action"):
+            self._progress(
+                "webex_next_action_selected",
+                {"action": "click_browser_join", "reason": "outer_browser_join_available"},
+            )
+            clicked = await self._click_browser_join_from_state(state, timeout_ms=timeout_ms)
+            if clicked:
+                await self._dismiss_external_protocol_prompt(stage="after_browser_join_click")
+                return {**state, "detected": True, "clicked": True, "click": clicked}
+            self._progress("browser_join_click_not_found", {"browser_join_action": state.get("browser_join_action")})
+            await self._raise_browser_join_click_not_found(state)
+        if state.get("webclient_frame_exists"):
+            self._progress(
+                "webex_next_action_selected",
+                {"action": "wait_for_webclient_frame_ready", "reason": "guest_frame_exists_but_not_ready"},
+            )
+            ready_state = await self._wait_for_webclient_frame_ready(timeout_ms=timeout_ms)
+            if ready_state.get("webclient_frame_ready"):
+                frame = ready_state.get("webclient_frame") or {}
+                self._progress("webex_webclient_frame_detected", frame)
+                self._progress(
+                    "webex_next_action_selected",
+                    {"action": "continue_webclient_prejoin", "reason": "ready_webclient_frame"},
+                )
+                return {**ready_state, "detected": True, "clicked": False, "got_it_clicked": False}
+            await self._raise_webclient_frame_not_ready(ready_state or state)
         if not state.get("detected"):
             self._progress(
                 "webex_next_action_selected",
                 {"action": "continue_prejoin", "reason": "download_retry_not_detected"},
             )
             return state
+        if not state.get("try_again_action"):
+            self._progress(
+                "webex_next_action_selected",
+                {"action": "fail_fast", "reason": "no_actionable_webex_state"},
+            )
+            await self._raise_no_actionable_webex_state(state)
         self._progress("webex_download_retry_page_detected", state)
         self._progress(
             "webex_next_action_selected",
-            {"action": "click_download_retry", "reason": "download_retry_detected"},
+            {"action": "click_try_again", "reason": "try_again_available"},
         )
         click_total_timeout = self._download_retry_click_total_timeout_sec()
         click_deadline = asyncio.get_running_loop().time() + click_total_timeout
@@ -1373,6 +1412,55 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._progress("webex_try_again_clicked", clicked)
             return {**state, "clicked": True, "got_it_clicked": got_it, "click": clicked}
         await self._raise_download_retry_try_again_not_clickable({**state, "got_it_clicked": got_it})
+
+    async def _raise_no_actionable_webex_state(self, state):
+        extra = {
+            "download_retry": state,
+            "visible_text": await self._visible_text_excerpt(),
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+            "links_buttons_debug": await self._links_buttons_debug_info(),
+        }
+        self._progress("no_actionable_webex_state", extra)
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage="no_actionable_webex_state", extra=extra)
+        )
+        raise RuntimeError(f"no_actionable_webex_state. Diagnostics: {diagnostics}")
+
+    async def _wait_for_webclient_frame_ready(self, timeout_ms=None):
+        wait_sec = self._webclient_frame_ready_wait_sec()
+        deadline = asyncio.get_running_loop().time() + wait_sec
+        last_state = {}
+        clicked_browser_join = set()
+        self._progress("webex_wait_for_webclient_frame_ready_start", {"timeout_sec": wait_sec})
+        while asyncio.get_running_loop().time() < deadline:
+            last_state = await self._download_retry_page_state(timeout_ms=timeout_ms)
+            if last_state.get("webclient_frame_ready"):
+                self._progress("webex_wait_for_webclient_frame_ready_done", {"ready": True})
+                return last_state
+            action = last_state.get("browser_join_action") or {}
+            action_key = (action.get("scope"), action.get("selector"), action.get("text"))
+            if action and action_key not in clicked_browser_join:
+                self._progress(
+                    "webex_next_action_selected",
+                    {"action": "click_browser_join", "reason": "outer_browser_join_available"},
+                )
+                clicked_browser_join.add(action_key)
+                clicked = await self._click_browser_join_from_state(last_state, timeout_ms=timeout_ms)
+                if clicked:
+                    await self._dismiss_external_protocol_prompt(stage="after_browser_join_click")
+                    last_state = await self._download_retry_page_state(timeout_ms=timeout_ms)
+                    if last_state.get("webclient_frame_ready"):
+                        return last_state
+            await asyncio.sleep(0.5)
+        self._progress("webex_wait_for_webclient_frame_ready_done", {"ready": False, "timeout_sec": wait_sec})
+        return last_state
+
+    def _webclient_frame_ready_wait_sec(self):
+        try:
+            return max(0.1, float(self.adapter_config().get("webclient_frame_ready_wait_sec", 15.0)))
+        except (TypeError, ValueError):
+            return 15.0
 
     async def _download_retry_page_state(self, timeout_ms=None):
         timeout_sec = self._page_state_detection_timeout_sec()
@@ -1397,6 +1485,12 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "visible_text": "",
                 "keyword_hits": [],
                 "classification_timeout": True,
+                "webclient_frame_exists": False,
+                "webclient_frame_ready": False,
+                "webclient_frame_detected": False,
+                "webclient_frame": None,
+                "browser_join_action": None,
+                "try_again_action": None,
             }
 
     async def _download_retry_page_state_from_snapshot(self, timeout_ms=None):
@@ -1418,6 +1512,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             hits.setdefault("download_url", "location.href")
 
         webclient_frame = self._webclient_frame_from_snapshot(snapshot)
+        browser_join_action = self._browser_join_action_from_snapshot(snapshot)
+        try_again_action = self._try_again_action_from_snapshot(snapshot)
         detected = bool(
             hits.get("download_page_indicator")
             or hits.get("installer_download_indicator")
@@ -1433,7 +1529,11 @@ class WebexAdapter(BrowserMeetingAdapter):
             "title": str(page_snapshot.get("title") or ""),
             "frame_count": len(snapshot.get("frames") or []),
             "webclient_frame_detected": bool(webclient_frame),
+            "webclient_frame_exists": bool(webclient_frame),
+            "webclient_frame_ready": bool(webclient_frame and webclient_frame.get("webclient_frame_ready")),
             "webclient_frame": webclient_frame,
+            "browser_join_action": browser_join_action,
+            "try_again_action": try_again_action,
         }
         self._progress(
             "webex_download_detection_result",
@@ -1442,6 +1542,12 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "indicators": result["indicators"],
                 "keyword_hits": result["keyword_hits"],
                 "webclient_frame_detected": result["webclient_frame_detected"],
+                "webclient_frame_exists": result["webclient_frame_exists"],
+                "webclient_frame_ready": result["webclient_frame_ready"],
+                "visible_text_input_count": (webclient_frame or {}).get("visible_text_input_count", 0),
+                "visible_button_count": (webclient_frame or {}).get("visible_button_count", 0),
+                "browser_join_action": browser_join_action,
+                "try_again_action": try_again_action,
             },
         )
         return result
@@ -1655,10 +1761,21 @@ class WebexAdapter(BrowserMeetingAdapter):
                 for item in visible_buttons
                 if isinstance(item, Mapping)
             )
+            continue_button = any(
+                self._snapshot_control_text_matches(item, ("next", "continue", "계속"))
+                for item in visible_buttons
+                if isinstance(item, Mapping)
+            )
             prejoin_text = any(
                 token in visible_text
                 for token in ("join", "next", "continue", "name", "meeting", "참여", "참가", "이름", "계속")
             )
+            prejoin_control = any(
+                self._snapshot_control_text_matches(item, ("mute", "camera", "audio", "microphone", "음소거", "카메라", "오디오"))
+                for item in visible_buttons
+                if isinstance(item, Mapping)
+            )
+            ready = bool(visible_inputs or join_button or continue_button or prejoin_control)
             score = url_score + (10 if visible_inputs else 0) + (6 if join_button else 0) + (3 if prejoin_text else 0)
             detected = url_score >= 10 or (url_score > 0 and (visible_inputs or join_button or prejoin_text))
             if not detected:
@@ -1670,7 +1787,11 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "visible_text_input_count": len(visible_inputs),
                 "visible_button_count": len(visible_buttons),
                 "join_button_detected": join_button,
+                "continue_button_detected": continue_button,
+                "prejoin_control_detected": prejoin_control,
                 "prejoin_text": prejoin_text,
+                "webclient_frame_exists": True,
+                "webclient_frame_ready": ready,
                 "score": score,
             }
             self._progress("webex_webclient_frame_candidate", candidate)
@@ -1678,9 +1799,96 @@ class WebexAdapter(BrowserMeetingAdapter):
                 best = {"index": index, "details": candidate}
         if not best:
             return None
-        if 0 <= best["index"] < len(frame_scopes):
+        if best["details"].get("webclient_frame_ready") and 0 <= best["index"] < len(frame_scopes):
             self._preferred_webex_meeting_frame = frame_scopes[best["index"]][1]
         return best["details"]
+
+    def _browser_join_action_from_snapshot(self, snapshot):
+        scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
+        best = None
+        for index, details in enumerate(scopes):
+            visible_buttons = details.get("visible_buttons_links") or []
+            if not visible_buttons:
+                continue
+            match = self._snapshot_browser_join_control_match(visible_buttons)
+            if not match:
+                continue
+            scope = details.get("scope") or ("page" if index == 0 else f"frame[{index - 1}]")
+            candidate = {
+                "scope": scope,
+                "url": str(details.get("url") or ""),
+                "visible_button_count": len(visible_buttons),
+                "selector": match.get("selector"),
+                "text": match.get("text"),
+                "score": len(visible_buttons) + match.get("score", 0),
+            }
+            self._progress("browser_join_candidate_found", candidate)
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+        return best
+
+    def _snapshot_browser_join_control_match(self, items):
+        phrases = (
+            ("join from your browser", 40),
+            ("join from browser", 40),
+            ("join from this browser", 40),
+            ("continue in browser", 38),
+            ("continue in this browser", 38),
+            ("open in browser", 36),
+            ("use web app", 34),
+            ("use browser", 34),
+            ("join meeting", 24),
+            ("join", 12),
+            ("브라우저에서 참여", 40),
+            ("브라우저에서 참가", 40),
+            ("브라우저로 참여", 36),
+            ("브라우저로 참가", 36),
+            ("브라우저에서 계속", 38),
+            ("이 브라우저에서 참여", 40),
+            ("이 브라우저에서 참가", 40),
+            ("웹에서 참여", 34),
+            ("웹에서 참가", 34),
+        )
+        best = None
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            text = " ".join(
+                str(item.get(key) or "")
+                for key in ("text", "aria_label", "placeholder", "name", "id")
+            ).strip()
+            compact = " ".join(text.split()).lower()
+            if any(forbidden in compact for forbidden in ("get ready to join", "problem joining", "join on mobile", "download")):
+                continue
+            lowered = text.lower()
+            for phrase, score in phrases:
+                phrase_lower = phrase.lower()
+                if phrase_lower in {"join", "join meeting"}:
+                    visible_label = " ".join(
+                        str(item.get(key) or "")
+                        for key in ("text", "aria_label")
+                    ).strip().lower()
+                    element_id = str(item.get("id") or "").strip().lower()
+                    if visible_label not in {phrase_lower, "join meeting", "join"} and element_id not in {"browser", "join-from-browser"}:
+                        continue
+                elif phrase_lower not in lowered:
+                    continue
+                element_id = str(item.get("id") or "")
+                selector = f"#{element_id}" if element_id else None
+                candidate = {"selector": selector, "text": text[:120], "score": score}
+                if best is None or candidate["score"] > best["score"]:
+                    best = candidate
+        return best
+
+    def _try_again_action_from_snapshot(self, snapshot):
+        scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
+        for index, details in enumerate(scopes):
+            match = self._snapshot_control_match(details.get("visible_buttons_links") or [], ("try again", "retry", "다시 시도"))
+            if not match:
+                continue
+            scope = details.get("scope") or ("page" if index == 0 else f"frame[{index - 1}]")
+            return {"scope": scope, "selector": match, "url": str(details.get("url") or "")}
+        return None
 
     def _snapshot_control_text_matches(self, item, needles):
         text = " ".join(
@@ -3211,6 +3419,88 @@ class WebexAdapter(BrowserMeetingAdapter):
             await self._dismiss_external_protocol_prompt(stage=f"after_click_{selector_group}")
         return selector
 
+    async def _click_browser_join_from_state(self, state, timeout_ms=None):
+        self._progress("browser_join_click_attempt", {"browser_join_action": state.get("browser_join_action")})
+        action = state.get("browser_join_action") or {}
+        timeout = self._download_retry_action_timeout_ms(timeout_ms)
+        scopes = self._page_locator_scopes(prefer_meeting_frame=False)
+        preferred_scope_name = action.get("scope")
+        preferred = [item for item in scopes if item[0] == preferred_scope_name]
+        ordered_scopes = preferred + [item for item in scopes if item[0] != preferred_scope_name]
+        selector_groups = (
+            "join_from_browser",
+            "join_from_this_browser",
+            "continue_in_browser",
+            "use_web_app",
+            "open_in_browser",
+        )
+        if action.get("selector"):
+            for scope_name, scope in ordered_scopes:
+                clicked = await self._click_selector_in_scope(scope_name, scope, action["selector"], timeout)
+                if clicked:
+                    self._progress("browser_join_click_success", clicked)
+                    return clicked
+        for scope_name, scope in ordered_scopes:
+            for selector_group in selector_groups:
+                for selector in self.selectors(selector_group):
+                    clicked = await self._click_selector_in_scope(scope_name, scope, selector, timeout)
+                    if clicked:
+                        clicked["selector_group"] = selector_group
+                        self._progress("browser_join_click_success", clicked)
+                        return clicked
+        self._progress("browser_join_click_not_found", {"preferred_scope": preferred_scope_name})
+        return None
+
+    async def _click_selector_in_scope(self, scope_name, scope, selector, timeout_ms):
+        try:
+            locator = scope.locator(selector).first
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+            if hasattr(locator, "is_enabled") and not await self._text_action_locator_enabled(locator, timeout=timeout_ms):
+                return None
+            try:
+                await locator.click(timeout=timeout_ms)
+            except TypeError:
+                await locator.click()
+            return {"ok": True, "selector": selector, "scope": scope_name, "method": "scoped_visible_click"}
+        except PlaywrightTimeoutError:
+            return None
+        except self._safe_playwright_errors() as exc:
+            self._last_page_metadata_error = exc
+            self._append_browser_log("browser_join_scoped_click_unavailable", repr(exc))
+            return None
+        except Exception as exc:
+            self._append_browser_log("browser_join_scoped_click_unavailable", repr(exc))
+            return None
+
+    async def _raise_browser_join_click_not_found(self, state):
+        extra = {
+            "download_retry": state,
+            "visible_text": await self._visible_text_excerpt(),
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+            "links_buttons_debug": await self._links_buttons_debug_info(),
+        }
+        self._progress("browser_join_click_timeout", extra)
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage="browser_join_click_not_found", extra=extra)
+        )
+        raise RuntimeError(f"browser_join_click_not_found. Diagnostics: {diagnostics}")
+
+    async def _raise_webclient_frame_not_ready(self, state):
+        frame = state.get("webclient_frame") or {}
+        extra = {
+            "download_retry": state,
+            "webclient_frame": frame,
+            "url": self._safe_page_url(),
+            "title": await self._safe_page_title(),
+            "visible_text": await self._visible_text_excerpt(),
+        }
+        self._progress("webex_webclient_frame_not_ready", extra)
+        diagnostics = await self._maybe_await(
+            self.collect_diagnostics(stage="webex_webclient_frame_not_ready", extra=extra)
+        )
+        raise RuntimeError(f"webex_webclient_frame_not_ready. Diagnostics: {diagnostics}")
+
     async def _click_final_join_control(self, display_name):
         if not self._is_page_available():
             raise RuntimeError("Webex page closed before final join control could be clicked")
@@ -3362,6 +3652,11 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._progress(
                 "webex_display_name_input_not_found",
                 {"reason": "no_visible_text_input", "strong_guest_frame": False},
+            )
+        if input_debug.get("visible_text_input_count", 0) == 0:
+            self._progress(
+                "webex_wait_for_display_name_input_start",
+                {"strong_guest_frame": strong_guest_frame, "timeout_ms": timeout_ms},
             )
         found = await self._find_display_name_input(timeout_ms=timeout_ms)
         if found:

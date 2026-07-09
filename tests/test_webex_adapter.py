@@ -936,12 +936,117 @@ class WebexAdapterTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+            result = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
 
         self.assertTrue(result["webclient_frame_detected"])
+        self.assertTrue(result["webclient_frame_exists"])
+        self.assertFalse(result["webclient_frame_ready"])
         self.assertEqual(result["webclient_frame"]["url"], "https://web.webex.com/guest-join-meeting")
-        self.assertIs(adapter._preferred_webex_meeting_frame, frame)
         self.assertIn("webex_webclient_frame_candidate", output.getvalue())
+
+    def test_outer_browser_join_wins_over_empty_guest_frame(self):
+        adapter = _join_test_adapter("joined", {"webclient_frame_ready_wait_sec": 0.01})
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#browser"}
+        outer.text = "Get ready to join"
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertTrue(result["clicked"])
+        self.assertIn("#browser", outer.clicks)
+        self.assertIn('"action": "click_browser_join"', output.getvalue())
+        self.assertNotIn('"action": "continue_webclient_prejoin"', output.getvalue())
+
+    def test_ready_guest_frame_selects_prejoin_and_fills_display_name(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = {'input[type="text"]'}
+        frame.text_inputs = ['input[type="text"]']
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            state = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+            filled = asyncio.run(adapter._fill_display_name_if_needed("bot-ready", timeout_ms=5))
+
+        self.assertTrue(state["webclient_frame_ready"])
+        self.assertFalse(state["clicked"])
+        self.assertTrue(filled["success"])
+        self.assertIn(('input[type="text"]', "bot-ready"), frame.fills)
+        self.assertIn('"reason": "ready_webclient_frame"', output.getvalue())
+
+    def test_empty_guest_frame_fails_fast_not_overall_timeout(self):
+        adapter = _join_test_adapter("joined", {"webclient_frame_ready_wait_sec": 0.01})
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        outer.text = ""
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError, "webex_webclient_frame_not_ready"):
+                asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_webclient_frame_not_ready")
+        self.assertIn("webex_webclient_frame_not_ready", output.getvalue())
+
+    def test_browser_join_candidate_timeout_has_no_unhandled_future_exception(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#browser"}
+        outer.text = "Get ready to join"
+        outer.timeout_selectors.add("#browser")
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+
+        async def run_click():
+            loop = asyncio.get_running_loop()
+            unhandled = []
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            state = await adapter._download_retry_page_state(timeout_ms=1)
+            with self.assertRaisesRegex(RuntimeError, "browser_join_click_not_found"):
+                await adapter._click_browser_join_from_state(state, timeout_ms=1) or await adapter._raise_browser_join_click_not_found(state)
+            await asyncio.sleep(0)
+            return unhandled
+
+        self.assertEqual(asyncio.run(run_click()), [])
+
+    def test_visible_button_scope_wins_over_url_only_frame_score(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = set()
+        frame0 = FakeWebexFrame("joined", url="https://example.webex.com/meeting/download/outer")
+        frame0.visible = {"#browser", "#got-it", "#continue"}
+        frame0.selector_texts["#browser"] = "Join from browser"
+        frame0.text = "Get ready to join"
+        frame2 = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame2.visible = set()
+        frame2.text_inputs = []
+        outer.frames = [outer, frame0, FakeWebexFrame("joined", url="https://example.webex.com/blank"), frame2]
+
+        state = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
+
+        self.assertFalse(state["webclient_frame_ready"])
+        self.assertEqual(state["browser_join_action"]["scope"], "frame[1]")
+        self.assertEqual(state["browser_join_action"]["selector"], "#browser")
 
     def test_guest_join_text_snapshot_timeout_still_probes_frame_input(self):
         adapter = _join_test_adapter("joined", {"frame_snapshot_timeout_sec": 0.001})
@@ -1417,8 +1522,8 @@ class WebexAdapterTests(unittest.TestCase):
                 },
             },
         )
-        adapter.page.visible = {"#download-indicator", "#problem"}
-        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
+        adapter.page.visible = {"#download-indicator", "#problem", "#try-again"}
+        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser? Try again"
 
         async def slow_try_again(timeout_ms=None):
             await asyncio.sleep(1)
@@ -1450,12 +1555,12 @@ class WebexAdapterTests(unittest.TestCase):
         adapter.page.visible = {"#download-indicator", "#problem"}
         adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
 
-        with self.assertRaisesRegex(RuntimeError, "Try again was not clickable"):
+        with self.assertRaisesRegex(RuntimeError, "no_actionable_webex_state"):
             asyncio.run(adapter._run_prejoin_transition_loop("bot"))
 
-        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
+        self.assertEqual(adapter.diagnostic_stages[-1], "no_actionable_webex_state")
         self.assertIn("links_buttons_debug", adapter.diagnostic_extras[-1])
-        self.assertIn("download_retry_keyword_hits", adapter.diagnostic_extras[-1])
+        self.assertIn("download_retry", adapter.diagnostic_extras[-1])
 
     def test_webex_download_retry_try_again_failure_raises_specific_stage(self):
         adapter = _join_test_adapter(
@@ -1472,10 +1577,10 @@ class WebexAdapterTests(unittest.TestCase):
         adapter.page.visible = {"#download-indicator", "#problem"}
         adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
 
-        with self.assertRaisesRegex(RuntimeError, "Try again was not clickable"):
+        with self.assertRaisesRegex(RuntimeError, "no_actionable_webex_state"):
             asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
 
-        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
+        self.assertEqual(adapter.diagnostic_stages[-1], "no_actionable_webex_state")
 
     def test_optional_display_name_selector_timeout_is_caught(self):
         adapter = _join_test_adapter(
@@ -2410,6 +2515,7 @@ def _join_test_adapter(join_result, extra_config=None):
             "post_join_media_check_timeout_sec",
             "skip_device_selection",
             "strict_post_join_media_state",
+            "webclient_frame_ready_wait_sec",
         }
     }
     config["adapter_config"].update(adapter_config_updates)
