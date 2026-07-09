@@ -3953,11 +3953,35 @@ class WebexAdapter(BrowserMeetingAdapter):
         return selector
 
     async def _click_browser_join_from_state(self, state, timeout_ms=None):
-        self._progress("browser_join_click_attempt", {"browser_join_action": state.get("browser_join_action")})
         action = state.get("browser_join_action") or {}
         timeout = self._download_retry_action_timeout_ms(timeout_ms)
+        total_timeout = self._browser_join_click_total_timeout_sec()
         scopes = self._page_locator_scopes(prefer_meeting_frame=False)
         preferred_scope_name = action.get("scope")
+        attempt = {
+            "selector": action.get("selector"),
+            "scope": preferred_scope_name,
+            "text": action.get("text"),
+            "method": "candidate",
+            "timeout_sec": total_timeout,
+        }
+        self._progress("browser_join_click_attempt", attempt)
+        if action.get("selector"):
+            try:
+                clicked = await asyncio.wait_for(
+                    self._click_browser_join_candidate(scopes, action, timeout),
+                    timeout=total_timeout,
+                )
+            except asyncio.TimeoutError:
+                self._progress("browser_join_click_timeout", attempt)
+                return None
+            if clicked:
+                self._browser_join_clicked_once = True
+                self._progress("browser_join_click_success", clicked)
+                return clicked
+            self._progress("browser_join_click_failed", attempt)
+            return None
+
         preferred = [item for item in scopes if item[0] == preferred_scope_name]
         ordered_scopes = preferred + [item for item in scopes if item[0] != preferred_scope_name]
         selector_groups = (
@@ -3967,23 +3991,167 @@ class WebexAdapter(BrowserMeetingAdapter):
             "use_web_app",
             "open_in_browser",
         )
-        if action.get("selector"):
+        deadline = asyncio.get_running_loop().time() + total_timeout
+        try:
             for scope_name, scope in ordered_scopes:
-                clicked = await self._click_selector_in_scope(scope_name, scope, action["selector"], timeout)
-                if clicked:
-                    self._browser_join_clicked_once = True
-                    self._progress("browser_join_click_success", clicked)
-                    return clicked
-        for scope_name, scope in ordered_scopes:
-            for selector_group in selector_groups:
-                for selector in self.selectors(selector_group):
-                    clicked = await self._click_selector_in_scope(scope_name, scope, selector, timeout)
-                    if clicked:
-                        clicked["selector_group"] = selector_group
-                        self._browser_join_clicked_once = True
-                        self._progress("browser_join_click_success", clicked)
-                        return clicked
+                for selector_group in selector_groups:
+                    for selector in self.selectors(selector_group):
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            self._progress("browser_join_click_timeout", attempt)
+                            return None
+                        clicked = await asyncio.wait_for(
+                            self._click_selector_in_scope(scope_name, scope, selector, timeout),
+                            timeout=max(0.01, remaining),
+                        )
+                        if clicked:
+                            clicked["selector_group"] = selector_group
+                            self._browser_join_clicked_once = True
+                            self._progress("browser_join_click_success", clicked)
+                            return clicked
+        except asyncio.TimeoutError:
+            self._progress("browser_join_click_timeout", attempt)
+            return None
         self._progress("browser_join_click_not_found", {"preferred_scope": preferred_scope_name})
+        return None
+
+    def _browser_join_click_total_timeout_sec(self):
+        try:
+            return max(
+                0.01,
+                float(
+                    self.adapter_config().get(
+                        "browser_join_click_total_timeout_sec",
+                        self.adapter_config().get("download_retry_click_total_timeout_sec", 5.0),
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            return 5.0
+
+    async def _click_browser_join_candidate(self, scopes, action, timeout_ms):
+        selector = action.get("selector")
+        scope_name = action.get("scope")
+        scope = next((candidate_scope for candidate_name, candidate_scope in scopes if candidate_name == scope_name), None)
+        if scope is None:
+            self._progress(
+                "browser_join_click_failed",
+                {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": "scope_lookup", "reason": "scope_not_found"},
+            )
+            return None
+
+        clicked = await self._js_click_browser_join_candidate(scope_name, scope, selector, action.get("text"), timeout_ms)
+        if clicked:
+            return clicked
+
+        methods = (
+            ("playwright_locator_click", {"timeout": timeout_ms}),
+            ("playwright_force_click", {"timeout": timeout_ms, "force": True}),
+        )
+        locator = scope.locator(selector).first
+        for method, kwargs in methods:
+            try:
+                await locator.click(**kwargs)
+                return {"ok": True, "selector": selector, "scope": scope_name, "text": action.get("text"), "method": method}
+            except PlaywrightTimeoutError as exc:
+                self._progress(
+                    "browser_join_click_failed",
+                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "timeout", "error": repr(exc)},
+                )
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
+                self._progress(
+                    "browser_join_click_failed",
+                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "playwright_error", "error": repr(exc)},
+                )
+            except Exception as exc:
+                self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
+                self._progress(
+                    "browser_join_click_failed",
+                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "error", "error": repr(exc)},
+                )
+
+        try:
+            box = await asyncio.wait_for(self._maybe_await(locator.bounding_box()), timeout=timeout_ms / 1000)
+            if box:
+                x = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
+                y = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
+                mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
+                if mouse and hasattr(mouse, "click"):
+                    await asyncio.wait_for(self._maybe_await(mouse.click(x, y)), timeout=timeout_ms / 1000)
+                    return {"ok": True, "selector": selector, "scope": scope_name, "text": action.get("text"), "method": "coordinate_click", "x": x, "y": y}
+        except Exception as exc:
+            self._append_browser_log("browser_join_candidate_coordinate_click_unavailable", repr(exc))
+        self._progress(
+            "browser_join_click_failed",
+            {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": "coordinate_click", "reason": "no_clickable_box"},
+        )
+        return None
+
+    async def _js_click_browser_join_candidate(self, scope_name, scope, selector, text, timeout_ms):
+        script = r"""
+        (selector) => {
+          const visible = (el) => {
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          };
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const target = document.querySelector(selector);
+          if (!target) return {ok: false, method: "js_candidate_click", reason: "selector_not_found"};
+          const clickables = Array.from(target.querySelectorAll("button, a, [role='button'], [role='link'], [tabindex], mdc-button"));
+          const ancestors = [];
+          let node = target;
+          while (node && node !== document.body && ancestors.length < 8) {
+            ancestors.push(node);
+            node = node.parentElement;
+          }
+          const candidates = [target, ...clickables, ...ancestors].filter((el, index, all) => el && all.indexOf(el) === index);
+          const clickable = candidates.find(visible);
+          if (!clickable) return {ok: false, method: "js_candidate_click", reason: "not_visible"};
+          clickable.scrollIntoView({block: "center", inline: "center"});
+          clickable.click();
+          const rect = clickable.getBoundingClientRect();
+          return {
+            ok: true,
+            method: "js_candidate_click",
+            selector,
+            clicked_tag: clickable.tagName || "",
+            clicked_text: norm(clickable.innerText || clickable.textContent || clickable.getAttribute("aria-label") || "").slice(0, 160),
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2
+          };
+        }
+        """
+        try:
+            result = await asyncio.wait_for(self._maybe_await(scope.evaluate(script, selector)), timeout=timeout_ms / 1000)
+        except asyncio.TimeoutError as exc:
+            self._progress(
+                "browser_join_click_failed",
+                {"selector": selector, "scope": scope_name, "text": text, "method": "js_candidate_click", "reason": "timeout", "error": repr(exc)},
+            )
+            return None
+        except Exception as exc:
+            self._append_browser_log("browser_join_candidate_js_click_unavailable", repr(exc))
+            self._progress(
+                "browser_join_click_failed",
+                {"selector": selector, "scope": scope_name, "text": text, "method": "js_candidate_click", "reason": "error", "error": repr(exc)},
+            )
+            return None
+        if isinstance(result, Mapping) and result.get("ok"):
+            return {**result, "selector": selector, "scope": scope_name, "text": text, "method": result.get("method") or "js_candidate_click"}
+        self._progress(
+            "browser_join_click_failed",
+            {
+                "selector": selector,
+                "scope": scope_name,
+                "text": text,
+                "method": "js_candidate_click",
+                "reason": (result or {}).get("reason") if isinstance(result, Mapping) else "not_clicked",
+            },
+        )
         return None
 
     async def _click_selector_in_scope(self, scope_name, scope, selector, timeout_ms):
