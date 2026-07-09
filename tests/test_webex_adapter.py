@@ -939,6 +939,76 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertLess(adapter.page.clicks.index("#got-it"), adapter.page.clicks.index("#try-again"))
 
+    def test_webex_download_retry_missing_got_it_is_skipped_and_try_again_attempted(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "download_retry_settle_sec": 0,
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "try_again_button": "#try-again",
+                    "try_again_browser_join": "#try-again",
+                },
+            },
+        )
+        adapter.page.visible = {"#download-indicator", "#try-again"}
+        adapter.page.text = "Get ready to join Open Webex Installer.dmg after it downloads Try again"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertTrue(result["clicked"])
+        self.assertFalse(result["got_it_clicked"])
+        self.assertIn("#try-again", adapter.page.clicks)
+        self.assertIn("webex_got_it_click_skipped", output.getvalue())
+        self.assertIn("webex_try_again_click_attempt", output.getvalue())
+
+    def test_webex_download_retry_korean_confirm_timeout_is_caught_without_future_leak(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "download_retry_settle_sec": 0,
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "try_again_button": "#try-again",
+                    "try_again_browser_join": "#try-again",
+                },
+            },
+        )
+        adapter.page.visible = {"#download-indicator", "#try-again"}
+        adapter.page.text = "Get ready to join Open Webex Installer.dmg after it downloads 확인 Try again"
+        adapter.page.timeout_selectors.add("text=확인")
+
+        with patch("asyncio.create_task") as create_task:
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertTrue(result["clicked"])
+        self.assertFalse(result["got_it_clicked"])
+        self.assertIn("#try-again", adapter.page.clicks)
+        self.assertIn("text=확인", adapter.page.waits)
+        self.assertNotIn('button:has-text("확인")', adapter.page.waits)
+        create_task.assert_not_called()
+
+    def test_webex_download_retry_try_again_is_attempted_after_got_it_skip(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "try_again_browser_join": "#try-again",
+                },
+            },
+        )
+        adapter.page.visible = {"#download-indicator", "#try-again"}
+        adapter.page.text = "Open Webex Installer.dmg after it downloads Try again"
+
+        asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        got_it_waits = [selector for selector in adapter.page.waits if "Got it" in selector or "확인" in selector]
+        self.assertTrue(got_it_waits)
+        self.assertIn("#try-again", adapter.page.clicks)
+
     def test_webex_download_retry_clicks_try_again_as_div_or_span(self):
         adapter = _join_test_adapter("joined")
         adapter.page.visible = {'div:has-text("Try again")'}
@@ -962,12 +1032,12 @@ class WebexAdapterTests(unittest.TestCase):
 
     def test_webex_download_retry_clicks_got_it_as_plain_span(self):
         adapter = _join_test_adapter("joined")
-        adapter.page.visible = {'span:has-text("Got it")'}
+        adapter.page.text = "Got it"
 
         result = asyncio.run(adapter._click_got_it_button(timeout_ms=1))
 
-        self.assertEqual(result["selector"], 'span:has-text("Got it")')
-        self.assertIn('span:has-text("Got it")', adapter.page.clicks)
+        self.assertEqual(result["selector"], 'get_by_text("Got it", exact=True)')
+        self.assertIn("text=Got it", adapter.page.clicks)
 
     def test_webex_download_retry_js_text_fallback_clicks_shadow_candidate(self):
         adapter = _join_test_adapter("joined")
@@ -1080,6 +1150,26 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
         self.assertIn("links_buttons_debug", adapter.diagnostic_extras[-1])
         self.assertIn("download_retry_keyword_hits", adapter.diagnostic_extras[-1])
+
+    def test_webex_download_retry_try_again_failure_raises_specific_stage(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "problem_joining_from_browser": "#problem",
+                    "try_again_browser_join": "#missing-try-again",
+                    "try_again_button": "#missing-try-again",
+                }
+            },
+        )
+        adapter.page.visible = {"#download-indicator", "#problem"}
+        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
+
+        with self.assertRaisesRegex(RuntimeError, "Try again was not clickable"):
+            asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
 
     def test_optional_display_name_selector_timeout_is_caught(self):
         adapter = _join_test_adapter(
@@ -1497,6 +1587,9 @@ class FakeWebexLocator:
         return 1
 
     async def wait_for(self, state="visible", timeout=0):
+        self.page.waits.append(self.selector)
+        if self.selector in self.page.timeout_selectors:
+            raise PlaywrightTimeoutError(f"Timeout waiting for {self.selector} to be visible")
         if self.selector in self.page.visible or self.page.selector_text_visible(self.selector):
             return None
         raise PlaywrightTimeoutError(f"{self.selector} is not visible")
@@ -1610,6 +1703,8 @@ class FakeWebexPage:
         self.visible = {"#join"}
         self.disabled = set()
         self.clicks = []
+        self.waits = []
+        self.timeout_selectors = set()
         self.fills = []
         self.values = {}
         self.input_value_calls = []

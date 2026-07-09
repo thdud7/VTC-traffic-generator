@@ -1365,6 +1365,7 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _click_try_again_browser_join(self, timeout_ms=None):
         self._progress("webex_try_again_click_attempt")
+        timeout = self._download_retry_action_timeout_ms(timeout_ms)
         return await self._click_text_action(
             ["Try again", "Retry", "다시 시도"],
             forbidden_texts=self._download_retry_forbidden_texts(),
@@ -1373,24 +1374,63 @@ class WebexAdapter(BrowserMeetingAdapter):
             frames=True,
             allow_js_fallback=True,
             allow_coordinate_fallback=True,
-            timeout_ms=timeout_ms,
+            timeout_ms=timeout,
         )
 
     async def _click_got_it_button(self, timeout_ms=None):
         self._progress("webex_got_it_click_attempt")
-        clicked = await self._click_text_action(
-            ["Got it", "확인", "알겠습니다"],
-            forbidden_texts=self._download_retry_forbidden_texts(),
-            stage="webex_got_it",
-            exact=True,
-            frames=True,
-            allow_js_fallback=True,
-            allow_coordinate_fallback=True,
-            timeout_ms=timeout_ms,
-        )
+        clicked = await self._safe_optional_got_it_click(timeout_ms=timeout_ms)
         if clicked:
             self._progress("webex_got_it_clicked", clicked)
+        else:
+            self._progress("webex_got_it_click_skipped")
         return clicked
+
+    def _download_retry_action_timeout_ms(self, timeout_ms=None):
+        configured = self.timeout_ms("download_retry_action_timeout_ms", 500)
+        values = [configured]
+        if timeout_ms is not None:
+            values.append(timeout_ms)
+        return max(1, min(500, *[int(value) for value in values if value is not None]))
+
+    async def _safe_optional_got_it_click(self, timeout_ms=None):
+        if not self._is_page_available():
+            return False
+        timeout = self._download_retry_action_timeout_ms(timeout_ms)
+        texts = ["Got it", "확인", "알겠습니다"]
+        for text in texts:
+            regex = re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
+            candidates = [
+                (f"role=button[name=/{re.escape(text)}/i]", lambda scope, regex=regex: scope.get_by_role("button", name=regex)),
+                (f"role=link[name=/{re.escape(text)}/i]", lambda scope, regex=regex: scope.get_by_role("link", name=regex)),
+                (f'get_by_text("{text}", exact=True)', lambda scope, text=text: scope.get_by_text(text, exact=True)),
+                (f"text={text}", lambda scope, text=text: scope.locator(f"text={text}")),
+            ]
+            for selector, locator_factory in candidates:
+                for scope_name, scope in self._text_action_scopes(frames=True):
+                    try:
+                        locator = locator_factory(scope).first
+                        await locator.wait_for(state="visible", timeout=timeout)
+                        if not await self._text_action_locator_enabled(locator, timeout=timeout):
+                            continue
+                        await locator.click()
+                        return {
+                            "ok": True,
+                            "method": "optional_locator_text_click",
+                            "text": text,
+                            "selector": selector,
+                            "scope": scope_name,
+                        }
+                    except PlaywrightTimeoutError:
+                        continue
+                    except self._safe_playwright_errors() as exc:
+                        self._last_page_metadata_error = exc
+                        self._append_browser_log("webex_got_it_optional_click_unavailable", repr(exc))
+                        continue
+                    except Exception as exc:
+                        self._append_browser_log("webex_got_it_optional_click_unavailable", repr(exc))
+                        continue
+        return False
 
     async def _raise_download_retry_try_again_not_clickable(self, state):
         text = await self._visible_text_excerpt()
