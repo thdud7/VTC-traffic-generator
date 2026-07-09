@@ -964,6 +964,48 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertIn("webex_got_it_click_skipped", output.getvalue())
         self.assertIn("webex_try_again_click_attempt", output.getvalue())
 
+    def test_webex_download_retry_skips_hidden_try_again_when_webclient_frame_loaded(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "download_retry_settle_sec": 0,
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "problem_joining_from_browser": "#problem",
+                    "try_again_browser_join": "#hidden-try-again",
+                    "join_button": "#join",
+                    "display_name": "#name",
+                },
+            },
+        )
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#download-indicator"}
+        outer.text = "Get ready to join Open Webex Installer.dmg after it downloads"
+        outer.html = """
+            <div role="dialog" aria-label="Problem joining from browser?" style="display: none;">
+              <button id="got-it">Got it</button>
+              <button id="fallBkJoinByBrowser"><span>Try again</span></button>
+            </div>
+        """
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/meeting", name="unified-webclient-iframe")
+        frame.visible = {"#name", "#join"}
+        frame.text = "Name Join meeting"
+        frame.enable_join_on_name_fill = True
+        outer.frames = [outer, FakeWebexFrame("joined", url="https://example.webex.com/blank"), frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+            filled = asyncio.run(adapter._fill_display_name_if_needed("bot-aws-4", timeout_ms=1))
+
+        self.assertTrue(result["webclient_frame_detected"])
+        self.assertTrue(filled["success"])
+        self.assertIn(("#name", "bot-aws-4"), frame.fills)
+        self.assertNotIn("#hidden-try-again", outer.clicks)
+        self.assertEqual(adapter.diagnostic_stages, [])
+        self.assertIn("webex_webclient_frame_detected", output.getvalue())
+
     def test_webex_download_retry_korean_confirm_timeout_is_caught_without_future_leak(self):
         adapter = _join_test_adapter(
             "joined",
@@ -1054,6 +1096,23 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["method"], "js_text_click")
         self.assertTrue(result["shadow"])
+        self.assertLessEqual(len(adapter.page.waits), 1)
+
+    def test_webex_download_retry_try_again_uses_js_before_locator_scanning(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {'button:has-text("Try again")'}
+        adapter.page.js_text_action_result = {
+            "ok": True,
+            "method": "js_text_click",
+            "text": "Try again",
+            "selector": "js_text_action",
+            "tag": "BUTTON",
+        }
+
+        result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertEqual(result["method"], "js_text_click")
+        self.assertEqual(adapter.page.waits, [])
 
     def test_webex_download_retry_coordinate_fallback_only_for_allowed_texts(self):
         adapter = _join_test_adapter("joined")
@@ -1126,6 +1185,62 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertEqual(result["selector"], 'button:has-text("Try again")')
         self.assertNotIn('button:has-text("Download Webex")', adapter.page.clicks)
         self.assertNotIn('button:has-text("Join on mobile")', adapter.page.clicks)
+
+    def test_webex_download_retry_try_again_not_rejected_by_broad_body_forbidden_text(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {'button:has-text("Try again")'}
+        adapter.page.text = (
+            "Get ready to join Open Webex Installer.dmg after it downloads "
+            "Try again Join on mobile Download Webex"
+        )
+        adapter.page.container_texts['button:has-text("Try again")'] = "Try again"
+        details = {
+            "candidate_text": "Try again",
+            "clickable_target_text": "Try again",
+            "broad_context_text": adapter.page.text,
+            "container_text": adapter.page.text,
+        }
+
+        self.assertIsNone(
+            adapter._text_action_rejected_reason(
+                details,
+                ["Try again", "Retry", "다시 시도"],
+                adapter._download_retry_forbidden_texts(),
+                exact=True,
+            )
+        )
+
+        result = asyncio.run(adapter._click_try_again_browser_join(timeout_ms=1))
+
+        self.assertEqual(result["text"], "Try again")
+        self.assertTrue(any("Try again" in str(click) for click in adapter.page.clicks))
+
+    def test_webex_download_retry_slow_try_again_raises_specific_diagnostic_fast(self):
+        adapter = _join_test_adapter(
+            "joined",
+            {
+                "download_retry_click_total_timeout_sec": 0.01,
+                "selectors": {
+                    "download_page_indicator": "#download-indicator",
+                    "problem_joining_from_browser": "#problem",
+                },
+            },
+        )
+        adapter.page.visible = {"#download-indicator", "#problem"}
+        adapter.page.text = "Open Webex Installer.dmg after it downloads. Problem joining from browser?"
+
+        async def slow_try_again(timeout_ms=None):
+            await asyncio.sleep(1)
+            return None
+
+        adapter._click_try_again_browser_join = slow_try_again
+
+        with self.assertRaisesRegex(RuntimeError, "Try again was not clickable"):
+            asyncio.run(adapter._handle_download_retry_page(timeout_ms=1))
+
+        self.assertEqual(adapter.diagnostic_stages[-1], "webex_download_retry_try_again_not_clickable")
+        self.assertTrue(adapter.diagnostic_extras[-1]["download_retry"]["click_timeout"])
+        self.assertEqual(adapter.diagnostic_extras[-1]["download_retry"]["click_total_timeout_sec"], 0.01)
 
     def test_webex_download_retry_click_failure_uses_specific_diagnostic_stage(self):
         adapter = _join_test_adapter(
@@ -1636,6 +1751,8 @@ class FakeWebexLocator:
             text = self.page.text_for_selector(self.selector)
             return {
                 "candidate_text": text,
+                "clickable_target_text": self.page.clickable_target_texts.get(self.selector, text),
+                "broad_context_text": self.page.broad_context_texts.get(self.selector, self.page.text),
                 "container_text": self.page.container_texts.get(self.selector, text),
                 "tag": self.page.tags.get(self.selector, "SPAN"),
                 "role": self.page.roles.get(self.selector, ""),
@@ -1731,6 +1848,8 @@ class FakeWebexPage:
         self.text_roles = {}
         self.selector_texts = {}
         self.container_texts = {}
+        self.clickable_target_texts = {}
+        self.broad_context_texts = {}
         self.tags = {}
         self.roles = {}
         self.hrefs = {}
@@ -1738,6 +1857,7 @@ class FakeWebexPage:
         self.tabindexes = {}
         self.rects = {}
         self.mouse = FakeMouse(self)
+        self.frames = []
 
     async def goto(self, url, wait_until=None, timeout=None):
         self.url = url
@@ -1832,6 +1952,17 @@ class FakeWebexPage:
             if marker in selector:
                 return marker
         return ""
+
+
+class FakeWebexFrame(FakeWebexPage):
+    def __init__(self, join_result, url="https://web.webex.com/meeting", name=""):
+        super().__init__(join_result)
+        self.url = url
+        self._name = name
+        self.frames = []
+
+    def name(self):
+        return self._name
 
 
 class FakeMouse:
@@ -2007,6 +2138,7 @@ def _join_test_adapter(join_result, extra_config=None):
             "allow_lobby_media_ready",
             "download_retry_settle_ms",
             "download_retry_settle_sec",
+            "download_retry_click_total_timeout_sec",
             "fail_on_post_join_media_unverified",
             "max_download_retry_attempts",
             "retry_navigation_on_page_closed",

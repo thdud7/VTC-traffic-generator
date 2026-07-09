@@ -717,6 +717,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             adapter_config.setdefault("max_navigation_retries", 1)
             adapter_config.setdefault("max_download_retry_attempts", 3)
             adapter_config.setdefault("download_retry_settle_ms", 2000)
+            adapter_config.setdefault("download_retry_click_total_timeout_sec", 5.0)
         self._playwright = None
         self.browser = None
         self.context = None
@@ -732,6 +733,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         self.external_protocol_profile_path = None
         self._last_page_metadata_error = None
         self._last_display_name_fill_method = None
+        self._preferred_webex_meeting_frame = None
 
     def _progress(self, stage, details=None):
         payload = {"stage": stage, **dict(details or {})}
@@ -1184,13 +1186,19 @@ class WebexAdapter(BrowserMeetingAdapter):
             progressed = False
             download_retry_result = await self._handle_download_retry_page(timeout_ms=timeout)
             if download_retry_result.get("detected"):
-                download_retry_attempts += 1
+                if download_retry_result.get("webclient_frame_detected"):
+                    progressed = True
+                else:
+                    download_retry_attempts += 1
                 if download_retry_result.get("clicked"):
                     await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
                     await asyncio.sleep(self._download_retry_settle_sec())
                     if await self._browser_join_after_retry_seen(timeout_ms=timeout):
                         self._progress("webex_browser_join_after_retry_seen")
-                if download_retry_attempts >= self.timeout_ms("max_download_retry_attempts", 3):
+                if (
+                    not download_retry_result.get("webclient_frame_detected")
+                    and download_retry_attempts >= self.timeout_ms("max_download_retry_attempts", 3)
+                ):
                     still_visible = await self._download_retry_page_visible(timeout_ms=timeout)
                     if still_visible:
                         await self._raise_download_retry_page_timeout(
@@ -1315,8 +1323,33 @@ class WebexAdapter(BrowserMeetingAdapter):
         if not state.get("detected"):
             return state
         self._progress("webex_download_retry_page_detected", state)
-        got_it = await self._click_got_it_button(timeout_ms=timeout_ms)
-        clicked = await self._click_try_again_browser_join(timeout_ms=timeout_ms)
+        webclient_frame = await self._detect_loaded_webex_webclient_frame(timeout_ms=timeout_ms)
+        if webclient_frame:
+            self._progress("webex_webclient_frame_detected", webclient_frame)
+            return {
+                **state,
+                "clicked": False,
+                "got_it_clicked": False,
+                "webclient_frame_detected": True,
+                "webclient_frame": webclient_frame,
+            }
+        click_total_timeout = self._download_retry_click_total_timeout_sec()
+        click_deadline = asyncio.get_running_loop().time() + click_total_timeout
+        try:
+            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
+            got_it = await asyncio.wait_for(
+                self._click_got_it_button(timeout_ms=timeout_ms),
+                timeout=remaining,
+            )
+            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
+            clicked = await asyncio.wait_for(
+                self._click_try_again_browser_join(timeout_ms=timeout_ms),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            await self._raise_download_retry_try_again_not_clickable(
+                {**state, "click_total_timeout_sec": click_total_timeout, "click_timeout": True}
+            )
         if clicked:
             self._progress("webex_try_again_clicked", clicked)
             return {**state, "clicked": True, "got_it_clicked": got_it, "click": clicked}
@@ -1349,6 +1382,113 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _download_retry_page_visible(self, timeout_ms=None):
         return bool((await self._download_retry_page_state(timeout_ms=timeout_ms)).get("detected"))
 
+    async def _detect_loaded_webex_webclient_frame(self, timeout_ms=None):
+        if not self._is_page_available():
+            return None
+        timeout = min(self._download_retry_action_timeout_ms(timeout_ms), 100)
+        best = None
+        for scope_name, frame in self._page_locator_scopes(prefer_meeting_frame=False)[1:]:
+            if not hasattr(frame, "locator"):
+                continue
+            url = str(getattr(frame, "url", "") or "")
+            name = self._safe_frame_name(frame)
+            url_score = self._webex_meeting_frame_url_score(url, name)
+            if url_score <= 0:
+                continue
+            details = {
+                "scope": scope_name,
+                "url": url,
+                "name": name,
+                "visible_text_input_count": await self._visible_locator_count(
+                    frame,
+                    'input:not([type]), input[type="text"], input[type="search"], textarea, [role="textbox"], [contenteditable="true"]',
+                    timeout,
+                    limit=5,
+                ),
+                "visible_button_count": await self._visible_locator_count(
+                    frame,
+                    "button, [role='button'], a, [role='link']",
+                    timeout,
+                    limit=10,
+                ),
+                "prejoin_text": await self._frame_contains_prejoin_text(frame),
+            }
+            details["score"] = (
+                url_score
+                + (10 if details["visible_text_input_count"] else 0)
+                + (4 if details["visible_button_count"] else 0)
+                + (3 if details["prejoin_text"] else 0)
+            )
+            if details["visible_text_input_count"] or details["visible_button_count"] or details["prejoin_text"]:
+                if best is None or details["score"] > best["details"]["score"]:
+                    best = {"frame": frame, "details": details}
+        if not best:
+            return None
+        self._preferred_webex_meeting_frame = best["frame"]
+        return best["details"]
+
+    def _webex_meeting_frame_url_score(self, url, name=""):
+        text = f"{url} {name}".lower()
+        if "unified-webclient-iframe" in text:
+            return 8
+        if "web.webex.com/meeting" in text:
+            return 10
+        if "/meeting" in text:
+            return 5
+        return 0
+
+    def _safe_frame_name(self, frame):
+        try:
+            name = getattr(frame, "name", "")
+            return name() if callable(name) else str(name or "")
+        except Exception:
+            return ""
+
+    async def _visible_locator_count(self, scope, selector, timeout_ms, limit=10):
+        try:
+            locators = scope.locator(selector)
+            count = await self._maybe_await(locators.count()) if hasattr(locators, "count") else 1
+        except Exception:
+            return 0
+        visible = 0
+        for index in range(min(int(count or 0), int(limit))):
+            locator = locators.nth(index) if hasattr(locators, "nth") else locators.first
+            try:
+                await locator.wait_for(state="visible", timeout=timeout_ms)
+                visible += 1
+            except Exception:
+                continue
+        return visible
+
+    async def _frame_contains_prejoin_text(self, frame):
+        if not hasattr(frame, "evaluate"):
+            return False
+        try:
+            text = await self._maybe_await(
+                frame.evaluate(
+                    r"""() => String(document.body && (document.body.innerText || document.body.textContent) || '')
+                        .replace(/\s+/g, ' ')
+                        .slice(0, 2000)"""
+                )
+            )
+        except Exception:
+            return False
+        lowered = str(text or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "join",
+                "next",
+                "continue",
+                "name",
+                "meeting",
+                "참여",
+                "참가",
+                "이름",
+                "계속",
+            )
+        )
+
     async def _browser_join_after_retry_seen(self, timeout_ms=None):
         for group in (
             "join_from_browser",
@@ -1372,6 +1512,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             stage="webex_try_again",
             exact=True,
             frames=True,
+            js_first=True,
+            deadline_sec=self._download_retry_click_total_timeout_sec(),
             allow_js_fallback=True,
             allow_coordinate_fallback=True,
             timeout_ms=timeout,
@@ -1393,33 +1535,44 @@ class WebexAdapter(BrowserMeetingAdapter):
             values.append(timeout_ms)
         return max(1, min(500, *[int(value) for value in values if value is not None]))
 
+    def _download_retry_click_total_timeout_sec(self):
+        try:
+            return max(0.01, float(self.adapter_config().get("download_retry_click_total_timeout_sec", 5.0)))
+        except (TypeError, ValueError):
+            return 5.0
+
     async def _safe_optional_got_it_click(self, timeout_ms=None):
         if not self._is_page_available():
             return False
         timeout = self._download_retry_action_timeout_ms(timeout_ms)
         texts = ["Got it", "확인", "알겠습니다"]
+        clicked = await self._js_text_action_click(texts, exact=True, frames=True)
+        if clicked:
+            return clicked
         for text in texts:
-            regex = re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
-            candidates = [
-                (f"role=button[name=/{re.escape(text)}/i]", lambda scope, regex=regex: scope.get_by_role("button", name=regex)),
-                (f"role=link[name=/{re.escape(text)}/i]", lambda scope, regex=regex: scope.get_by_role("link", name=regex)),
-                (f'get_by_text("{text}", exact=True)', lambda scope, text=text: scope.get_by_text(text, exact=True)),
-                (f"text={text}", lambda scope, text=text: scope.locator(f"text={text}")),
-            ]
-            for selector, locator_factory in candidates:
-                for scope_name, scope in self._text_action_scopes(frames=True):
+            if self._deadline_expired(None):
+                return False
+            for selector, locator_factory in self._text_action_locator_factories(text, exact=True)[:4]:
+                for scope_name, scope in self._text_action_scopes(frames=True)[:2]:
                     try:
                         locator = locator_factory(scope).first
                         await locator.wait_for(state="visible", timeout=timeout)
+                        details = await self._text_action_locator_details(locator, selector, text)
+                        if self._text_action_rejected_reason(details, texts, [], exact=True):
+                            continue
                         if not await self._text_action_locator_enabled(locator, timeout=timeout):
                             continue
-                        await locator.click()
+                        try:
+                            await locator.click(timeout=timeout)
+                        except TypeError:
+                            await locator.click()
                         return {
                             "ok": True,
                             "method": "optional_locator_text_click",
                             "text": text,
                             "selector": selector,
                             "scope": scope_name,
+                            **details,
                         }
                     except PlaywrightTimeoutError:
                         continue
@@ -1466,6 +1619,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         frames=True,
         allow_js_fallback=True,
         allow_coordinate_fallback=True,
+        js_first=False,
+        deadline_sec=None,
         timeout_ms=None,
     ):
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000) if timeout_ms is None else timeout_ms
@@ -1473,10 +1628,26 @@ class WebexAdapter(BrowserMeetingAdapter):
         safe_texts = [str(text) for text in texts if str(text or "").strip()]
         if not safe_texts or not self._is_page_available():
             return None
+        deadline = None
+        if deadline_sec is not None:
+            deadline = asyncio.get_running_loop().time() + max(0.05, float(deadline_sec))
+
+        if js_first and allow_js_fallback:
+            clicked = await self._js_text_action_click(
+                safe_texts,
+                forbidden_texts=forbidden_texts,
+                exact=exact,
+                frames=frames,
+            )
+            if clicked:
+                self._progress(f"{stage or 'text_action'}_clicked", clicked)
+                return clicked
 
         for text in safe_texts:
             for selector, locator_factory in self._text_action_locator_factories(text, exact=exact):
                 for scope_name, scope in self._text_action_scopes(frames=frames):
+                    if self._deadline_expired(deadline):
+                        return None
                     try:
                         locator = locator_factory(scope).first
                         await locator.wait_for(state="visible", timeout=timeout)
@@ -1494,12 +1665,12 @@ class WebexAdapter(BrowserMeetingAdapter):
                             **details,
                         }
                         try:
-                            await locator.click()
+                            await locator.click(timeout=timeout)
                         except TypeError:
                             await locator.click(force=True)
                             result["method"] = "locator_force_text_click"
                         except self._safe_playwright_errors():
-                            await locator.click(force=True)
+                            await locator.click(force=True, timeout=timeout)
                             result["method"] = "locator_force_text_click"
                         self._progress(f"{stage or 'text_action'}_clicked", result)
                         return result
@@ -1513,7 +1684,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                         self._append_browser_log("text_action_locator_unavailable", repr(exc))
                         continue
 
-        if allow_js_fallback:
+        if allow_js_fallback and not js_first and not self._deadline_expired(deadline):
             clicked = await self._js_text_action_click(
                 safe_texts,
                 forbidden_texts=forbidden_texts,
@@ -1524,7 +1695,11 @@ class WebexAdapter(BrowserMeetingAdapter):
                 self._progress(f"{stage or 'text_action'}_clicked", clicked)
                 return clicked
 
-        if allow_coordinate_fallback and self._coordinate_text_fallback_allowed(safe_texts):
+        if (
+            allow_coordinate_fallback
+            and self._coordinate_text_fallback_allowed(safe_texts)
+            and not self._deadline_expired(deadline)
+        ):
             clicked = await self._coordinate_text_action_click(
                 safe_texts,
                 forbidden_texts=forbidden_texts,
@@ -1536,6 +1711,9 @@ class WebexAdapter(BrowserMeetingAdapter):
                 self._progress(f"{stage or 'text_action'}_clicked", clicked)
                 return clicked
         return None
+
+    def _deadline_expired(self, deadline):
+        return deadline is not None and asyncio.get_running_loop().time() >= deadline
 
     def _text_action_scopes(self, frames=True):
         scopes = self._page_locator_scopes()
@@ -1571,6 +1749,8 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _text_action_locator_details(self, locator, selector, desired_text):
         details = {
             "candidate_text": self._selector_text_hint(selector) or desired_text,
+            "clickable_target_text": "",
+            "broad_context_text": "",
             "tag": "",
             "role": "",
             "href": "",
@@ -1584,11 +1764,14 @@ class WebexAdapter(BrowserMeetingAdapter):
             (el) => {
               const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
               const text = norm(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
-              const container = el.closest("button, a, [role='button'], [role='link'], [onclick], [tabindex], main, section, article, body") || el;
+              const target = el.closest("button, a, [role='button'], [role='link'], [onclick], [tabindex]") || el;
+              const context = el.closest("main, section, article, body") || el;
               const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
               return {
                 candidate_text: text,
-                container_text: norm(container.innerText || container.textContent || container.getAttribute("aria-label") || ""),
+                clickable_target_text: norm(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
+                broad_context_text: norm(context.innerText || context.textContent || context.getAttribute("aria-label") || ""),
+                container_text: norm(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
                 tag: el.tagName || "",
                 role: el.getAttribute("role") || "",
                 href: el.getAttribute("href") || "",
@@ -1623,7 +1806,9 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     def _text_action_rejected_reason(self, details, desired_texts, forbidden_texts, exact=True):
         text = " ".join(str(details.get("candidate_text") or "").split())
-        container = " ".join(str(details.get("container_text") or "").split())
+        target = " ".join(
+            str(details.get("clickable_target_text") or details.get("container_text") or "").split()
+        )
         if not text:
             return "empty_text"
         if exact and not any(text.lower() == desired.lower() for desired in desired_texts):
@@ -1632,7 +1817,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             return "desired_text_missing"
         for forbidden in forbidden_texts:
             forbidden_lower = str(forbidden).lower()
-            if forbidden_lower and (forbidden_lower in text.lower() or forbidden_lower in container.lower()):
+            if forbidden_lower and (forbidden_lower in text.lower() or forbidden_lower in target.lower()):
                 return f"forbidden_text:{forbidden}"
         return None
 
@@ -1785,12 +1970,14 @@ class WebexAdapter(BrowserMeetingAdapter):
             if (!text || !desiredMatch(text)) continue;
             const target = clickableParent(el);
             const targetText = norm(target.innerText || target.textContent || target.getAttribute("aria-label") || text);
-            const combinedText = `${{text}} ${{targetText}}`;
-            const forbidden = forbiddenHit(combinedText);
+            const forbidden = forbiddenHit(`${{text}} ${{targetText}}`);
             const item = {{
               ok: false,
               method: shouldClick ? "js_text_click" : "js_text_diagnostic",
               text,
+              candidate_text: text,
+              clickable_target_text: targetText,
+              broad_context_text: norm((el.closest("main, section, article, body") || el).innerText || ""),
               tag: el.tagName || "",
               role: el.getAttribute("role") || "",
               href: el.getAttribute("href") || "",
@@ -1813,7 +2000,7 @@ class WebexAdapter(BrowserMeetingAdapter):
           const selected = candidates.find((entry) => !entry.item.rejected_reason);
           if (!selected) return null;
           selected.target.click();
-          return {{...selected.item, ok: true, text: selected.item.text, tag: selected.item.target_tag || selected.item.tag, role: selected.item.target_role || selected.item.role}};
+          return {{...selected.item, ok: true, selector: "js_text_action", text: selected.item.text, tag: selected.item.target_tag || selected.item.tag, role: selected.item.target_role || selected.item.role}};
         }}
         """
 
@@ -2554,7 +2741,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             emit_event(self.config, event_name, {"selector": selector, "success": True}, self.service_name)
         return selector
 
-    def _page_locator_scopes(self):
+    def _page_locator_scopes(self, prefer_meeting_frame=True):
         if not self._is_page_available():
             return []
         scopes = [("page", self.page)]
@@ -2568,9 +2755,18 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._last_page_metadata_error = exc
             self._append_browser_log("page_frames_unavailable", repr(exc))
             return scopes
+        frame_scopes = []
         for index, frame in enumerate(frames):
             if frame is not self.page and hasattr(frame, "locator"):
-                scopes.append((f"frame[{index}]", frame))
+                frame_scopes.append((f"frame[{index}]", frame))
+        preferred = self._preferred_webex_meeting_frame if prefer_meeting_frame else None
+        if preferred is not None:
+            for item in list(frame_scopes):
+                if item[1] is preferred:
+                    frame_scopes.remove(item)
+                    scopes.append(item)
+                    break
+        scopes.extend(frame_scopes)
         return scopes
 
     async def _visible_candidates(self, selector_group, timeout_ms=None, include_locator=False):
@@ -3888,6 +4084,7 @@ return "sent_escape"
             "max_navigation_retries",
             "max_download_retry_attempts",
             "download_retry_settle_ms",
+            "download_retry_click_total_timeout_sec",
             "permissions",
             "viewport",
         }
