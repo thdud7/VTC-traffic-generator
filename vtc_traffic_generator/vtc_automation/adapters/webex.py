@@ -540,11 +540,19 @@ class WebexAdapter(BrowserMeetingAdapter):
         "waiting_for_others_indicator": [
             'text="다른 사용자가 참여할 때까지 기다리는 중"',
             'text="다른 사용자가 참여할 때까지"',
+            'text="다른 사람이 참여할 때까지 기다리는 중"',
+            'text="참여할 때까지 기다리는 중"',
             'text="기다리는 중"',
             'text="Waiting for others to join"',
             'text="Waiting for others"',
+            "text=\"You're the only one here\"",
+            'text="You are the only one here"',
+            'text="No one else is here"',
             'text=/Waiting for others to join/i',
             'text=/Waiting for others/i',
+            "text=/You're the only one here/i",
+            'text=/You are the only one here/i',
+            'text=/No one else is here/i',
         ],
         "mic_enable": [
             '[aria-label*="Unmute"]',
@@ -747,6 +755,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._last_page_metadata_error = None
         self._last_display_name_fill_method = None
         self._preferred_webex_meeting_frame = None
+        self._browser_join_clicked_once = False
+        self._empty_display_name_frame_attempts = set()
 
     def _progress(self, stage, details=None):
         payload = {"stage": stage, **dict(details or {})}
@@ -1133,24 +1143,40 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "visible_text": result.get("visible_text", ""),
                 "media_ready": media_ready,
             }
+            self._progress("webex_join_success", status)
             return status
 
         if result["status"] == "waiting_for_others":
-            self._progress("webex_waiting_for_others_detected", {"selector": result.get("selector")})
+            self._progress(
+                "webex_waiting_for_others_detected",
+                {
+                    "selector": result.get("selector"),
+                    "scope": result.get("scope"),
+                    "url": result.get("url"),
+                    "title": result.get("title"),
+                    "source": result.get("source"),
+                },
+            )
             if hasattr(self, "joined"):
                 self.joined = True
             if hasattr(self, "in_meeting"):
                 self.in_meeting = True
             emit_event(self.config, "webex_waiting_for_others_detected", result, self.service_name)
             self._notify_meeting_joined(vtc_url)
-            return {
+            status = {
                 "status": "waiting_for_others",
                 "selector": result.get("selector"),
                 "joined_selector": result.get("joined_selector"),
+                "scope": result.get("scope"),
+                "url": result.get("url"),
+                "title": result.get("title"),
+                "source": result.get("source"),
                 "leave_control_present": bool(result.get("joined_selector")),
                 "visible_text": result.get("visible_text", ""),
                 "media_ready": False,
             }
+            self._progress("webex_join_success", status)
+            return status
 
         if result["status"] == "lobby":
             self._progress("lobby_detected", {"selector": result.get("selector")})
@@ -1194,6 +1220,9 @@ class WebexAdapter(BrowserMeetingAdapter):
             iteration += 1
             self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration})
             await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
+            joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=250)
+            if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+                return joined_state
             state = await self._prejoin_state(timeout_ms=250)
             if state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
                 return state
@@ -1307,6 +1336,9 @@ class WebexAdapter(BrowserMeetingAdapter):
             await asyncio.sleep(0.2 if progressed else 0.5)
 
         await self._dismiss_external_protocol_prompt(stage="prejoin_timeout")
+        joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout)
+        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            return joined_state
         await self._fill_display_name_if_needed(display_name, timeout_ms=timeout, diagnose=True)
         result = {"status": "timeout", "selector": None, "visible_text": await self._visible_text_excerpt()}
         self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
@@ -1448,6 +1480,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 clicked_browser_join.add(action_key)
                 clicked = await self._click_browser_join_from_state(last_state, timeout_ms=timeout_ms)
                 if clicked:
+                    self._browser_join_clicked_once = True
                     await self._dismiss_external_protocol_prompt(stage="after_browser_join_click")
                     last_state = await self._download_retry_page_state(timeout_ms=timeout_ms)
                     if last_state.get("webclient_frame_ready"):
@@ -1574,6 +1607,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             return 0.5
 
     async def _page_state_snapshot(self, timeout_ms=None):
+        pages = self._known_playwright_pages()
+        self._progress("webex_context_page_scan_start", {"page_count": len(pages)})
+        for index, page in enumerate(pages):
+            self._progress(
+                "webex_context_page_scan_result",
+                {
+                    "scope": self._page_scope_name(index),
+                    "url": self._safe_scope_url(page),
+                    "available": self._is_scope_available(page),
+                },
+            )
         page_snapshot = await self._snapshot_scope(self.page, "page", timeout_sec=self._frame_snapshot_timeout_sec())
         frames = []
         frame_scopes = self._page_locator_scopes(prefer_meeting_frame=False)[1:]
@@ -1604,6 +1648,44 @@ class WebexAdapter(BrowserMeetingAdapter):
             },
         )
         return snapshot
+
+    def _known_playwright_pages(self):
+        pages = []
+        if self.page is not None:
+            pages.append(self.page)
+        context_pages = []
+        context = self.context
+        if context is not None:
+            try:
+                value = getattr(context, "pages", [])
+                context_pages = value() if callable(value) else value
+            except Exception as exc:
+                self._append_browser_log("context_pages_unavailable", repr(exc))
+                context_pages = []
+        for page in context_pages or []:
+            if page is not None and not any(page is existing for existing in pages):
+                pages.append(page)
+        return pages
+
+    def _page_scope_name(self, index):
+        return "page" if index == 0 else f"page[{index}]"
+
+    def _safe_scope_url(self, scope, default=""):
+        try:
+            return getattr(scope, "url", default) or default
+        except Exception:
+            return default
+
+    def _is_scope_available(self, scope):
+        if scope is None:
+            return False
+        try:
+            is_closed = getattr(scope, "is_closed", None)
+            if callable(is_closed):
+                return not bool(is_closed())
+        except Exception:
+            return False
+        return True
 
     async def _snapshot_scope(self, scope, scope_name, timeout_sec=0.5):
         if scope is None or not hasattr(scope, "evaluate"):
@@ -1752,6 +1834,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         for index, details in enumerate(snapshot.get("frames") or []):
             url = str(details.get("url") or "")
             name = str(details.get("name") or details.get("scope") or "")
+            url_lower = url.lower()
+            outer_download_shell = "/meeting/download" in url_lower
             url_score = self._webex_meeting_frame_url_score(url, name)
             visible_inputs = details.get("visible_inputs") or []
             visible_buttons = details.get("visible_buttons_links") or []
@@ -1775,9 +1859,9 @@ class WebexAdapter(BrowserMeetingAdapter):
                 for item in visible_buttons
                 if isinstance(item, Mapping)
             )
-            ready = bool(visible_inputs or join_button or continue_button or prejoin_control)
+            ready = bool(not outer_download_shell and (visible_inputs or join_button or continue_button or prejoin_control))
             score = url_score + (10 if visible_inputs else 0) + (6 if join_button else 0) + (3 if prejoin_text else 0)
-            detected = url_score >= 10 or (url_score > 0 and (visible_inputs or join_button or prejoin_text))
+            detected = bool(not outer_download_shell and (url_score >= 10 or (url_score > 0 and (visible_inputs or join_button or prejoin_text))))
             if not detected:
                 continue
             candidate = {
@@ -2741,7 +2825,175 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._append_browser_log("links_buttons_debug_unavailable", repr(exc))
             return []
 
+    async def _scan_joined_state_all_surfaces(self, timeout_ms=250):
+        self._progress("webex_joined_state_scan_result", {"status": "scan_start"})
+        try:
+            scan_timeout = self._page_state_detection_timeout_sec()
+            if timeout_ms is not None:
+                scan_timeout = min(scan_timeout, max(0.05, float(timeout_ms) / 1000 * 8))
+            snapshot = await asyncio.wait_for(
+                self._page_state_snapshot(timeout_ms=timeout_ms),
+                timeout=scan_timeout,
+            )
+        except asyncio.TimeoutError:
+            snapshot = {}
+            self._progress("webex_joined_state_scan_result", {"status": "scan_timeout"})
+        except Exception as exc:
+            snapshot = {}
+            self._append_browser_log("webex_joined_state_scan_failed", repr(exc))
+
+        scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
+        for details in scopes:
+            state = self._joined_state_from_snapshot_scope(details)
+            if state:
+                if state["status"] == "waiting_for_others":
+                    self._progress("webex_waiting_for_others_detected", state)
+                else:
+                    self._progress("webex_joined_state_scan_result", state)
+                return state
+
+        window_state = self._detect_webex_meeting_window_state()
+        if window_state:
+            self._progress("webex_joined_state_detected_by_window_fallback", window_state)
+            return window_state
+
+        self._progress("webex_joined_state_scan_result", {"status": "continue"})
+        return {"status": "continue", "selector": None, "visible_text": ""}
+
+    def _joined_state_from_snapshot_scope(self, details):
+        if not isinstance(details, Mapping):
+            return None
+        visible_text = str(details.get("visible_text") or "")
+        hidden_text = str(details.get("hidden_text") or "")
+        source = {
+            "source": "snapshot",
+            "scope": details.get("scope") or "page",
+            "url": str(details.get("url") or ""),
+            "title": str(details.get("title") or ""),
+            "visible_text": visible_text[:2000],
+        }
+        waiting_phrase = self._waiting_for_others_phrase(visible_text) or self._waiting_for_others_phrase(hidden_text)
+        if waiting_phrase:
+            return {
+                "status": "waiting_for_others",
+                "selector": f"text:{waiting_phrase}",
+                "joined_selector": self._media_control_selector_from_snapshot(details),
+                "matched_text": waiting_phrase,
+                **source,
+            }
+        media_selector = self._media_control_selector_from_snapshot(details)
+        if media_selector:
+            return {
+                "status": "joined",
+                "selector": media_selector,
+                "joined_selector": media_selector,
+                "action": "joined_media_controls",
+                **source,
+            }
+        lowered_title = source["title"].lower()
+        if "미팅 중" in lowered_title or re.search(r"(?<![a-z])in meeting\b", lowered_title) or "meeting in progress" in lowered_title:
+            return {
+                "status": "joined",
+                "selector": "title:joined",
+                "joined_selector": "title:joined",
+                **source,
+            }
+        return None
+
+    def _waiting_for_others_phrase(self, text):
+        normalized = " ".join(str(text or "").split())
+        lowered = normalized.lower()
+        phrases = (
+            "Waiting for others to join",
+            "Waiting for others",
+            "You're the only one here",
+            "You are the only one here",
+            "No one else is here",
+            "다른 사용자가 참여할 때까지 기다리는 중",
+            "다른 사람이 참여할 때까지 기다리는 중",
+            "참여할 때까지 기다리는 중",
+            "기다리는 중",
+        )
+        for phrase in phrases:
+            if phrase.lower() in lowered:
+                return phrase
+        return None
+
+    def _media_control_selector_from_snapshot(self, details):
+        controls = details.get("visible_buttons_links") or []
+        leave_needles = (
+            "leave meeting",
+            "leave",
+            "end meeting",
+            "나가기",
+            "미팅 나가기",
+            "회의 나가기",
+        )
+        supporting_needles = (
+            "mute",
+            "unmute",
+            "microphone",
+            "start video",
+            "stop video",
+            "camera",
+            "share content",
+            "share screen",
+            "음소거",
+            "마이크",
+            "비디오",
+            "카메라",
+            "공유",
+        )
+        fallback = None
+        for item in controls:
+            if not isinstance(item, Mapping):
+                continue
+            if self._snapshot_control_text_matches(item, leave_needles):
+                element_id = str(item.get("id") or "")
+                return f"#{element_id}" if element_id else "media_control"
+            if fallback is None and self._snapshot_control_text_matches(item, supporting_needles):
+                element_id = str(item.get("id") or "")
+                fallback = f"#{element_id}" if element_id else "media_control"
+        if fallback and any(
+            self._snapshot_control_text_matches(item, leave_needles)
+            for item in controls
+            if isinstance(item, Mapping)
+        ):
+            return fallback
+        return None
+
+    def _detect_webex_meeting_window_state(self):
+        if platform.system() != "Linux":
+            return None
+        if not shutil.which("wmctrl"):
+            return None
+        display = self._configured_display()
+        env = dict(os.environ)
+        if display:
+            env["DISPLAY"] = display
+        try:
+            result = subprocess.run(["wmctrl", "-lG"], capture_output=True, text=True, timeout=2, check=False, env=env)
+        except Exception as exc:
+            self._append_browser_log("webex_window_fallback_unavailable", repr(exc))
+            return None
+        if result.returncode != 0:
+            return None
+        for line in (result.stdout or "").splitlines():
+            lower = line.lower()
+            if "webex" not in lower and "chrome" not in lower and "chromium" not in lower:
+                continue
+            if not any(token in lower for token in ("webex", "meeting", "미팅", "회의")):
+                continue
+            details = {"status": "joined", "selector": "window_fallback", "joined_selector": "window_fallback", "window": line}
+            self._progress("webex_meeting_window_detected", details)
+            if self._browser_join_clicked_once or any(token in lower for token in ("meeting", "미팅", "회의")):
+                return details
+        return None
+
     async def _prejoin_state(self, timeout_ms=250):
+        joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout_ms)
+        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            return joined_state
         for status, group in (
             ("final_join", "final_join_fast"),
             ("final_join", "start_meeting_button"),
@@ -2875,6 +3127,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         return False
 
     async def leave(self):
+        self._progress("webex_leave_attempt")
         clicked = await self._click_optional("leave_button", "webex_leave_clicked")
         fallback_success = False
         if clicked:
@@ -2882,6 +3135,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         else:
             fallback_success = await self._fallback_action("leave")
         success = bool(clicked or fallback_success)
+        self._progress("webex_leave_done", {"success": success, "clicked": bool(clicked), "fallback_success": bool(fallback_success)})
         emit_event(self.config, "webex_left_meeting", {"success": success}, self.service_name)
         return success
 
@@ -3254,23 +3508,30 @@ class WebexAdapter(BrowserMeetingAdapter):
         return selector
 
     def _page_locator_scopes(self, prefer_meeting_frame=True):
-        if not self._is_page_available():
-            return []
-        scopes = [("page", self.page)]
-        try:
-            frames = getattr(self.page, "frames", []) or []
-        except self._safe_playwright_errors() as exc:
-            self._last_page_metadata_error = exc
-            self._append_browser_log("page_frames_unavailable", repr(exc))
-            return scopes
-        except Exception as exc:
-            self._last_page_metadata_error = exc
-            self._append_browser_log("page_frames_unavailable", repr(exc))
-            return scopes
         frame_scopes = []
-        for index, frame in enumerate(frames):
-            if frame is not self.page and hasattr(frame, "locator"):
-                frame_scopes.append((f"frame[{index}]", frame))
+        scopes = []
+        pages = self._known_playwright_pages()
+        if not pages:
+            return []
+        for page_index, page in enumerate(pages):
+            if not self._is_scope_available(page) or not hasattr(page, "locator"):
+                continue
+            page_scope = self._page_scope_name(page_index)
+            scopes.append((page_scope, page))
+            try:
+                frames = getattr(page, "frames", []) or []
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("page_frames_unavailable", repr(exc))
+                continue
+            except Exception as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("page_frames_unavailable", repr(exc))
+                continue
+            for index, frame in enumerate(frames):
+                if frame is not page and hasattr(frame, "locator"):
+                    frame_name = f"frame[{index}]" if page_index == 0 else f"{page_scope}.frame[{index}]"
+                    frame_scopes.append((frame_name, frame))
         preferred = self._preferred_webex_meeting_frame if prefer_meeting_frame else None
         if preferred is not None:
             for item in list(frame_scopes):
@@ -3415,6 +3676,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         selector = await self._click_first_visible(selector_group, timeout_ms=timeout_ms)
         if selector:
             if selector_group in {"join_from_browser", "join_from_this_browser", "continue_in_browser", "use_web_app", "open_in_browser"}:
+                self._browser_join_clicked_once = True
                 self._progress("browser_join_clicked", {"selector": selector, "selector_group": selector_group})
             await self._dismiss_external_protocol_prompt(stage=f"after_click_{selector_group}")
         return selector
@@ -3438,6 +3700,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             for scope_name, scope in ordered_scopes:
                 clicked = await self._click_selector_in_scope(scope_name, scope, action["selector"], timeout)
                 if clicked:
+                    self._browser_join_clicked_once = True
                     self._progress("browser_join_click_success", clicked)
                     return clicked
         for scope_name, scope in ordered_scopes:
@@ -3446,6 +3709,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                     clicked = await self._click_selector_in_scope(scope_name, scope, selector, timeout)
                     if clicked:
                         clicked["selector_group"] = selector_group
+                        self._browser_join_clicked_once = True
                         self._progress("browser_join_click_success", clicked)
                         return clicked
         self._progress("browser_join_click_not_found", {"preferred_scope": preferred_scope_name})
@@ -3604,6 +3868,10 @@ class WebexAdapter(BrowserMeetingAdapter):
         return None
 
     async def _fill_display_name_if_needed(self, display_name, timeout_ms=None, diagnose=False):
+        joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=min(50, int(timeout_ms or 50)))
+        if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+            self._progress("display_name_fill_skipped", {"reason": "joined_state_detected", "status": joined_state["status"]})
+            return {"success": False, "selector": None, "skipped": True, "join_state": joined_state}
         result = await self._fill_display_name(display_name, timeout_ms=timeout_ms)
         if result:
             return {"success": True, "selector": result}
@@ -3640,6 +3908,18 @@ class WebexAdapter(BrowserMeetingAdapter):
                 {key: frame_candidate.get(key) for key in ("scope", "url", "name", "score")},
             )
         input_debug = await self._input_debug_info()
+        frame_attempt_key = None
+        if frame_candidate:
+            frame_attempt_key = (frame_candidate.get("scope"), frame_candidate.get("url"), frame_candidate.get("name"))
+            if input_debug.get("visible_text_input_count", 0) == 0 and frame_attempt_key in self._empty_display_name_frame_attempts:
+                self._progress(
+                    "display_name_fill_skipped",
+                    {
+                        "reason": "empty_frame_already_attempted",
+                        "webclient_frame": {key: frame_candidate.get(key) for key in ("scope", "url", "name", "score")},
+                    },
+                )
+                return None
         self._progress(
             "display_name_fill_attempt",
             {
@@ -3654,6 +3934,8 @@ class WebexAdapter(BrowserMeetingAdapter):
                 {"reason": "no_visible_text_input", "strong_guest_frame": False},
             )
         if input_debug.get("visible_text_input_count", 0) == 0:
+            if frame_attempt_key:
+                self._empty_display_name_frame_attempts.add(frame_attempt_key)
             self._progress(
                 "webex_wait_for_display_name_input_start",
                 {"strong_guest_frame": strong_guest_frame, "timeout_ms": timeout_ms},
@@ -4583,6 +4865,9 @@ return "sent_escape"
         deadline = asyncio.get_running_loop().time() + max(0, float(timeout_sec))
         poll_timeout_ms = self.timeout_ms("join_result_poll_timeout_ms", 500)
         while asyncio.get_running_loop().time() <= deadline:
+            joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=poll_timeout_ms)
+            if joined_state["status"] in {"joined", "waiting_for_others", "lobby", "blocked"}:
+                return joined_state
             if await self._title_indicates_joined():
                 return {
                     "status": "joined",

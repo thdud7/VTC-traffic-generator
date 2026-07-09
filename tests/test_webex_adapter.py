@@ -448,6 +448,71 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertTrue(result["leave_control_present"])
         self.assertFalse(result["media_ready"])
 
+    def test_korean_waiting_for_others_text_is_joined_like_success(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        adapter.page.text = "다른 사용자가 참여할 때까지 기다리는 중..."
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "waiting_for_others")
+        self.assertIn("webex_waiting_for_others_detected", output.getvalue())
+        self.assertEqual(adapter.page.fills, [])
+
+    def test_english_waiting_for_others_text_is_joined_like_success(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        adapter.page.text = "Waiting for others to join"
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "waiting_for_others")
+
+    def test_context_popup_waiting_for_others_text_is_scanned(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        popup = FakeWebexPage("joined")
+        popup.url = "https://web.webex.com/meeting/test"
+        popup.visible = set()
+        popup.text = "Waiting for others to join"
+        adapter.context = FakeContext([popup])
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "waiting_for_others")
+        self.assertEqual(result["url"], "https://web.webex.com/meeting/test")
+
+    def test_media_controls_without_display_name_input_are_joined_like_success(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#mute", "#leave"}
+        adapter.page.selector_texts["#mute"] = "Mute"
+        adapter.page.selector_texts["#leave"] = "Leave meeting"
+        adapter.page.text_inputs = []
+
+        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(adapter.page.fills, [])
+
+    def test_linux_window_manager_fallback_detects_webex_meeting_window(self):
+        adapter = _join_test_adapter("joined")
+        adapter._browser_join_clicked_once = True
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x01200007  0 10 10 1280 720 host Webex Meeting - Google Chrome\n",
+                        stderr="",
+                    )
+                    state = adapter._detect_webex_meeting_window_state()
+
+        self.assertEqual(state["status"], "joined")
+        self.assertEqual(state["selector"], "window_fallback")
+
     def test_korean_in_meeting_title_is_classified_as_joined(self):
         adapter = _join_test_adapter("no_selector_match")
         adapter.page.title_after_join = "미팅 중 · 미팅 · Webex"
@@ -1047,6 +1112,40 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertFalse(state["webclient_frame_ready"])
         self.assertEqual(state["browser_join_action"]["scope"], "frame[1]")
         self.assertEqual(state["browser_join_action"]["selector"], "#browser")
+
+    def test_outer_download_shell_browser_join_is_not_ready_webclient_frame(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#browser"}
+        outer.selector_texts["#browser"] = "Join from this browser"
+        outer.text = "Get ready to join Join from this browser"
+
+        state = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
+
+        self.assertFalse(state["webclient_frame_ready"])
+        self.assertFalse(state["webclient_frame_detected"])
+        self.assertEqual(state["browser_join_action"]["selector"], "#browser")
+
+    def test_repeated_empty_display_name_frame_attempt_is_skipped(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.visible = set()
+        outer.text_inputs = []
+        frame = FakeWebexFrame("joined", url="https://example.webex.com/meeting/prejoin")
+        frame.visible = set()
+        frame.text_inputs = []
+        frame.text = "meeting"
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            first = asyncio.run(adapter._fill_display_name("bot", timeout_ms=1))
+            second = asyncio.run(adapter._fill_display_name("bot", timeout_ms=1))
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIn("empty_frame_already_attempted", output.getvalue())
 
     def test_guest_join_text_snapshot_timeout_still_probes_frame_input(self):
         adapter = _join_test_adapter("joined", {"frame_snapshot_timeout_sec": 0.001})
