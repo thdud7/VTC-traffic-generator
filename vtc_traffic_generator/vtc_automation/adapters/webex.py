@@ -1345,6 +1345,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                     continue
                 if download_retry_result.get("clicked"):
                     await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
+                    self._discard_browser_join_snapshot_state()
                     await asyncio.sleep(self._download_retry_settle_sec())
                     if await self._browser_join_after_retry_seen(timeout_ms=timeout):
                         self._progress("webex_browser_join_after_retry_seen")
@@ -1550,6 +1551,25 @@ class WebexAdapter(BrowserMeetingAdapter):
                 return {**state, "detected": True, "clicked": True, "browser_join_clicked": True, "click": clicked}
             self._progress("browser_join_click_not_found", {"browser_join_action": state.get("browser_join_action")})
             await self._raise_browser_join_click_not_found(state)
+        if (state.get("detected") or state.get("webclient_frame_exists")) and state.get("try_again_action"):
+            self._progress("webex_download_retry_page_detected", state)
+            self._progress(
+                "webex_next_action_selected",
+                {
+                    "action": "click_try_again",
+                    "reason": (
+                        "try_again_available_with_unready_webclient_frame"
+                        if state.get("webclient_frame_exists") and not state.get("webclient_frame_ready")
+                        else "try_again_available"
+                    ),
+                },
+            )
+            got_it, clicked = await self._click_try_again_from_state(state, timeout_ms=timeout_ms)
+            if clicked:
+                self._progress("webex_try_again_clicked", clicked)
+                await self._after_try_again_click_rescan(timeout_ms=timeout_ms)
+                return {**state, "detected": True, "clicked": True, "got_it_clicked": got_it, "click": clicked}
+            await self._raise_download_retry_try_again_not_clickable({**state, "got_it_clicked": got_it})
         if state.get("webclient_frame_exists"):
             self._progress(
                 "webex_next_action_selected",
@@ -1573,38 +1593,11 @@ class WebexAdapter(BrowserMeetingAdapter):
                 {"action": "continue_prejoin", "reason": "download_retry_not_detected"},
             )
             return state
-        if not state.get("try_again_action"):
-            self._progress(
-                "webex_next_action_selected",
-                {"action": "fail_fast", "reason": "no_actionable_webex_state"},
-            )
-            await self._raise_no_actionable_webex_state(state)
-        self._progress("webex_download_retry_page_detected", state)
         self._progress(
             "webex_next_action_selected",
-            {"action": "click_try_again", "reason": "try_again_available"},
+            {"action": "fail_fast", "reason": "no_actionable_webex_state"},
         )
-        click_total_timeout = self._download_retry_click_total_timeout_sec()
-        click_deadline = asyncio.get_running_loop().time() + click_total_timeout
-        try:
-            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
-            got_it = await asyncio.wait_for(
-                self._click_got_it_button(timeout_ms=timeout_ms),
-                timeout=remaining,
-            )
-            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
-            clicked = await asyncio.wait_for(
-                self._click_try_again_browser_join(timeout_ms=timeout_ms),
-                timeout=remaining,
-            )
-        except asyncio.TimeoutError:
-            await self._raise_download_retry_try_again_not_clickable(
-                {**state, "click_total_timeout_sec": click_total_timeout, "click_timeout": True}
-            )
-        if clicked:
-            self._progress("webex_try_again_clicked", clicked)
-            return {**state, "clicked": True, "got_it_clicked": got_it, "click": clicked}
-        await self._raise_download_retry_try_again_not_clickable({**state, "got_it_clicked": got_it})
+        await self._raise_no_actionable_webex_state(state)
 
     async def _raise_no_actionable_webex_state(self, state):
         extra = {
@@ -1814,10 +1807,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         webclient_frame = self._webclient_frame_from_snapshot(snapshot)
         browser_join_action = self._browser_join_action_from_snapshot(snapshot)
         try_again_action = self._try_again_action_from_snapshot(snapshot)
+        browser_join_problem_detected = self._browser_join_problem_detected(text, keyword_hits, try_again_action)
         detected = bool(
             hits.get("download_page_indicator")
             or hits.get("installer_download_indicator")
             or hits.get("problem_joining_from_browser")
+            or browser_join_problem_detected
         )
         result = {
             "detected": detected,
@@ -1834,7 +1829,19 @@ class WebexAdapter(BrowserMeetingAdapter):
             "webclient_frame": webclient_frame,
             "browser_join_action": browser_join_action,
             "try_again_action": try_again_action,
+            "browser_join_problem_detected": browser_join_problem_detected,
         }
+        if browser_join_problem_detected:
+            self._progress(
+                "webex_browser_join_problem_detected",
+                {
+                    "try_again_action": try_again_action,
+                    "webclient_frame_exists": bool(webclient_frame),
+                    "webclient_frame_ready": bool(webclient_frame and webclient_frame.get("webclient_frame_ready")),
+                },
+            )
+            if try_again_action:
+                self._progress("webex_try_again_action_selected", {"try_again_action": try_again_action})
         self._progress(
             "webex_download_detection_result",
             {
@@ -1854,6 +1861,14 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _download_retry_page_visible(self, timeout_ms=None):
         return bool((await self._download_retry_page_state(timeout_ms=timeout_ms)).get("detected"))
+
+    def _browser_join_problem_detected(self, text, keyword_hits=None, try_again_action=None):
+        normalized = " ".join(str(text or "").split()).lower()
+        keyword_hits = set(keyword_hits or [])
+        problem = "problem joining from browser?" in normalized or "problem joining from your browser?" in normalized
+        try_again = "try again" in normalized or "Retry" in keyword_hits or "Try again" in keyword_hits or bool(try_again_action)
+        mobile = "join on mobile" in normalized or "Join on mobile" in keyword_hits
+        return bool(problem and try_again and mobile)
 
     async def _detect_loaded_webex_webclient_frame(self, timeout_ms=None):
         if not self._is_page_available():
@@ -2410,6 +2425,177 @@ class WebexAdapter(BrowserMeetingAdapter):
             allow_coordinate_fallback=True,
             timeout_ms=timeout,
         )
+
+    async def _click_try_again_from_state(self, state, timeout_ms=None):
+        click_total_timeout = self._download_retry_click_total_timeout_sec()
+        click_deadline = asyncio.get_running_loop().time() + click_total_timeout
+        got_it = False
+        try:
+            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
+            got_it = await asyncio.wait_for(
+                self._click_got_it_button(timeout_ms=timeout_ms),
+                timeout=remaining,
+            )
+            action = state.get("try_again_action") or {}
+            direct_clicked = None
+            if self._try_again_direct_candidate_allowed(action):
+                remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
+                direct_clicked = await asyncio.wait_for(
+                    self._click_try_again_candidate(action, timeout_ms=timeout_ms),
+                    timeout=remaining,
+                )
+            if direct_clicked:
+                return got_it, direct_clicked
+            remaining = max(0.01, click_deadline - asyncio.get_running_loop().time())
+            clicked = await asyncio.wait_for(
+                self._click_try_again_browser_join(timeout_ms=timeout_ms),
+                timeout=remaining,
+            )
+            if clicked:
+                self._progress("webex_try_again_click_success", clicked)
+            else:
+                self._progress("webex_try_again_click_failed", {"try_again_action": action})
+            return got_it, clicked
+        except asyncio.TimeoutError:
+            self._progress(
+                "webex_try_again_click_timeout",
+                {"timeout_sec": click_total_timeout, "try_again_action": state.get("try_again_action")},
+            )
+            await self._raise_download_retry_try_again_not_clickable(
+                {**state, "got_it_clicked": got_it, "click_total_timeout_sec": click_total_timeout, "click_timeout": True}
+            )
+
+    def _try_again_direct_candidate_allowed(self, action):
+        return bool(
+            isinstance(action, Mapping)
+            and action.get("selector") == "#fallBkJoinByBrowser"
+            and action.get("scope") in {"page", "frame[0]"}
+        )
+
+    async def _click_try_again_candidate(self, action, timeout_ms=None):
+        selector = action.get("selector")
+        scope_name = action.get("scope")
+        timeout = self._download_retry_action_timeout_ms(timeout_ms)
+        attempt = {"selector": selector, "scope": scope_name, "method": "candidate", "timeout_ms": timeout}
+        self._progress("webex_try_again_click_attempt", attempt)
+        scopes = self._page_locator_scopes(prefer_meeting_frame=False)
+        scope = next((candidate_scope for candidate_name, candidate_scope in scopes if candidate_name == scope_name), None)
+        if scope is None:
+            self._progress("webex_try_again_click_failed", {**attempt, "reason": "scope_not_found"})
+            return None
+
+        clicked = await self._js_click_try_again_candidate(scope_name, scope, selector, timeout)
+        if clicked:
+            self._progress("webex_try_again_click_success", clicked)
+            return clicked
+
+        locator = scope.locator(selector).first
+        for method, kwargs in (
+            ("playwright_locator_click", {"timeout": timeout}),
+            ("playwright_force_click", {"timeout": timeout, "force": True}),
+        ):
+            try:
+                await locator.click(**kwargs)
+                clicked = {"ok": True, "selector": selector, "scope": scope_name, "method": method}
+                self._progress("webex_try_again_click_success", clicked)
+                return clicked
+            except PlaywrightTimeoutError as exc:
+                self._progress("webex_try_again_click_failed", {**attempt, "method": method, "reason": "timeout", "error": repr(exc)})
+            except self._safe_playwright_errors() as exc:
+                self._last_page_metadata_error = exc
+                self._append_browser_log("webex_try_again_candidate_click_unavailable", repr(exc))
+                self._progress("webex_try_again_click_failed", {**attempt, "method": method, "reason": "playwright_error", "error": repr(exc)})
+            except Exception as exc:
+                self._append_browser_log("webex_try_again_candidate_click_unavailable", repr(exc))
+                self._progress("webex_try_again_click_failed", {**attempt, "method": method, "reason": "error", "error": repr(exc)})
+
+        try:
+            box = await asyncio.wait_for(self._maybe_await(locator.bounding_box()), timeout=timeout / 1000)
+            if box:
+                x = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
+                y = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
+                mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
+                if mouse and hasattr(mouse, "click"):
+                    await asyncio.wait_for(self._maybe_await(mouse.click(x, y)), timeout=timeout / 1000)
+                    clicked = {"ok": True, "selector": selector, "scope": scope_name, "method": "coordinate_click", "x": x, "y": y}
+                    self._progress("webex_try_again_click_success", clicked)
+                    return clicked
+        except Exception as exc:
+            self._append_browser_log("webex_try_again_candidate_coordinate_click_unavailable", repr(exc))
+        self._progress("webex_try_again_click_failed", {**attempt, "method": "coordinate_click", "reason": "no_clickable_box"})
+        return None
+
+    async def _js_click_try_again_candidate(self, scope_name, scope, selector, timeout_ms):
+        script = r"""
+        (selector) => {
+          const visible = (el) => {
+            if (!el || !el.isConnected) return false;
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+          };
+          const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const target = document.querySelector(selector);
+          if (!target) return {ok: false, method: "js_candidate_click", reason: "selector_not_found"};
+          if (!visible(target)) return {ok: false, method: "js_candidate_click", reason: "not_visible"};
+          target.scrollIntoView({block: "center", inline: "center"});
+          target.click();
+          const rect = target.getBoundingClientRect();
+          return {
+            ok: true,
+            method: "js_candidate_click",
+            selector,
+            clicked_tag: target.tagName || "",
+            clicked_text: norm(target.innerText || target.textContent || target.getAttribute("aria-label") || "").slice(0, 160),
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2
+          };
+        }
+        """
+        try:
+            result = await asyncio.wait_for(self._maybe_await(scope.evaluate(script, selector)), timeout=timeout_ms / 1000)
+        except asyncio.TimeoutError as exc:
+            self._progress(
+                "webex_try_again_click_timeout",
+                {"selector": selector, "scope": scope_name, "method": "js_candidate_click", "error": repr(exc)},
+            )
+            return None
+        except Exception as exc:
+            self._append_browser_log("webex_try_again_candidate_js_click_unavailable", repr(exc))
+            self._progress(
+                "webex_try_again_click_failed",
+                {"selector": selector, "scope": scope_name, "method": "js_candidate_click", "reason": "error", "error": repr(exc)},
+            )
+            return None
+        if isinstance(result, Mapping) and result.get("ok"):
+            return {**result, "selector": selector, "scope": scope_name, "method": result.get("method") or "js_candidate_click"}
+        self._progress(
+            "webex_try_again_click_failed",
+            {
+                "selector": selector,
+                "scope": scope_name,
+                "method": "js_candidate_click",
+                "reason": (result or {}).get("reason") if isinstance(result, Mapping) else "not_clicked",
+            },
+        )
+        return None
+
+    async def _after_try_again_click_rescan(self, timeout_ms=None):
+        await self._dismiss_external_protocol_prompt(stage="after_try_again_click")
+        self._discard_browser_join_snapshot_state()
+        self._progress("webex_post_try_again_rescan_start", {"page_count": len(self._known_playwright_pages())})
+        result = await self._download_retry_page_state(timeout_ms=timeout_ms)
+        self._progress(
+            "webex_post_try_again_rescan_result",
+            {
+                "detected": result.get("detected"),
+                "webclient_frame_exists": result.get("webclient_frame_exists"),
+                "webclient_frame_ready": result.get("webclient_frame_ready"),
+                "browser_join_action": result.get("browser_join_action"),
+                "try_again_action": result.get("try_again_action"),
+            },
+        )
+        return result
 
     async def _click_got_it_button(self, timeout_ms=None):
         self._progress("webex_got_it_click_attempt")

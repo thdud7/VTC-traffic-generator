@@ -1352,6 +1352,90 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.diagnostic_stages[-1], "webex_webclient_frame_not_ready")
         self.assertIn("webex_webclient_frame_not_ready", output.getvalue())
 
+    def test_unready_guest_frame_with_try_again_selects_try_again_before_waiting(self):
+        adapter = _join_test_adapter("joined", {"webclient_frame_ready_wait_sec": 0.01})
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#fallBkJoinByBrowser"}
+        outer.selector_texts["#fallBkJoinByBrowser"] = "Try again"
+        outer.js_candidate_click_result = {"ok": True, "method": "js_candidate_click"}
+        outer.text = "Problem joining from browser? Try again Join on mobile"
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=5))
+
+        self.assertTrue(result["clicked"])
+        self.assertEqual(result["click"]["selector"], "#fallBkJoinByBrowser")
+        self.assertIn('"action": "click_try_again"', output.getvalue())
+        self.assertNotIn('"action": "wait_for_webclient_frame_ready"', output.getvalue())
+        self.assertNotIn("webex_webclient_frame_not_ready", output.getvalue())
+
+    def test_browser_join_problem_text_is_explicit_retry_state(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = set()
+        adapter.page.text = "Problem joining from browser? Try again Join on mobile"
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            state = asyncio.run(adapter._download_retry_page_state(timeout_ms=1))
+
+        self.assertTrue(state["detected"])
+        self.assertTrue(state["browser_join_problem_detected"])
+        self.assertIn("webex_browser_join_problem_detected", output.getvalue())
+
+    def test_try_again_fallback_selector_js_click_succeeds(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#fallBkJoinByBrowser"}
+        adapter.page.selector_texts["#fallBkJoinByBrowser"] = "Try again"
+        adapter.page.js_candidate_click_result = {"ok": True, "method": "js_candidate_click"}
+        state = {"try_again_action": {"scope": "page", "selector": "#fallBkJoinByBrowser"}}
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            got_it, clicked = asyncio.run(adapter._click_try_again_from_state(state, timeout_ms=5))
+
+        self.assertFalse(got_it)
+        self.assertEqual(clicked["method"], "js_candidate_click")
+        self.assertEqual(adapter.page.js_candidate_clicks, ["#fallBkJoinByBrowser"])
+        self.assertIn("webex_try_again_click_success", output.getvalue())
+
+    def test_try_again_success_rescans_fresh_webclient_frame_for_name_flow(self):
+        adapter = _join_test_adapter("joined", {"download_retry_settle_sec": 0})
+        outer = adapter.page
+        outer.url = "https://example.webex.com/meeting/download/test"
+        outer.visible = {"#fallBkJoinByBrowser"}
+        outer.selector_texts["#fallBkJoinByBrowser"] = "Try again"
+        outer.js_candidate_click_result = {"ok": True, "method": "js_candidate_click"}
+        outer.text = "Problem joining from browser? Try again Join on mobile"
+        frame = FakeWebexFrame("joined", url="https://web.webex.com/guest-join-meeting")
+        frame.visible = set()
+        frame.text_inputs = []
+        outer.frames = [outer, frame]
+
+        def reveal_webclient(_selector):
+            frame.url = "https://web.webex.com/meeting/test"
+            frame.visible = {"#name", "#join"}
+            frame.text_inputs = ["#name"]
+            frame.text = "Name Join meeting"
+
+        outer.js_candidate_click_callback = reveal_webclient
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            result = asyncio.run(adapter._handle_download_retry_page(timeout_ms=5))
+            fill = asyncio.run(adapter._fill_display_name_if_needed("bot6", timeout_ms=5))
+
+        self.assertTrue(result["clicked"])
+        self.assertTrue(fill["success"])
+        self.assertIn(("#name", "bot6"), frame.fills)
+        self.assertIn("webex_post_try_again_rescan_start", output.getvalue())
+        self.assertIn("webex_post_try_again_rescan_result", output.getvalue())
+
     def test_browser_join_candidate_timeout_has_no_unhandled_future_exception(self):
         adapter = _join_test_adapter("joined")
         outer = adapter.page
