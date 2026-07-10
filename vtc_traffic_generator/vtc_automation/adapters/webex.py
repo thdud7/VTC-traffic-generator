@@ -757,6 +757,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._preferred_webex_meeting_frame = None
         self._browser_join_clicked_once = False
         self._final_join_clicked_success = False
+        self.joined = False
+        self.in_meeting = False
         self._webex_probe_tasks = set()
         self._empty_display_name_frame_attempts = set()
 
@@ -1486,15 +1488,23 @@ class WebexAdapter(BrowserMeetingAdapter):
         terminal_state = self._terminal_join_state_from_fill_result(fill_result)
         if terminal_state:
             return terminal_state
-        result = {"status": "timeout", "selector": None, "visible_text": await self._visible_text_excerpt()}
+        visible_text = await self._visible_text_excerpt()
+        title = await self._safe_page_title()
+        result = {"status": "timeout", "selector": None, "visible_text": visible_text}
         self._progress("join_timeout", {"visible_text": result.get("visible_text", "")})
         download_retry = await self._download_retry_page_state(timeout_ms=timeout)
-        stage = "webex_download_retry_page_timeout" if download_retry.get("detected") else "webex_prejoin_timeout"
         extra = {
             "join_result": result,
             "url": self._safe_page_url(),
-            "title": await self._safe_page_title(),
+            "title": title,
+            "window_list": self._webex_window_list(),
         }
+        stage = self._prejoin_timeout_stage(
+            title=title,
+            visible_text=visible_text,
+            window_list=extra["window_list"],
+            download_retry=download_retry,
+        )
         if download_retry.get("detected"):
             extra.update(
                 {
@@ -1509,6 +1519,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 extra=extra,
             )
         )
+        result["stage"] = stage
         return result
 
     async def _handle_download_retry_page(self, timeout_ms=None):
@@ -3376,10 +3387,14 @@ class WebexAdapter(BrowserMeetingAdapter):
             if not any(token in lower for token in ("webex", "meeting", "미팅", "회의")):
                 continue
             is_get_ready = "get ready to join" in lower
+            title_joined = self._post_final_join_title_is_joined(line)
             joined = (
-                self._browser_join_clicked_once
-                and not is_get_ready
-                and ("cisco webex" in lower or "webex meeting" in lower or "webex - chromium" in lower)
+                title_joined
+                or (
+                    self._browser_join_clicked_once
+                    and not is_get_ready
+                    and ("cisco webex" in lower or "webex meeting" in lower or "webex - chromium" in lower)
+                )
             )
             status = "joined" if joined else "candidate"
             details = {
@@ -3718,6 +3733,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         return saved
 
     async def is_in_meeting(self):
+        if bool(getattr(self, "in_meeting", False)) or bool(getattr(self, "joined", False)):
+            return True
         if self.page is None:
             return False
         if await self._title_indicates_joined():
@@ -5538,16 +5555,17 @@ return "sent_escape"
             await asyncio.sleep(float(self.adapter_config().get("join_result_poll_interval_sec", 0.25)))
 
         diagnostics = await self._post_final_join_timeout_diagnostics()
+        stage = self._post_final_join_timeout_stage(diagnostics)
         result = {
             "status": "timeout",
-            "stage": "webex_post_final_join_result_timeout",
+            "stage": stage,
             "selector": None,
             "visible_text": diagnostics.get("visible_text", ""),
             "source": "post_final_join",
             "final_join_clicked": bool(getattr(self, "_final_join_clicked_success", False)),
             "diagnostics": diagnostics,
         }
-        self._progress("webex_post_final_join_result_timeout", result)
+        self._progress(stage, result)
         return result
 
     def _post_final_join_state_from_scan(self, state):
@@ -5556,7 +5574,23 @@ return "sent_escape"
             return {"status": "continue", "selector": None, "visible_text": "", "source": "post_final_join"}
         state = dict(state)
         state["source"] = "post_final_join"
-        if state.get("status") == "candidate" and state.get("selector") == "window_fallback":
+        if state.get("selector") == "window_fallback":
+            state = self._post_final_join_window_fallback_state(state)
+        return state
+
+    def _post_final_join_window_fallback_state(self, state):
+        state = dict(state)
+        window_text = str(state.get("window") or "")
+        page_title = str(state.get("title") or "")
+        candidate = {
+            **state,
+            "page_title": page_title,
+            "window": window_text,
+            "candidate_reason": self._post_final_join_title_classification(window_text, page_title),
+        }
+        self._progress("webex_post_final_join_window_fallback_candidate", candidate)
+
+        if self._post_final_join_title_is_joined(window_text) or self._post_final_join_title_is_joined(page_title):
             state.update(
                 {
                     "status": "joined",
@@ -5567,7 +5601,42 @@ return "sent_escape"
                 }
             )
             self._progress("webex_post_final_join_window_fallback_success", state)
-        return state
+            return state
+
+        reason = candidate["candidate_reason"]
+        rejected = {
+            **state,
+            "status": "continue",
+            "joined": False,
+            "joined_source": None,
+            "joined_selector": None,
+            "selector": "window_fallback",
+            "reason": reason,
+        }
+        self._progress("webex_post_final_join_window_fallback_rejected", rejected)
+        return rejected
+
+    def _post_final_join_title_classification(self, *texts):
+        combined = " ".join(str(text or "") for text in texts)
+        lowered = " ".join(combined.split()).lower()
+        if not lowered:
+            return "not_joined_yet"
+        if "get ready to join" in lowered:
+            return "post_final_join_pending"
+        if "join from this browser" in lowered or "problem joining from browser" in lowered:
+            return "prejoin_still_visible"
+        if "loading" in lowered or "download" in lowered or "cisco webex" in lowered:
+            return "not_joined_yet"
+        return "not_joined_yet"
+
+    def _post_final_join_title_is_joined(self, text):
+        normalized = " ".join(str(text or "").split()).lower()
+        return bool(
+            "미팅 중" in normalized
+            or "in meeting" in normalized
+            or "meeting in progress" in normalized
+            or "in meeting · meeting · webex" in normalized
+        )
 
     async def _post_final_join_selector_state(self, timeout_ms=None):
         for status, group in (
@@ -5601,6 +5670,27 @@ return "sent_escape"
             "hidden_text": hidden_text[:2000],
         }
         return diagnostics
+
+    def _post_final_join_timeout_stage(self, diagnostics):
+        texts = [
+            diagnostics.get("page_title", ""),
+            diagnostics.get("visible_text", ""),
+            diagnostics.get("hidden_text", ""),
+            " ".join(diagnostics.get("window_list") or []),
+        ]
+        classification = self._post_final_join_title_classification(*texts)
+        if classification == "post_final_join_pending":
+            return "webex_post_final_join_pending_timeout"
+        return "webex_post_final_join_result_timeout"
+
+    def _prejoin_timeout_stage(self, title="", visible_text="", window_list=None, download_retry=None):
+        if isinstance(download_retry, Mapping) and download_retry.get("detected"):
+            return "webex_download_retry_page_timeout"
+        combined = " ".join([str(title or ""), str(visible_text or ""), " ".join(window_list or [])])
+        lowered = " ".join(combined.split()).lower()
+        if "loading" in lowered or "cisco webex" in lowered:
+            return "webex_prejoin_loading_timeout"
+        return "webex_no_actionable_state_timeout"
 
     async def _context_page_urls(self):
         pages = [self.page]

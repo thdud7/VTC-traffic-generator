@@ -507,26 +507,103 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertIn("webex_lobby_detected", output.getvalue())
         self.assertIn("webex_join_success", output.getvalue())
 
-    def test_post_final_join_window_fallback_candidate_succeeds(self):
-        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.2})
+    def test_post_final_join_window_fallback_in_meeting_title_succeeds(self):
+        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.6})
         adapter.page.text = ""
         output = io.StringIO()
+        original_window_state = adapter._detect_webex_meeting_window_state
+
+        def post_final_window_state():
+            if not adapter._final_join_clicked_success:
+                return None
+            return original_window_state()
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
             with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
-                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
-                    run.return_value = subprocess_completed(
-                        returncode=0,
-                        stdout="0x00400003  0 2 40 1288 851 bot4 Get ready to join · Meeting · Webex - Chromium\n",
-                        stderr="",
-                    )
-                    with contextlib.redirect_stdout(output):
-                        result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+                with patch.object(adapter, "_detect_webex_meeting_window_state", side_effect=post_final_window_state):
+                    with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                        run.return_value = subprocess_completed(
+                            returncode=0,
+                            stdout="0x00400003  0 2 40 1288 851 bot4 In meeting · Meeting · Webex - Chromium\n",
+                            stderr="",
+                        )
+                        with contextlib.redirect_stdout(output):
+                            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
 
         self.assertEqual(result["status"], "joined")
         self.assertEqual(result["selector"], "window_fallback")
+        self.assertTrue(asyncio.run(adapter.is_in_meeting()))
+        self.assertTrue(adapter.in_meeting)
+        self.assertIn("webex_post_final_join_window_fallback_candidate", output.getvalue())
         self.assertIn("webex_post_final_join_window_fallback_success", output.getvalue())
         self.assertIn("webex_join_success", output.getvalue())
+
+    def test_post_final_join_get_ready_window_fallback_is_rejected_not_joined(self):
+        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.01})
+        adapter.page.text = ""
+        output = io.StringIO()
+        original_window_state = adapter._detect_webex_meeting_window_state
+
+        def post_final_window_state():
+            if not adapter._final_join_clicked_success:
+                return None
+            return original_window_state()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch.object(adapter, "_detect_webex_meeting_window_state", side_effect=post_final_window_state):
+                    with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                        run.return_value = subprocess_completed(
+                            returncode=0,
+                            stdout="0x00400003  0 2 40 1288 851 bot5 Get ready to join · Meeting · Webex - Chromium\n",
+                            stderr="",
+                        )
+                        with contextlib.redirect_stdout(output):
+                            with self.assertRaisesRegex(RuntimeError, "webex_post_final_join_pending_timeout"):
+                                asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        progress = output.getvalue()
+        self.assertIn("webex_post_final_join_window_fallback_candidate", progress)
+        self.assertIn("webex_post_final_join_window_fallback_rejected", progress)
+        self.assertIn("webex_post_final_join_pending_timeout", progress)
+        self.assertNotIn("webex_post_final_join_window_fallback_success", progress)
+        self.assertNotIn("webex_join_success", progress)
+        self.assertFalse(adapter.in_meeting)
+
+    def test_post_final_join_get_ready_window_eventually_in_meeting_succeeds(self):
+        adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.6})
+        adapter.page.text = ""
+        output = io.StringIO()
+        original_window_state = adapter._detect_webex_meeting_window_state
+
+        def post_final_window_state():
+            if not adapter._final_join_clicked_success:
+                return None
+            return original_window_state()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch.object(adapter, "_detect_webex_meeting_window_state", side_effect=post_final_window_state):
+                    with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                        run.side_effect = [
+                            subprocess_completed(
+                                returncode=0,
+                                stdout="0x00400003  0 2 40 1288 851 bot5 Get ready to join · Meeting · Webex - Chromium\n",
+                                stderr="",
+                            ),
+                            subprocess_completed(
+                                returncode=0,
+                                stdout="0x00400003  0 2 40 1288 851 bot5 In meeting · Meeting · Webex - Chromium\n",
+                                stderr="",
+                            ),
+                        ]
+                        with contextlib.redirect_stdout(output):
+                            result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertEqual(result["status"], "joined")
+        self.assertTrue(adapter.in_meeting)
+        self.assertIn("webex_post_final_join_window_fallback_rejected", output.getvalue())
+        self.assertIn("webex_post_final_join_window_fallback_success", output.getvalue())
 
     def test_post_final_join_unknown_state_times_out_with_specific_stage(self):
         adapter = _join_test_adapter("no_dom_state", {"post_final_join_result_timeout_sec": 0.01})
@@ -541,6 +618,29 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertIn("webex_post_final_join_result_timeout", output.getvalue())
         self.assertIn("webex_post_final_join_result_timeout", adapter.diagnostic_stages)
+
+    def test_prejoin_cisco_loading_state_times_out_with_specific_stage(self):
+        adapter = _join_test_adapter("no_dom_state", {"prejoin_timeout_ms": 10})
+        adapter.page.visible = set()
+        adapter.page.text = ""
+        adapter.page.html = "<html><body></body></html>"
+        adapter.page.title_text = "Cisco Webex"
+        output = io.StringIO()
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot6 Cisco Webex - Chromium\n",
+                        stderr="",
+                    )
+                    with contextlib.redirect_stdout(output):
+                        with self.assertRaisesRegex(RuntimeError, "webex_prejoin_loading_timeout"):
+                            asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+
+        self.assertIn("webex_prejoin_loading_timeout", adapter.diagnostic_stages)
+        self.assertNotIn("webex_join_success", output.getvalue())
 
     def test_context_popup_waiting_for_others_text_is_scanned(self):
         adapter = _join_test_adapter("joined")
