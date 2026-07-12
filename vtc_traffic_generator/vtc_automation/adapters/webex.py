@@ -1312,177 +1312,72 @@ class WebexAdapter(BrowserMeetingAdapter):
             self.timeout_ms("prejoin_timeout_ms", 30000) / 1000
         )
         timeout = self.timeout_ms("optional_selector_timeout_ms", 1000)
-        email = self.adapter_config().get("email")
-        password = self.adapter_config().get("password") or self.adapter_config().get("meeting_password")
-        download_retry_attempts = 0
         iteration = 0
+        state_attempts = {}
+        no_action_attempts = 0
+        max_state_attempts = self.timeout_ms("prejoin_max_attempts_per_state", 3)
+        max_no_action_attempts = self.timeout_ms("prejoin_max_no_action_iterations", 6)
 
         while asyncio.get_running_loop().time() < deadline:
             iteration += 1
-            self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration})
-            await self._dismiss_external_protocol_prompt(stage="prejoin_loop")
-            joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=250)
+            self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration, "state_attempts": state_attempts})
+            # Protocol dismissal is deliberately outside the DOM scan and hard bounded.
+            try:
+                await asyncio.wait_for(
+                    self._dismiss_external_protocol_prompt(stage="prejoin_loop"),
+                    timeout=float(self.adapter_config().get("external_protocol_dismiss_timeout_sec", 3.0)),
+                )
+            except asyncio.TimeoutError:
+                self._progress("external_protocol_dismiss_timeout", {"iteration": iteration})
+
+            # Exactly one page/frame snapshot is produced per iteration.  Both joined
+            # classification and action selection consume this immutable snapshot.
+            try:
+                snapshot = await asyncio.wait_for(
+                    self._page_state_snapshot(timeout_ms=min(timeout, 250)),
+                    timeout=self._page_state_detection_timeout_sec(),
+                )
+            except asyncio.TimeoutError:
+                snapshot = {"page": {}, "frames": []}
+                self._progress("webex_page_state_detection_timeout", {"iteration": iteration})
+
+            joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=250, snapshot=snapshot)
             if self._is_terminal_join_state(joined_state):
                 return joined_state
-            state = await self._prejoin_state(timeout_ms=250)
-            if self._is_terminal_join_state(state):
-                return state
+            page_state = await self._download_retry_page_state_from_snapshot(timeout_ms=timeout, snapshot=snapshot)
+            action, payload = self._select_prejoin_action(snapshot, page_state)
+            fingerprint = self._prejoin_action_fingerprint(action, payload)
+            state_attempts[fingerprint] = state_attempts.get(fingerprint, 0) + 1
+            self._progress("webex_next_action_selected", {"action": action, "attempt": state_attempts[fingerprint]})
 
-            progressed = False
-            download_retry_result = await self._handle_download_retry_page(timeout_ms=timeout)
-            if download_retry_result.get("detected"):
-                if download_retry_result.get("webclient_frame_detected"):
-                    progressed = True
-                else:
-                    download_retry_attempts += 1
-                if download_retry_result.get("browser_join_clicked"):
-                    post_browser_join_state = await self._post_browser_join_transition_loop(
-                        display_name,
-                        timeout_ms=timeout,
-                    )
-                    if post_browser_join_state["status"] == "final_join" or self._is_terminal_join_state(post_browser_join_state):
-                        return post_browser_join_state
-                    if post_browser_join_state["status"] == "timeout":
-                        return post_browser_join_state
-                    progressed = True
-                    continue
-                if download_retry_result.get("clicked"):
-                    await self._dismiss_external_protocol_prompt(stage="after_download_retry_try_again")
-                    self._discard_browser_join_snapshot_state()
-                    await asyncio.sleep(self._download_retry_settle_sec())
-                    if await self._browser_join_after_retry_seen(timeout_ms=timeout):
-                        self._progress("webex_browser_join_after_retry_seen")
-                if (
-                    not download_retry_result.get("webclient_frame_detected")
-                    and download_retry_attempts >= self.timeout_ms("max_download_retry_attempts", 3)
-                ):
-                    still_visible = await self._download_retry_page_visible(timeout_ms=timeout)
-                    if still_visible:
-                        await self._raise_download_retry_page_timeout(
-                            {
-                                **download_retry_result,
-                                "attempt": download_retry_attempts,
-                                "max_attempts": self.timeout_ms("max_download_retry_attempts", 3),
-                            }
-                        )
-                    continue
-                if download_retry_result.get("clicked"):
-                    continue
-                progressed = True
-            if await self._name_entry_text_visible():
-                self._progress("display_name_page_detected")
-                if await self._fill_display_name(display_name, timeout_ms=timeout):
-                    progressed = True
-                    state = await self._prejoin_state(timeout_ms=75)
-                    if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                        return state
-            progressed = bool(await self._click_first_visible("cookie_close", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_first_visible("cookie_reject", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_first_visible("cookie_accept", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_browser_prejoin_selector("cancel_open_app_prompt", timeout_ms=timeout)) or progressed
-            await self._dismiss_external_protocol_prompt(stage="before_browser_join")
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            self._progress("browser_join_click_attempt")
-            progressed = bool(await self._click_browser_prejoin_selector("join_from_browser", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_browser_prejoin_selector("join_from_this_browser", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_browser_prejoin_selector("continue_in_browser", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_browser_prejoin_selector("use_web_app", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_browser_prejoin_selector("open_in_browser", timeout_ms=timeout)) or progressed
-            fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout)
-            terminal_state = self._terminal_join_state_from_fill_result(fill_result)
-            if terminal_state:
-                return terminal_state
-            if fill_result["success"]:
-                progressed = True
-                state = await self._prejoin_state(timeout_ms=75)
-                if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                    return state
-            progressed = bool(await self._click_first_visible("join_as_guest", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_display_name(display_name, timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_first_visible("email_input", email, timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_first_visible("password_input", password, timeout_ms=timeout)) or progressed
-            progressed = bool(await self._click_first_visible("continue_button", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._click_first_visible("next_button", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._click_first_visible("use_computer_audio", timeout_ms=timeout)) or progressed
-            progressed = bool(await self._fill_display_name(display_name, timeout_ms=timeout)) or progressed
-            progressed = bool(await self._apply_prejoin_media_preferences()) or progressed
-
-            state = await self._prejoin_state(timeout_ms=250)
-            if state["status"] == "final_join" or self._is_terminal_join_state(state):
-                return state
-
-            await asyncio.sleep(0.2 if progressed else 0.5)
+            if state_attempts[fingerprint] > max_state_attempts:
+                return await self._bounded_prejoin_failure("webex_prejoin_state_attempts_exhausted", page_state)
+            if action == "final_join":
+                return {"status": "final_join", "selector": payload.get("selector"), "visible_text": payload.get("text", "")}
+            if action == "click_browser_join":
+                clicked = await self._click_browser_join_from_state(page_state, timeout_ms=min(timeout, 1000))
+                if not clicked:  # defensive: candidate failures normally raise above
+                    await self._raise_browser_join_click_not_found(page_state)
+                return await self._post_browser_join_transition_loop(display_name, timeout_ms=min(timeout, 1000))
+            if action == "fill_display_name":
+                await asyncio.wait_for(
+                    self._fill_display_name(display_name, timeout_ms=min(timeout, 1000)),
+                    timeout=float(self.adapter_config().get("display_name_fill_timeout_sec", 5.0)),
+                )
+            elif action == "click_cookie":
+                await self._dismiss_browser_join_cookie_banner(min(timeout, 500))
+            elif action == "click_try_again":
+                await self._click_try_again_from_state(page_state, timeout_ms=min(timeout, 1000))
+            elif action == "wait":
+                if page_state.get("detected") and not page_state.get("webclient_frame_exists"):
+                    await self._raise_no_actionable_webex_state(page_state)
+                no_action_attempts += 1
+                if no_action_attempts >= max_no_action_attempts:
+                    return await self._bounded_prejoin_failure("webex_prejoin_no_actionable_state", page_state)
+            else:
+                await self._click_first_visible(action, timeout_ms=min(timeout, 1000))
+            if action != "click_try_again":
+                await asyncio.sleep(0.2 if action != "wait" else 0.5)
 
         await self._dismiss_external_protocol_prompt(stage="prejoin_timeout")
         joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout)
@@ -1524,6 +1419,50 @@ class WebexAdapter(BrowserMeetingAdapter):
             )
         )
         result["stage"] = stage
+        return result
+
+    def _select_prejoin_action(self, snapshot, page_state):
+        """Choose one mutation from the iteration's cached DOM snapshot."""
+        if page_state.get("browser_join_action"):
+            return "click_browser_join", page_state["browser_join_action"]
+
+        scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
+        controls = [
+            item
+            for scope in scopes
+            for item in (scope.get("visible_buttons_links") or [])
+            if isinstance(item, Mapping)
+        ]
+        for item in controls:
+            text = " ".join(str(item.get("text") or item.get("aria_label") or "").split()).lower()
+            if text in {"join", "join meeting", "start meeting"} or text.startswith("join meeting"):
+                return "final_join", item
+        cookie_words = ("accept", "reject", "reject all", "allow all")
+        if any(" ".join(str(item.get("text") or "").split()).lower() in cookie_words for item in controls):
+            return "click_cookie", {}
+        if page_state.get("try_again_action"):
+            return "click_try_again", page_state["try_again_action"]
+        if any(scope.get("visible_inputs") for scope in scopes) or page_state.get("webclient_frame_ready"):
+            return "fill_display_name", {}
+        return "wait", {}
+
+    @staticmethod
+    def _prejoin_action_fingerprint(action, payload):
+        payload = payload if isinstance(payload, Mapping) else {}
+        return "|".join(
+            str(value or "")
+            for value in (action, payload.get("scope"), payload.get("selector"), payload.get("text"))
+        )
+
+    async def _bounded_prejoin_failure(self, stage, state):
+        result = {
+            "status": "timeout",
+            "stage": stage,
+            "selector": None,
+            "visible_text": str((state or {}).get("visible_text") or "")[:2000],
+        }
+        self._progress(stage, result)
+        await self._maybe_await(self.collect_diagnostics(stage=stage, extra={"state": state}))
         return result
 
     async def _handle_download_retry_page(self, timeout_ms=None):
@@ -1773,9 +1712,10 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "try_again_action": None,
             }
 
-    async def _download_retry_page_state_from_snapshot(self, timeout_ms=None):
+    async def _download_retry_page_state_from_snapshot(self, timeout_ms=None, snapshot=None):
         self._progress("webex_page_state_snapshot_start", {"url": self._safe_page_url()})
-        snapshot = await self._page_state_snapshot(timeout_ms=timeout_ms)
+        if snapshot is None:
+            snapshot = await self._page_state_snapshot(timeout_ms=timeout_ms)
         if snapshot.get("detached"):
             return {
                 "detected": False,
@@ -2268,12 +2208,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             for phrase, score in phrases:
                 phrase_lower = phrase.lower()
                 if phrase_lower in {"join", "join meeting"}:
-                    visible_label = " ".join(
-                        str(item.get(key) or "")
-                        for key in ("text", "aria_label")
-                    ).strip().lower()
                     element_id = str(item.get("id") or "").strip().lower()
-                    if visible_label not in {phrase_lower, "join meeting", "join"} and element_id not in {"browser", "join-from-browser"}:
+                    if element_id not in {"browser", "join-from-browser"}:
                         continue
                 elif phrase_lower not in lowered:
                     continue
@@ -3316,16 +3252,17 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._append_browser_log("links_buttons_debug_unavailable", repr(exc))
             return []
 
-    async def _scan_joined_state_all_surfaces(self, timeout_ms=250):
+    async def _scan_joined_state_all_surfaces(self, timeout_ms=250, snapshot=None):
         self._progress("webex_joined_state_scan_result", {"status": "scan_start"})
         try:
             scan_timeout = self._page_state_detection_timeout_sec()
             if timeout_ms is not None:
                 scan_timeout = min(scan_timeout, max(0.05, float(timeout_ms) / 1000 * 8))
-            snapshot = await asyncio.wait_for(
-                self._page_state_snapshot(timeout_ms=timeout_ms),
-                timeout=scan_timeout,
-            )
+            if snapshot is None:
+                snapshot = await asyncio.wait_for(
+                    self._page_state_snapshot(timeout_ms=timeout_ms),
+                    timeout=scan_timeout,
+                )
         except asyncio.TimeoutError:
             snapshot = {}
             self._progress("webex_joined_state_scan_result", {"status": "scan_timeout"})
@@ -3577,13 +3514,12 @@ class WebexAdapter(BrowserMeetingAdapter):
                 continue
             is_get_ready = "get ready to join" in lower
             title_joined = self._post_final_join_title_is_joined(line)
-            joined = (
-                title_joined
-                or (
-                    self._browser_join_clicked_once
-                    and not is_get_ready
-                    and ("cisco webex" in lower or "webex meeting" in lower or "webex - chromium" in lower)
-                )
+            # A generic Chromium title only proves that the Webex page exists.  It
+            # must never promote prejoin to joined, even after a browser-join click.
+            joined = title_joined or (
+                self._browser_join_clicked_once
+                and not is_get_ready
+                and "webex meeting" in lower
             )
             status = "joined" if joined else "candidate"
             details = {
@@ -4339,12 +4275,15 @@ class WebexAdapter(BrowserMeetingAdapter):
                 )
             except asyncio.TimeoutError:
                 self._progress("browser_join_click_timeout", attempt)
+                await self._maybe_await(self.collect_diagnostics(stage="browser_join_click_timeout", extra=attempt))
                 raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
             if clicked:
                 self._browser_join_clicked_once = True
                 self._progress("browser_join_click_success", clicked)
                 return clicked
             self._progress("browser_join_click_failed", attempt)
+            self._progress("browser_join_click_timeout", attempt)
+            await self._maybe_await(self.collect_diagnostics(stage="browser_join_click_timeout", extra=attempt))
             raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
 
         preferred = [item for item in scopes if item[0] == preferred_scope_name]
@@ -4390,7 +4329,9 @@ class WebexAdapter(BrowserMeetingAdapter):
                 self._append_browser_log("browser_join_cookie_dismiss_unavailable", repr(exc))
                 selector = None
             if selector:
+                self._progress("webex_cookie_banner_detected", {"selector": selector, "group": group})
                 self._progress("browser_join_cookie_dismissed", {"selector": selector, "group": group})
+                self._progress("webex_cookie_banner_dismissed", {"selector": selector, "group": group})
                 return selector
         return None
 
@@ -4482,7 +4423,9 @@ class WebexAdapter(BrowserMeetingAdapter):
                 mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
                 if mouse and hasattr(mouse, "click"):
                     await asyncio.wait_for(self._maybe_await(mouse.click(x, y)), timeout=timeout_ms / 1000)
-                    return {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": "coordinate_click", "x": x, "y": y}
+                    clicked = {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": "coordinate_click", "x": x, "y": y}
+                    self._progress("browser_join_coordinate_click_success", clicked)
+                    return clicked
         except Exception as exc:
             self._append_browser_log("browser_join_candidate_coordinate_click_unavailable", repr(exc))
         self._progress(
@@ -4553,7 +4496,11 @@ class WebexAdapter(BrowserMeetingAdapter):
             )
             return None
         if isinstance(result, Mapping) and result.get("ok"):
-            return {**result, "selector": selector, "scope": scope_name, "text": text, "method": result.get("method") or "js_candidate_click"}
+            resolved = {**result, "selector": selector, "scope": scope_name, "text": text, "method": result.get("method") or "js_candidate_click"}
+            self._progress("browser_join_click_target_resolved", resolved)
+            self._progress("browser_join_text_target_found", resolved)
+            self._progress("browser_join_text_click_success", resolved)
+            return resolved
         self._progress(
             "browser_join_click_failed",
             {
@@ -4597,9 +4544,9 @@ class WebexAdapter(BrowserMeetingAdapter):
         }
         self._progress("browser_join_click_timeout", extra)
         diagnostics = await self._maybe_await(
-            self.collect_diagnostics(stage="browser_join_click_not_found", extra=extra)
+            self.collect_diagnostics(stage="browser_join_click_timeout", extra=extra)
         )
-        raise RuntimeError(f"browser_join_click_not_found. Diagnostics: {diagnostics}")
+        raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {diagnostics}")
 
     async def _raise_webclient_frame_not_ready(self, state):
         frame = state.get("webclient_frame") or {}

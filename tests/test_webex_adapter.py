@@ -687,6 +687,40 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertTrue(state["joined"])
         self.assertEqual(state["joined_source"], "window_fallback")
 
+    def test_plain_cisco_webex_chromium_window_is_not_joined(self):
+        adapter = _join_test_adapter("joined")
+        adapter._browser_join_clicked_once = True
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
+                    run.return_value = subprocess_completed(
+                        returncode=0,
+                        stdout="0x00400003  0 2 40 1288 851 bot4 Cisco Webex - Chromium\n",
+                        stderr="",
+                    )
+                    state = adapter._detect_webex_meeting_window_state()
+
+        self.assertEqual(state["status"], "candidate")
+        self.assertFalse(state["joined"])
+        self.assertFalse(adapter._is_terminal_join_state(state))
+
+    def test_prejoin_repeated_unchanged_snapshot_is_attempt_bounded(self):
+        adapter = _join_test_adapter("no_dom_state")
+        adapter.config["adapter_config"]["prejoin_timeout_ms"] = 5000
+        adapter.config["adapter_config"]["prejoin_max_no_action_iterations"] = 2
+        scans = []
+
+        async def unchanged_snapshot(timeout_ms=None):
+            scans.append(timeout_ms)
+            return {"page": {}, "frames": [], "detached": False}
+
+        adapter._page_state_snapshot = unchanged_snapshot
+        result = asyncio.run(adapter._run_prejoin_transition_loop("bot"))
+
+        self.assertEqual(result["stage"], "webex_prejoin_no_actionable_state")
+        self.assertEqual(len(scans), 2)
+
     def test_prejoin_window_fallback_join_returns_without_display_name_or_browser_join(self):
         adapter = _join_test_adapter("joined")
         adapter.page.visible = {"#join"}
@@ -707,7 +741,7 @@ class WebexAdapterTests(unittest.TestCase):
                 with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
                     run.return_value = subprocess_completed(
                         returncode=0,
-                        stdout="0x00400003  0 2 40 1288 851 bot4 Cisco Webex - Chromium\n",
+                        stdout="0x00400003  0 2 40 1288 851 bot4 In meeting · Meeting · Webex - Chromium\n",
                         stderr="",
                     )
                     result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
@@ -728,7 +762,7 @@ class WebexAdapterTests(unittest.TestCase):
                 with patch("vtc_traffic_generator.vtc_automation.adapters.webex.subprocess.run") as run:
                     run.return_value = subprocess_completed(
                         returncode=0,
-                        stdout="0x00400003  0 2 40 1288 851 bot4 Cisco Webex - Chromium\n",
+                        stdout="0x00400003  0 2 40 1288 851 bot4 In meeting · Meeting · Webex - Chromium\n",
                         stderr="",
                     )
                     with contextlib.redirect_stdout(output):
