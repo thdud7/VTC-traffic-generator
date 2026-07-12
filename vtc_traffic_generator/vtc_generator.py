@@ -5,6 +5,7 @@ import signal
 import sys
 import time
 import json
+import inspect
 import socketserver
 import xmlrpc.client
 from xmlrpc.server import SimpleXMLRPCServer
@@ -3008,21 +3009,31 @@ async def connect_vtc_session(duration):
                 reason="join_start",
             )
             emit_event(config, "meeting_join_start", {"vtc_url": config.get("vtc_url")}, service)
-            await adapter.connect_to_meeting(
+            join_result = await adapter.connect_to_meeting(
                 vtc_url=str(config["vtc_url"]),
                 display_name=adapter._display_name() if hasattr(adapter, "_display_name") else str(config.get("bot_name") or "bot"),
             )
+            join_result = join_result if isinstance(join_result, dict) else {"status": "joined", "media_ready": bool(join_result)}
+            join_status = str(join_result.get("status") or "unknown")
+            connected = join_status in {"joined", "waiting_for_others", "waiting_for_host", "lobby"}
+            media_ready = bool(join_result.get("media_ready", False))
+            ready = bool(media_ready)
             set_connection_status(
-                "running",
-                connected=True,
-                ready=True,
-                media_ready=True,
+                "running" if ready else join_status,
+                connected=connected,
+                ready=ready,
+                media_ready=media_ready,
                 error=None,
                 vtc_url=config.get("vtc_url"),
                 stage="meeting_running",
-                reason="media_ready_confirmed",
+                reason=str(join_result.get("reason") or join_status),
             )
-            emit_event(config, "meeting_join_ready", {"vtc_url": config.get("vtc_url")}, service)
+            emit_event(
+                config,
+                "meeting_join_ready" if ready else "meeting_join_connected_not_media_ready",
+                {"vtc_url": config.get("vtc_url"), "status": join_status, "media_ready": media_ready},
+                service,
+            )
             await wait_for_session_duration_or_stop(duration * 60)
             set_connection_status(
                 "leaving",
@@ -3127,7 +3138,12 @@ async def connect_vtc_session(duration):
         )
         if adapter is not None and hasattr(adapter, "collect_diagnostics"):
             try:
-                adapter.collect_diagnostics("connect_vtc_session_error", {"error": str(exc), "error_code": type(exc).__name__})
+                diagnostic_result = adapter.collect_diagnostics(
+                    "connect_vtc_session_error",
+                    {"error": str(exc), "error_code": type(exc).__name__},
+                )
+                if inspect.isawaitable(diagnostic_result):
+                    await diagnostic_result
             except Exception as diagnostic_exc:
                 emit_event(
                     config,

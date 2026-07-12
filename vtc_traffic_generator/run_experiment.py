@@ -88,6 +88,22 @@ def normalize_clients(experiment):
             }
         )
 
+    exclusive = {}
+    for client in normalized:
+        host = client["host"]
+        adapter = client.get("adapter_config") if isinstance(client.get("adapter_config"), dict) else {}
+        values = {
+            "DISPLAY": client["display"],
+            "control port": client["c2_port"],
+            "video device": client["video_device"],
+            "Chrome profile directory": str(adapter.get("chrome_user_data_dir") or f"/tmp/vtc-{client['name']}/webex-chrome-profile"),
+            "diagnostics output directory": str(client.get("diagnostic_dir") or f"/tmp/vtc-{client['name']}/diagnostics"),
+        }
+        for kind, value in values.items():
+            key = (host, kind, str(value))
+            if key in exclusive:
+                raise ValueError(f"Resource collision on host {host}: {kind} {value!r} is shared by {exclusive[key]} and {client['name']}")
+            exclusive[key] = client["name"]
     return normalized
 
 
@@ -167,6 +183,8 @@ def build_remote_config(experiment, client):
         "diagnostic_dir": str(client.get("diagnostic_dir", f"/tmp/vtc-{bot_name}/diagnostics/{run_log_id}")),
         "restart_existing": bool(client.get("restart_existing", False)),
     }
+    if str(service).lower() == "webex":
+        adapter_config.setdefault("chrome_user_data_dir", f"/tmp/vtc-{bot_name}/webex-chrome-profile")
     screen_share_window = resolve_screen_share_window(experiment, client, defaults)
     if screen_share_window.get("enabled"):
         screen_share_target = str(screen_share_window.get("title") or f"VTC Share Window - {bot_name}")
@@ -259,7 +277,7 @@ def render_inventory(experiment, clients, output_dir):
     ssh_key = ansible_config.get("ssh_private_key_file")
     repo_dir = repo.get("dir", "/home/ubuntu/video-teleconference")
     repo_url = repo.get("url")
-    repo_version = repo.get("version", experiment.get("branch", "main"))
+    repo_version = require(experiment.get("git_sha"), "git_sha for exact deployment revision")
     python_bin = repo.get("python", "python3")
     defaults = experiment.get("defaults", {})
     if not isinstance(defaults, dict):

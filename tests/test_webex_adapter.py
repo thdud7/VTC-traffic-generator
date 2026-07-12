@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "vtc_traffic_generator"))
 
 from vtc_traffic_generator.run_experiment import generate
@@ -721,20 +722,10 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertEqual(result["stage"], "webex_prejoin_no_actionable_state")
         self.assertEqual(len(scans), 2)
 
-    def test_prejoin_window_fallback_join_returns_without_display_name_or_browser_join(self):
+    def test_window_title_cannot_mark_joined_before_final_join(self):
         adapter = _join_test_adapter("joined")
         adapter.page.visible = {"#join"}
         adapter._browser_join_clicked_once = True
-
-        async def fail_fill(*args, **kwargs):
-            raise AssertionError("display name fill should not run after joined fallback")
-
-        async def fail_browser_join(*args, **kwargs):
-            raise AssertionError("browser join should not be clicked after joined fallback")
-
-        adapter._fill_display_name = fail_fill
-        adapter._fill_display_name_if_needed = fail_fill
-        adapter._click_browser_prejoin_selector = fail_browser_join
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
             with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value="/usr/bin/wmctrl"):
@@ -744,9 +735,10 @@ class WebexAdapterTests(unittest.TestCase):
                         stdout="0x00400003  0 2 40 1288 851 bot4 In meeting · Meeting · Webex - Chromium\n",
                         stderr="",
                     )
-                    result = asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
+                    result = asyncio.run(adapter._scan_joined_state_all_surfaces(timeout_ms=5))
 
-        self.assertEqual(result["status"], "joined")
+        self.assertEqual(result["status"], "candidate")
+        self.assertFalse(result["joined"])
         self.assertEqual(result["selector"], "window_fallback")
         self.assertEqual(adapter.page.clicks, [])
         self.assertEqual(adapter.page.fills, [])
