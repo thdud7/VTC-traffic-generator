@@ -1454,7 +1454,7 @@ class WebexAdapterTests(unittest.TestCase):
             unhandled = []
             loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
             state = await adapter._download_retry_page_state(timeout_ms=1)
-            with self.assertRaisesRegex(RuntimeError, "browser_join_click_not_found"):
+            with self.assertRaisesRegex(RuntimeError, "browser_join_click_timeout"):
                 await adapter._click_browser_join_from_state(state, timeout_ms=1) or await adapter._raise_browser_join_click_not_found(state)
             await asyncio.sleep(0)
             return unhandled
@@ -1510,6 +1510,63 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertNotIn('button:has-text("Join Meeting")', outer.waits)
         self.assertNotIn('button:has-text("Join Meeting")', outer.clicks)
 
+    def test_browser_join_container_resolves_inner_clickable_target(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.js_candidate_click_result = {
+            "ok": True, "method": "dom_text_click", "clicked_tag": "BUTTON",
+            "target_selector": '[data-vtc-browser-join-target="child"]',
+        }
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from this browser"}}
+
+        result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+
+        self.assertEqual(result["clicked_tag"], "BUTTON")
+        self.assertEqual(result["method"], "dom_text_click")
+
+    def test_browser_join_page_failure_retries_frame_zero(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.visible = {"#broadcom-center-right"}
+        outer.timeout_selectors.add("#broadcom-center-right")
+        outer.js_candidate_click_result = {"ok": False, "reason": "blocked"}
+        frame = FakeWebexFrame("joined", url="https://example.webex.com/download/frame")
+        frame.js_candidate_click_result = {"ok": True, "method": "dom_text_click", "clicked_tag": "A"}
+        outer.frames = [frame]
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from browser"}}
+
+        result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+
+        self.assertEqual(result["scope"], "frame[0]")
+
+    def test_browser_join_dismisses_cookie_banner_before_click(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        outer.visible = {'button:has-text("Reject all")', "#broadcom-center-right"}
+        outer.js_candidate_click_result = {"ok": True, "method": "dom_text_click"}
+        outer.js_candidate_click_callback = lambda _selector: self.assertIn('button:has-text("Reject all")', outer.clicks)
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from this browser"}}
+
+        asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+
+        self.assertIn('button:has-text("Reject all")', outer.clicks)
+
+    def test_browser_join_coordinate_click_uses_resolved_text_rect(self):
+        adapter = _join_test_adapter("joined")
+        outer = adapter.page
+        target = '[data-vtc-browser-join-target="text"]'
+        outer.visible = {target}
+        outer.click_timeout_selectors.add(target)
+        outer.js_candidate_click_result = {
+            "ok": False, "reason": "events_blocked", "target_selector": target,
+            "rect": {"x": 10, "y": 20, "width": 80, "height": 20},
+        }
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from your browser"}}
+
+        result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+
+        self.assertEqual(result["method"], "coordinate_click")
+        self.assertEqual(outer.mouse.clicks, [(50.0, 30.0)])
+
     def test_browser_join_candidate_click_fallbacks_are_bounded(self):
         adapter = _join_test_adapter(
             "joined",
@@ -1533,11 +1590,10 @@ class WebexAdapterTests(unittest.TestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=1))
+            with self.assertRaisesRegex(RuntimeError, "browser_join_click_timeout"):
+                asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=1))
 
-        self.assertIsNone(result)
-        self.assertIn("playwright_locator_click", output.getvalue())
-        self.assertIn("playwright_force_click", output.getvalue())
+        self.assertIn("resolved_target_visibility", output.getvalue())
         self.assertIn("browser_join_click_failed", output.getvalue())
         self.assertNotIn('button:has-text("Join Meeting")', outer.waits)
 
@@ -2727,7 +2783,7 @@ class FakeWebexLocator:
         raise PlaywrightTimeoutError(f"{self.selector} is not visible")
 
     async def click(self, **kwargs):
-        if self.selector in self.page.timeout_selectors:
+        if self.selector in self.page.timeout_selectors or self.selector in self.page.click_timeout_selectors:
             raise PlaywrightTimeoutError(f"Timeout clicking {self.selector}")
         self.page.clicks.append(self.selector)
         self.page.focused_selector = self.selector
@@ -2848,6 +2904,7 @@ class FakeWebexPage:
         self.clicks = []
         self.waits = []
         self.timeout_selectors = set()
+        self.click_timeout_selectors = set()
         self.fills = []
         self.values = {}
         self.input_value_calls = []

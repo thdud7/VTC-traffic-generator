@@ -33,6 +33,8 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     DEFAULT_SELECTORS = {
         "cookie_accept": [
+            'button:has-text("Allow all")',
+            'button:has-text("Allow All")',
             'button:has-text("Accept all")',
             'button:has-text("Accept All")',
             'button:has-text("Accept")',
@@ -4328,6 +4330,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             "timeout_sec": total_timeout,
         }
         self._progress("browser_join_click_attempt", attempt)
+        await self._dismiss_browser_join_cookie_banner(timeout)
         if action.get("selector"):
             try:
                 clicked = await asyncio.wait_for(
@@ -4336,13 +4339,13 @@ class WebexAdapter(BrowserMeetingAdapter):
                 )
             except asyncio.TimeoutError:
                 self._progress("browser_join_click_timeout", attempt)
-                return None
+                raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
             if clicked:
                 self._browser_join_clicked_once = True
                 self._progress("browser_join_click_success", clicked)
                 return clicked
             self._progress("browser_join_click_failed", attempt)
-            return None
+            raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
 
         preferred = [item for item in scopes if item[0] == preferred_scope_name]
         ordered_scopes = preferred + [item for item in scopes if item[0] != preferred_scope_name]
@@ -4377,6 +4380,20 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._progress("browser_join_click_not_found", {"preferred_scope": preferred_scope_name})
         return None
 
+    async def _dismiss_browser_join_cookie_banner(self, timeout_ms):
+        """Dismiss consent overlays without consuming the browser-join deadline."""
+        cookie_timeout = max(1, min(int(timeout_ms or 1), 150))
+        for group in ("cookie_reject", "cookie_accept"):
+            try:
+                selector = await self._click_first_visible(group, timeout_ms=cookie_timeout)
+            except Exception as exc:
+                self._append_browser_log("browser_join_cookie_dismiss_unavailable", repr(exc))
+                selector = None
+            if selector:
+                self._progress("browser_join_cookie_dismissed", {"selector": selector, "group": group})
+                return selector
+        return None
+
     def _browser_join_click_total_timeout_sec(self):
         try:
             return max(
@@ -4394,66 +4411,90 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _click_browser_join_candidate(self, scopes, action, timeout_ms):
         selector = action.get("selector")
         scope_name = action.get("scope")
-        scope = next((candidate_scope for candidate_name, candidate_scope in scopes if candidate_name == scope_name), None)
-        if scope is None:
+        preferred = [item for item in scopes if item[0] == scope_name]
+        ordered_scopes = preferred + [item for item in scopes if item[0] != scope_name]
+        if not ordered_scopes:
             self._progress(
                 "browser_join_click_failed",
                 {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": "scope_lookup", "reason": "scope_not_found"},
             )
             return None
 
-        clicked = await self._js_click_browser_join_candidate(scope_name, scope, selector, action.get("text"), timeout_ms)
-        if clicked:
-            return clicked
+        for candidate_scope_name, scope in ordered_scopes:
+            clicked = await self._click_browser_join_candidate_in_scope(
+                candidate_scope_name, scope, selector, action.get("text"), timeout_ms
+            )
+            if clicked:
+                return clicked
+        return None
+
+    async def _click_browser_join_candidate_in_scope(self, scope_name, scope, selector, text, timeout_ms):
+        resolved = await self._js_click_browser_join_candidate(scope_name, scope, selector, text, timeout_ms)
+        if resolved and resolved.get("ok"):
+            return resolved
+
+        target_selector = (resolved or {}).get("target_selector") or selector
 
         methods = (
             ("playwright_locator_click", {"timeout": timeout_ms}),
             ("playwright_force_click", {"timeout": timeout_ms, "force": True}),
         )
-        locator = scope.locator(selector).first
+        locator = scope.locator(target_selector).first
+        try:
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+        except Exception as exc:
+            self._progress(
+                "browser_join_click_failed",
+                {"selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text,
+                 "method": "resolved_target_visibility", "reason": "not_visible", "error": repr(exc)},
+            )
+            return None
         for method, kwargs in methods:
             try:
                 await locator.click(**kwargs)
-                return {"ok": True, "selector": selector, "scope": scope_name, "text": action.get("text"), "method": method}
+                return {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": method}
             except PlaywrightTimeoutError as exc:
                 self._progress(
                     "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "timeout", "error": repr(exc)},
+                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "timeout", "error": repr(exc)},
                 )
             except self._safe_playwright_errors() as exc:
                 self._last_page_metadata_error = exc
                 self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
                 self._progress(
                     "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "playwright_error", "error": repr(exc)},
+                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "playwright_error", "error": repr(exc)},
                 )
             except Exception as exc:
                 self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
                 self._progress(
                     "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": method, "reason": "error", "error": repr(exc)},
+                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "error", "error": repr(exc)},
                 )
 
         try:
-            box = await asyncio.wait_for(self._maybe_await(locator.bounding_box()), timeout=timeout_ms / 1000)
+            box = (resolved or {}).get("rect")
+            if not box:
+                box = await asyncio.wait_for(self._maybe_await(locator.bounding_box()), timeout=timeout_ms / 1000)
             if box:
                 x = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
                 y = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
                 mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
                 if mouse and hasattr(mouse, "click"):
                     await asyncio.wait_for(self._maybe_await(mouse.click(x, y)), timeout=timeout_ms / 1000)
-                    return {"ok": True, "selector": selector, "scope": scope_name, "text": action.get("text"), "method": "coordinate_click", "x": x, "y": y}
+                    return {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": "coordinate_click", "x": x, "y": y}
         except Exception as exc:
             self._append_browser_log("browser_join_candidate_coordinate_click_unavailable", repr(exc))
         self._progress(
             "browser_join_click_failed",
-            {"selector": selector, "scope": scope_name, "text": action.get("text"), "method": "coordinate_click", "reason": "no_clickable_box"},
+            {"selector": selector, "scope": scope_name, "text": text, "method": "coordinate_click", "reason": "no_clickable_box"},
         )
         return None
 
     async def _js_click_browser_join_candidate(self, scope_name, scope, selector, text, timeout_ms):
         script = r"""
         (selector) => {
+          // js_candidate_click: resolve the actual text/control, never the broad shell alone.
           const visible = (el) => {
             if (!el || !el.isConnected) return false;
             const style = window.getComputedStyle(el);
@@ -4461,25 +4502,34 @@ class WebexAdapter(BrowserMeetingAdapter):
             return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
           };
           const norm = (value) => String(value || "").replace(/\s+/g, " ").trim();
-          const target = document.querySelector(selector);
-          if (!target) return {ok: false, method: "js_candidate_click", reason: "selector_not_found"};
-          const clickables = Array.from(target.querySelectorAll("button, a, [role='button'], [role='link'], [tabindex], mdc-button"));
-          const ancestors = [];
-          let node = target;
-          while (node && node !== document.body && ancestors.length < 8) {
-            ancestors.push(node);
-            node = node.parentElement;
-          }
-          const candidates = [target, ...clickables, ...ancestors].filter((el, index, all) => el && all.indexOf(el) === index);
-          const clickable = candidates.find(visible);
-          if (!clickable) return {ok: false, method: "js_candidate_click", reason: "not_visible"};
+          const container = document.querySelector(selector);
+          if (!container) return {ok: false, method: "js_candidate_click", reason: "selector_not_found"};
+          const phrases = ["join from this browser", "join from browser", "join from your browser"];
+          const hasText = el => phrases.some(p => norm(el.innerText || el.textContent || el.getAttribute("aria-label") || "").toLowerCase().includes(p));
+          const clickableSelector = "button, a, [role='button'], [tabindex], [onclick]";
+          const controls = [...(container.matches(clickableSelector) ? [container] : []), ...container.querySelectorAll(clickableSelector)]
+            .filter(el => visible(el) && hasText(el));
+          const textElements = [container, ...container.querySelectorAll("*")]
+            .filter(el => visible(el) && hasText(el))
+            .sort((a, b) => (a.getBoundingClientRect().width * a.getBoundingClientRect().height) - (b.getBoundingClientRect().width * b.getBoundingClientRect().height));
+          const textElement = textElements[0];
+          const clickable = controls.sort((a, b) => (a.getBoundingClientRect().width * a.getBoundingClientRect().height) - (b.getBoundingClientRect().width * b.getBoundingClientRect().height))[0]
+            || (textElement && textElement.closest(clickableSelector)) || textElement;
+          if (!clickable || !visible(clickable)) return {ok: false, method: "js_candidate_click", reason: "not_visible"};
+          const marker = `vtc-webex-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          clickable.setAttribute("data-vtc-browser-join-target", marker);
           clickable.scrollIntoView({block: "center", inline: "center"});
-          clickable.click();
+          for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+            const EventClass = type.startsWith("pointer") && window.PointerEvent ? window.PointerEvent : MouseEvent;
+            clickable.dispatchEvent(new EventClass(type, {bubbles: true, cancelable: true, view: window}));
+          }
           const rect = clickable.getBoundingClientRect();
           return {
             ok: true,
-            method: "js_candidate_click",
+            method: "dom_text_click",
             selector,
+            target_selector: `[data-vtc-browser-join-target="${marker}"]`,
+            rect: {x: rect.left, y: rect.top, width: rect.width, height: rect.height},
             clicked_tag: clickable.tagName || "",
             clicked_text: norm(clickable.innerText || clickable.textContent || clickable.getAttribute("aria-label") || "").slice(0, 160),
             x: rect.left + rect.width / 2,
@@ -4514,7 +4564,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "reason": (result or {}).get("reason") if isinstance(result, Mapping) else "not_clicked",
             },
         )
-        return None
+        return dict(result) if isinstance(result, Mapping) else None
 
     async def _click_selector_in_scope(self, scope_name, scope, selector, timeout_ms):
         try:
