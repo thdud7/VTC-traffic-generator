@@ -213,6 +213,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             'text=/브라우저에서 참가하는 데 문제가 있/',
         ],
         "try_again_browser_join": [
+            "#fallBkJoinByBrowser",
             'text="Try again"',
             'text="Retry"',
             'text="다시 시도"',

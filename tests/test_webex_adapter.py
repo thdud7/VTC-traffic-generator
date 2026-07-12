@@ -1161,6 +1161,7 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertIn('text="Webex Installer.dmg"', adapter.selectors("download_page_indicator"))
         self.assertIn('text="Webex Installer.dmg"', adapter.selectors("installer_download_indicator"))
         self.assertIn('text="Problem joining from browser?"', adapter.selectors("problem_joining_from_browser"))
+        self.assertIn("#fallBkJoinByBrowser", adapter.selectors("try_again_browser_join"))
         self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_browser_join"))
         self.assertNotIn('a:has-text("Try again")', adapter.selectors("try_again_browser_join"))
         self.assertIn('button:has-text("Try again")', adapter.selectors("try_again_button"))
