@@ -38,6 +38,7 @@ class WebexJoinState(str, Enum):
     NAVIGATING = "NAVIGATING"
     OUTER_PAGE = "OUTER_PAGE"
     BROWSER_JOIN_REQUIRED = "BROWSER_JOIN_REQUIRED"
+    POST_BROWSER_JOIN_TRANSITION = "POST_BROWSER_JOIN_TRANSITION"
     GUEST_FRAME_LOADING = "GUEST_FRAME_LOADING"
     DISPLAY_NAME_REQUIRED = "DISPLAY_NAME_REQUIRED"
     FINAL_JOIN_REQUIRED = "FINAL_JOIN_REQUIRED"
@@ -785,6 +786,13 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._last_display_name_fill_method = None
         self._preferred_webex_meeting_frame = None
         self._browser_join_clicked_once = False
+        self.browser_join_attempt_count = 0
+        self.browser_join_methods_attempted = []
+        self.browser_join_transition_observed = False
+        self.browser_join_last_snapshot_signature = None
+        self.browser_join_last_attempt_monotonic = None
+        self.browser_join_retry_count = 0
+        self._browser_join_cookie_dismissed = False
         self._final_join_clicked_success = False
         self.joined = False
         self.in_meeting = False
@@ -1132,6 +1140,13 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._join_deadline = JoinDeadline.after(hard_cap)
         self._join_state = WebexJoinState.NAVIGATING
         self._join_transition_history = []
+        self.browser_join_attempt_count = 0
+        self.browser_join_methods_attempted = []
+        self.browser_join_transition_observed = False
+        self.browser_join_last_snapshot_signature = None
+        self.browser_join_last_attempt_monotonic = None
+        self.browser_join_retry_count = 0
+        self._browser_join_cookie_dismissed = False
         self._external_protocol_navigation_generation += 1
         if self.page is None:
             await wait_with_deadline(self.launch(), self._join_deadline, "browser_launch")
@@ -1499,6 +1514,17 @@ class WebexAdapter(BrowserMeetingAdapter):
                 clicked = await self._click_browser_join_from_state(page_state, timeout_ms=min(timeout, 1000))
                 if not clicked:  # defensive: candidate failures normally raise above
                     await self._raise_browser_join_click_not_found(page_state)
+                if not clicked.get("transition_evidence"):
+                    raise RuntimeError("browser_join_activation_returned_without_transition")
+                self._record_join_transition(
+                    WebexJoinState.POST_BROWSER_JOIN_TRANSITION,
+                    "browser_join_activation",
+                    snapshot=snapshot,
+                    selector=clicked.get("target_selector") or clicked.get("selector"),
+                    click_method=clicked.get("method"),
+                    evidence=clicked.get("transition_evidence"),
+                    retry_count=self.browser_join_retry_count,
+                )
                 return await self._post_browser_join_transition_loop(display_name, timeout_ms=min(timeout, 1000))
             if action == "fill_display_name":
                 await asyncio.wait_for(
@@ -1564,6 +1590,7 @@ class WebexAdapter(BrowserMeetingAdapter):
     def _select_prejoin_action(self, snapshot, page_state):
         """Choose one mutation from the iteration's cached DOM snapshot."""
         if page_state.get("browser_join_action"):
+            self._join_state = WebexJoinState.BROWSER_JOIN_REQUIRED
             return "click_browser_join", page_state["browser_join_action"]
 
         scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
@@ -1582,9 +1609,29 @@ class WebexAdapter(BrowserMeetingAdapter):
             return "click_cookie", {}
         if page_state.get("try_again_action"):
             return "click_try_again", page_state["try_again_action"]
-        if any(scope.get("visible_inputs") for scope in scopes) or page_state.get("webclient_frame_ready"):
+        frame = page_state.get("webclient_frame") or {}
+        if page_state.get("webclient_frame_ready") and frame.get("iframe_visible") and (
+            any(scope.get("visible_inputs") for scope in scopes)
+            or int(frame.get("visible_text_input_count") or 0) > 0
+        ):
+            self._join_state = WebexJoinState.DISPLAY_NAME_REQUIRED
             return "fill_display_name", {}
         return "wait", {}
+
+    def _classify_prejoin_state(self, snapshot, page_state):
+        """Classify cached evidence without treating a preloaded hidden frame as activated."""
+        if page_state.get("browser_join_action"):
+            return WebexJoinState.BROWSER_JOIN_REQUIRED
+        frame = page_state.get("webclient_frame") or {}
+        if frame.get("iframe_visible") and page_state.get("webclient_frame_ready"):
+            if int(frame.get("visible_text_input_count") or 0) > 0:
+                return WebexJoinState.DISPLAY_NAME_REQUIRED
+            if frame.get("join_button_detected"):
+                return WebexJoinState.FINAL_JOIN_REQUIRED
+            return WebexJoinState.GUEST_FRAME_LOADING
+        if page_state.get("webclient_frame_exists"):
+            return WebexJoinState.GUEST_FRAME_LOADING
+        return WebexJoinState.OUTER_PAGE
 
     @staticmethod
     def _prejoin_action_fingerprint(action, payload):
@@ -1767,6 +1814,17 @@ class WebexAdapter(BrowserMeetingAdapter):
         return results
 
     async def _post_browser_join_transition_loop(self, display_name, timeout_ms=None):
+        await self._cancel_stale_probe_tasks(reason="post_browser_join_transition_entry")
+        entry_probe = await self._cheap_browser_join_transition_probe()
+        if not self.browser_join_transition_observed and entry_probe.get("outer_visible"):
+            result = {
+                "status": "timeout",
+                "stage": "webex_post_browser_join_transition_not_observed",
+                "selector": None,
+                "visible_text": await self._visible_text_excerpt(),
+            }
+            self._progress("webex_post_browser_join_transition_rejected", result)
+            return result
         timeout_sec = self._post_browser_join_transition_timeout_sec()
         final_reserve = self._deadline_reserve("final_join_action_reserve_sec", 2.0)
         if self._join_deadline is not None:
@@ -1777,9 +1835,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         await self._cancel_stale_probe_tasks(reason="post_browser_join_transition_start")
         self._discard_browser_join_snapshot_state()
         last_result = {"status": "continue", "selector": None, "visible_text": ""}
-        while asyncio.get_running_loop().time() < deadline:
+        rescans = 0
+        max_rescans = max(1, self.timeout_ms("post_browser_join_max_rescans", 8))
+        while asyncio.get_running_loop().time() < deadline and rescans < max_rescans:
+            rescans += 1
             self._require_join_reserve("post_browser_join_snapshot", final_reserve + 0.2)
-            self._progress("webex_post_browser_join_rescan_start", {"page_count": len(self._known_playwright_pages())})
+            self._progress("webex_post_browser_join_rescan_start", {"page_count": len(self._known_playwright_pages()), "rescan": rescans, "max_rescans": max_rescans})
             result = await self._post_browser_join_rescan(display_name, timeout_ms=timeout_ms)
             last_result = result
             self._progress("webex_post_browser_join_rescan_result", result)
@@ -1813,6 +1874,19 @@ class WebexAdapter(BrowserMeetingAdapter):
         if state.get("webclient_frame_detected"):
             frame = state.get("webclient_frame") or {}
             self._progress("webex_webclient_frame_detected", frame)
+
+        # A preloaded, hidden guest document never outranks the still-visible
+        # outer browser-join control. Return to the activation state immediately.
+        frame = state.get("webclient_frame") or {}
+        if state.get("browser_join_action") and not frame.get("iframe_visible"):
+            self.browser_join_transition_observed = False
+            self._join_state = WebexJoinState.BROWSER_JOIN_REQUIRED
+            return {
+                "status": "browser_join_required",
+                "state": WebexJoinState.BROWSER_JOIN_REQUIRED.value,
+                "browser_join_action": state.get("browser_join_action"),
+                "visible_text": state.get("visible_text", ""),
+            }
 
         fill_result = await self._fill_display_name_if_needed(display_name, timeout_ms=timeout_ms, snapshot=snapshot)
         terminal_state = self._terminal_join_state_from_fill_result(fill_result)
@@ -2173,9 +2247,10 @@ class WebexAdapter(BrowserMeetingAdapter):
           return {
             title: document.title || "", url: location.href || "",
             frame_urls: Array.from(document.querySelectorAll("iframe,frame")).slice(0, 40).map(el => el.src || ""),
-            iframe_elements: Array.from(document.querySelectorAll("iframe,frame")).slice(0, 40).map(el => ({
-              url: el.src || "", id: el.id || "", name: el.name || "", visible: visible(el)
-            })),
+            iframe_elements: Array.from(document.querySelectorAll("iframe,frame")).slice(0, 40).map(el => { const r=el.getBoundingClientRect(); return {
+              url: el.src || "", id: el.id || "", name: el.name || "", visible: visible(el),
+              bounding_box: {x:r.x,y:r.y,width:r.width,height:r.height}
+            }}),
             document_ready_state: document.readyState || "",
             body_child_count: document.body ? document.body.children.length : 0,
             document_signature: [location.href, document.title, document.body ? document.body.children.length : 0,
@@ -2323,6 +2398,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 if iframe_elements is not None
                 else True
             )
+            iframe_bounding_box = next((item.get("bounding_box") for item in matching_iframes if item.get("bounding_box")), None)
             document_ready_state = str(details.get("document_ready_state") or "")
             body_child_count = int(details.get("body_child_count") or 0)
             document_loaded = document_ready_state in {"interactive", "complete"} if document_ready_state else True
@@ -2349,6 +2425,7 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "prejoin_control_detected": prejoin_control,
                 "prejoin_text": prejoin_text,
                 "iframe_visible": iframe_visible,
+                "iframe_bounding_box": iframe_bounding_box,
                 "document_ready_state": document_ready_state,
                 "body_child_count": body_child_count,
                 "document_signature": str(details.get("document_signature") or ""),
@@ -2365,7 +2442,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             self._preferred_webex_meeting_frame = frame_scopes[best["index"]][1]
         return best["details"]
 
-    def _browser_join_action_from_snapshot(self, snapshot):
+    def _browser_join_action_from_snapshot(self, snapshot, emit=True):
         scopes = [snapshot.get("page") or {}] + list(snapshot.get("frames") or [])
         best = None
         for index, details in enumerate(scopes):
@@ -2384,7 +2461,8 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "text": match.get("text"),
                 "score": len(visible_buttons) + match.get("score", 0),
             }
-            self._progress("browser_join_candidate_found", candidate)
+            if emit:
+                self._progress("browser_join_candidate_found", candidate)
             if best is None or candidate["score"] > best["score"]:
                 best = candidate
         return best
@@ -3511,9 +3589,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         window_state = await self._detect_webex_meeting_window_state_async()
         if window_state:
             window_state = self._normalize_join_state(window_state)
-            self._progress("webex_joined_state_detected_by_window_fallback", window_state)
             if self._is_terminal_join_state(window_state):
+                self._progress("webex_joined_state_detected_by_window_fallback", window_state)
                 self._progress("webex_joined_state_scan_result", window_state)
+            else:
+                self._progress("webex_meeting_window_candidate", window_state)
+                self._progress("window_fallback_not_sufficient", window_state)
             return window_state
 
         self._progress("webex_joined_state_scan_result", {"status": "continue"})
@@ -4585,9 +4666,32 @@ class WebexAdapter(BrowserMeetingAdapter):
             "method": "candidate",
             "timeout_sec": total_timeout,
         }
-        self._progress("browser_join_click_attempt", attempt)
+        self.browser_join_retry_count += 1
+        self.browser_join_last_attempt_monotonic = time.monotonic()
+        self.browser_join_last_snapshot_signature = self._browser_join_snapshot_signature(state.get("_activation_snapshot"))
+        self._progress("browser_join_activation_start", {
+            **attempt,
+            "attempt_id": str(self.config.get("attempt_id") or ""),
+            "state": WebexJoinState.BROWSER_JOIN_REQUIRED.value,
+            "total_attempt_index": self.browser_join_attempt_count + 1,
+            "method_attempt_index": 0,
+            "bounding_box": None,
+            "click_point": None,
+            "element_at_point": None,
+            "target_contains_element_at_point": None,
+            "iframe_visible_before": False,
+            "iframe_visible_after": False,
+            "outer_visible_before": True,
+            "outer_visible_after": True,
+            "signature_before": "",
+            "signature_after": "",
+            "transition_evidence": [],
+            "elapsed_ms": 0.0,
+            "remaining_global_deadline_sec": self._remaining_join_deadline_sec(),
+            "exception_type": None,
+            "exception_message": None,
+        })
         before_snapshot = state.get("_activation_snapshot")
-        await self._dismiss_browser_join_cookie_banner(timeout)
         if before_snapshot is None:
             before_snapshot = await self._page_state_snapshot(timeout_ms=min(timeout, 250))
         if action.get("selector"):
@@ -4602,10 +4706,33 @@ class WebexAdapter(BrowserMeetingAdapter):
                 raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
             if clicked and clicked.get("transition_evidence"):
                 self._browser_join_clicked_once = True
+                self.browser_join_transition_observed = True
                 self._progress("browser_join_click_success", clicked)
+                self._progress("browser_join_activation_success", clicked)
                 return clicked
+            self._progress("browser_join_activation_exhausted", {
+                **attempt,
+                "attempt_id": str(self.config.get("attempt_id") or ""),
+                "state": WebexJoinState.BROWSER_JOIN_REQUIRED.value,
+                "transition_evidence": [],
+                "method_attempt_index": len(self.browser_join_methods_attempted),
+                "total_attempt_index": self.browser_join_attempt_count,
+                "bounding_box": None,
+                "click_point": None,
+                "element_at_point": None,
+                "target_contains_element_at_point": None,
+                "iframe_visible_before": False,
+                "iframe_visible_after": False,
+                "outer_visible_before": True,
+                "outer_visible_after": True,
+                "signature_before": "",
+                "signature_after": "",
+                "elapsed_ms": 0.0,
+                "remaining_global_deadline_sec": self._remaining_join_deadline_sec(),
+                "exception_type": None,
+                "exception_message": None,
+            })
             self._progress("browser_join_click_failed", attempt)
-            self._progress("browser_join_click_timeout", attempt)
             await self._maybe_await(self.collect_diagnostics(stage="browser_join_click_timeout", extra=attempt))
             raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
 
@@ -4642,8 +4769,20 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._progress("browser_join_click_not_found", {"preferred_scope": preferred_scope_name})
         return None
 
-    async def _dismiss_browser_join_cookie_banner(self, timeout_ms):
-        """Dismiss consent overlays without consuming the browser-join deadline."""
+    async def _dismiss_browser_join_cookie_banner(self, timeout_ms, target_metadata=None):
+        """Dismiss consent only when hit testing proves it covers the join target."""
+        metadata = dict(target_metadata or {})
+        detected = bool(metadata.get("cookie_banner_detected"))
+        intersects = bool(metadata.get("cookie_banner_intersects_target"))
+        details = {
+            "cookie_banner_detected": detected,
+            "cookie_banner_intersects_target": intersects,
+            "cookie_action": None,
+            "cookie_transition_observed": False,
+        }
+        if not detected or not intersects or self._browser_join_cookie_dismissed:
+            self._progress("cookie_banner_detected", details)
+            return None
         cookie_timeout = max(1, min(int(timeout_ms or 1), 150))
         for group in ("cookie_reject", "cookie_accept"):
             try:
@@ -4652,10 +4791,13 @@ class WebexAdapter(BrowserMeetingAdapter):
                 self._append_browser_log("browser_join_cookie_dismiss_unavailable", repr(exc))
                 selector = None
             if selector:
-                self._progress("webex_cookie_banner_detected", {"selector": selector, "group": group})
+                self._browser_join_cookie_dismissed = True
+                details.update({"cookie_action": group, "cookie_transition_observed": True, "selector": selector})
+                self._progress("cookie_banner_detected", details)
                 self._progress("browser_join_cookie_dismissed", {"selector": selector, "group": group})
                 self._progress("webex_cookie_banner_dismissed", {"selector": selector, "group": group})
                 return selector
+        self._progress("cookie_banner_detected", details)
         return None
 
     def _browser_join_click_total_timeout_sec(self):
@@ -4722,13 +4864,18 @@ class WebexAdapter(BrowserMeetingAdapter):
                 enabled = await self._maybe_await(candidate_locator.is_enabled(timeout=timeout_ms)) if hasattr(candidate_locator, "is_enabled") else True
                 candidate_box = await self._maybe_await(candidate_locator.bounding_box()) if hasattr(candidate_locator, "bounding_box") else None
                 candidate_metadata = await self._browser_join_target_metadata(candidate_locator)
+                if candidate_metadata.get("attached") is False:
+                    raise RuntimeError("browser join target is detached")
                 if not enabled or candidate_metadata.get("aria_disabled") == "true" or not candidate_box:
                     raise RuntimeError("browser join target is disabled or has no bounding box")
                 if float(candidate_box.get("width", 0)) <= 0 or float(candidate_box.get("height", 0)) <= 0:
                     raise RuntimeError("browser join target has an empty bounding box")
                 if candidate_metadata.get("pointer_events") == "none":
                     raise RuntimeError("browser join target has pointer-events:none")
-                if candidate_metadata.get("center_target_is_descendant") is False:
+                if (
+                    candidate_metadata.get("center_target_is_descendant") is False
+                    and not candidate_metadata.get("cookie_banner_intersects_target")
+                ):
                     raise RuntimeError("browser join target does not own the center hit-test element")
                 locator, target_selector, box, metadata = candidate_locator, candidate_selector, candidate_box, candidate_metadata
                 break
@@ -4742,52 +4889,81 @@ class WebexAdapter(BrowserMeetingAdapter):
             )
             return None
 
-        methods = (("locator_click", "locator"), ("keyboard_enter", "keyboard"), ("mouse_click", "mouse"))
-        for method, kind in methods:
+        # Overlay handling is deliberately tied to the resolved target hit test.
+        if metadata.get("cookie_banner_intersects_target"):
+            await self._dismiss_browser_join_cookie_banner(timeout_ms, metadata)
+            metadata = await self._browser_join_target_metadata(locator)
+            box = await self._maybe_await(locator.bounding_box()) or box
+
+        methods = (
+            ("keyboard_enter", "Enter"),
+            ("keyboard_space", "Space"),
+            ("mouse_click", "mouse_center"),
+            ("locator_force_click", "locator_force_click"),
+        )
+        for method_index, (method, input_name) in enumerate(methods, start=1):
             started = time.monotonic()
-            original_exception = None
+            exception = None
+            click_point = None
+            dispatched = False
+            self.browser_join_attempt_count += 1
+            self.browser_join_methods_attempted.append(method)
+            total_index = self.browser_join_attempt_count
             try:
-                if kind == "locator":
-                    await locator.click(timeout=min(timeout_ms, 350))
-                elif kind == "keyboard":
+                if input_name in {"Enter", "Space"}:
                     await self._maybe_await(locator.scroll_into_view_if_needed(timeout=timeout_ms)) if hasattr(locator, "scroll_into_view_if_needed") else None
                     await self._maybe_await(locator.focus()) if hasattr(locator, "focus") else None
-                    keyboard = getattr(scope, "keyboard", None) or getattr(self.page, "keyboard", None)
-                    if keyboard is None:
-                        raise RuntimeError("Playwright keyboard is unavailable")
-                    await self._maybe_await(keyboard.press("Enter"))
-                else:
+                    if hasattr(locator, "press"):
+                        await self._maybe_await(locator.press(input_name, timeout=min(timeout_ms, 350)))
+                    else:  # lightweight test doubles; production Playwright locators have press().
+                        keyboard = getattr(scope, "keyboard", None) or getattr(self.page, "keyboard", None)
+                        if keyboard is None:
+                            raise RuntimeError("Playwright keyboard is unavailable")
+                        await self._maybe_await(keyboard.press(input_name))
+                    dispatched = True
+                elif input_name == "mouse_center":
                     mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
                     if mouse is None:
                         raise RuntimeError("Playwright mouse is unavailable")
-                    points = self._browser_join_click_points(box)
-                    point = points[0]
-                    await self._maybe_await(mouse.click(point[0], point[1]))
+                    click_point = self._browser_join_click_points(box)[0]
+                    point_metadata = await self._browser_join_point_metadata(locator, click_point)
+                    if point_metadata.get("target_contains_element_at_point") is False:
+                        raise RuntimeError("browser join center point is obscured")
+                    await self._maybe_await(mouse.click(click_point[0], click_point[1]))
+                    dispatched = True
+                    metadata.update(point_metadata)
+                else:
+                    # The final deterministic fallback remains a real Playwright input.
+                    click_point = self._browser_join_click_points(box)[1]
+                    await locator.click(force=True, no_wait_after=True, timeout=min(timeout_ms, 350))
+                    dispatched = True
             except Exception as exc:
-                original_exception = str(exc)
+                exception = exc
             evidence = []
-            if original_exception is None:
+            before_probe = self._browser_join_probe_baseline(before_snapshot)
+            if dispatched:
+                self._progress("browser_join_activation_input_dispatched", self._browser_join_activation_event(
+                    selector=target_selector, method=method, method_attempt_index=method_index,
+                    total_attempt_index=total_index, box=box, click_point=click_point, metadata=metadata,
+                    before=before_probe, after=None, evidence=[], started=started, exception=exception,
+                    dispatched=dispatched,
+                ))
+            if dispatched:
                 evidence = await self._wait_for_browser_join_transition(
                     before_snapshot, timeout_sec=self._deadline_reserve("browser_join_method_transition_sec", 0.7)
                 )
-            attempt = {
-                "selector": selector,
-                "target_selector": target_selector,
-                "scope": scope_name,
-                "text": text,
-                "tag": metadata.get("tag"),
-                "role": metadata.get("role"),
-                "aria_label": metadata.get("aria_label"),
-                "bounding_box": box,
-                "method": method,
-                "action_elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                "remaining_global_deadline_sec": self._join_deadline.remaining_sec() if self._join_deadline else None,
-                "playwright_exception": original_exception,
-                "transition_evidence": evidence,
-            }
+            after_probe = dict(getattr(self, "_last_browser_join_probe", {}) or {})
+            attempt = self._browser_join_activation_event(
+                selector=target_selector, method=method, method_attempt_index=method_index,
+                total_attempt_index=total_index, box=box, click_point=click_point, metadata=metadata,
+                before=before_probe, after=after_probe, evidence=evidence, started=started,
+                exception=exception, dispatched=dispatched,
+            )
             self._progress("browser_join_activation_attempt", attempt)
             if evidence:
-                return {"ok": True, **attempt}
+                self._progress("browser_join_activation_transition_observed", attempt)
+                return {"ok": True, "scope": scope_name, "target_selector": target_selector, **attempt}
+            self._progress("browser_join_activation_no_transition", attempt)
         self._progress(
             "browser_join_click_failed",
             {"selector": selector, "scope": scope_name, "text": text, "method": "real_input_sequence", "reason": "no_transition"},
@@ -4797,11 +4973,29 @@ class WebexAdapter(BrowserMeetingAdapter):
     async def _browser_join_target_metadata(self, locator):
         try:
             result = await self._maybe_await(locator.evaluate("""el => { const s=getComputedStyle(el), r=el.getBoundingClientRect();
-              const hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2); return {
+              const hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2);
+              const cookie=hit && hit.closest && hit.closest('[id*="cookie" i], [class*="cookie" i], [data-test*="cookie" i], [aria-label*="cookie" i]'); return {
               tag:(el.tagName||'').toLowerCase(), role:el.getAttribute('role')||'',
               aria_label:el.getAttribute('aria-label')||'', aria_disabled:el.getAttribute('aria-disabled')||'',
-              pointer_events:s.pointerEvents||'', center_target_is_descendant:!!hit && (hit===el || el.contains(hit))}; }"""))
+              attached:el.isConnected, pointer_events:s.pointerEvents||'',
+              element_at_point:hit ? ((hit.id&&('#'+hit.id)) || hit.getAttribute('aria-label') || hit.tagName) : null,
+              center_target_is_descendant:!!hit && (hit===el || el.contains(hit)),
+              target_contains_element_at_point:!!hit && (hit===el || el.contains(hit)),
+              cookie_banner_detected:!!document.querySelector('[id*="cookie" i], [class*="cookie" i], [data-test*="cookie" i], [aria-label*="cookie" i]'),
+              cookie_banner_intersects_target:!!cookie}; }"""))
             return dict(result) if isinstance(result, Mapping) else {}
+        except Exception:
+            return {}
+
+    async def _browser_join_point_metadata(self, locator, point):
+        try:
+            value = await self._maybe_await(locator.evaluate(
+                """(el, p) => { const hit=document.elementFromPoint(p.x,p.y); return {
+                element_at_point:hit ? ((hit.id&&('#'+hit.id)) || hit.getAttribute('aria-label') || hit.tagName) : null,
+                target_contains_element_at_point:!!hit && (hit===el || el.contains(hit))}; }""",
+                {"x": point[0], "y": point[1]},
+            ))
+            return dict(value) if isinstance(value, Mapping) else {}
         except Exception:
             return {}
 
@@ -4815,18 +5009,186 @@ class WebexAdapter(BrowserMeetingAdapter):
         if not before_snapshot:
             return []
         deadline = asyncio.get_running_loop().time() + max(0.05, timeout_sec)
+        before = self._browser_join_probe_baseline(before_snapshot)
         while asyncio.get_running_loop().time() < deadline:
-            after = await self._page_state_snapshot(timeout_ms=200)
-            evidence = self._browser_join_transition_evidence(before_snapshot, after)
+            after = await self._cheap_browser_join_transition_probe()
+            self._last_browser_join_probe = after
+            evidence = self._browser_join_probe_transition_evidence(before, after)
             if evidence:
                 return evidence
             await asyncio.sleep(0.1)
         return []
 
+    def _browser_join_probe_baseline(self, snapshot):
+        action = self._browser_join_action_from_snapshot(snapshot or {}, emit=False)
+        frame = self._webclient_frame_from_snapshot(snapshot or {}) or {}
+        return {
+            "outer_visible": bool(action),
+            "iframe_visible": bool(frame.get("iframe_visible")),
+            "iframe_bounding_box": frame.get("iframe_bounding_box"),
+            "signature": str(frame.get("document_signature") or ""),
+            "visible_text_input_count": int(frame.get("visible_text_input_count") or 0),
+            "visible_button_count": int(frame.get("visible_button_count") or 0),
+            "display_name_control": int(frame.get("visible_text_input_count") or 0) > 0,
+            "final_join_control": bool(frame.get("join_button_detected")),
+            "prejoin_control": bool(frame.get("prejoin_control_detected")),
+            "meaningful_content": bool(frame.get("webclient_frame_ready")),
+            "frame_generation": str(frame.get("url") or "") + "|" + str(frame.get("document_signature") or ""),
+        }
+
+    async def _cheap_browser_join_transition_probe(self):
+        result = {
+            "outer_visible": False,
+            "iframe_visible": False,
+            "iframe_bounding_box": None,
+            "signature": "",
+            "visible_text_input_count": 0,
+            "visible_button_count": 0,
+            "display_name_control": False,
+            "final_join_control": False,
+            "prejoin_control": False,
+            "meaningful_content": False,
+            "frame_generation": "",
+        }
+        page = self.page
+        if page is None:
+            return result
+        # Only the three ground-truth locators are probed; this is intentionally
+        # not a full page/frame snapshot or selector rescan.
+        locators = []
+        if hasattr(page, "get_by_role"):
+            try:
+                locators.append(page.get_by_role("button", name="Join from this browser", exact=True).first)
+            except Exception:
+                pass
+        if hasattr(page, "locator"):
+            locators.extend([
+                page.locator("#broadcom-center-right").first,
+                page.locator('[role="button"][aria-label="Join from this browser"]').first,
+            ])
+        for locator in locators:
+            try:
+                if hasattr(locator, "is_visible"):
+                    visible = await self._maybe_await(locator.is_visible(timeout=100))
+                else:
+                    await locator.wait_for(state="visible", timeout=100)
+                    visible = True
+                if visible:
+                    result["outer_visible"] = True
+                    break
+            except Exception:
+                continue
+        try:
+            iframe_state = await self._maybe_await(page.evaluate("""() => {
+              const el=[...document.querySelectorAll('iframe')].find(x =>
+                /guest-join-meeting/i.test(x.src||'') || /unified-webclient-iframe/i.test(x.name||''));
+              if(!el) return {found:false}; const r=el.getBoundingClientRect(),s=getComputedStyle(el);
+              return {found:true,visible:s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0,
+                bounding_box:{x:r.x,y:r.y,width:r.width,height:r.height}}; }"""))
+            if isinstance(iframe_state, Mapping) and "found" in iframe_state:
+                result["iframe_visible"] = bool(iframe_state.get("visible"))
+                result["iframe_bounding_box"] = iframe_state.get("bounding_box")
+        except Exception:
+            pass
+        best_score = -1
+        for _scope_name, frame in self._page_locator_scopes(prefer_meeting_frame=False)[1:]:
+            url = str(getattr(frame, "url", "") or "")
+            score = self._webex_meeting_frame_url_score(url, self._safe_frame_name(frame))
+            if score <= best_score or score <= 0 or not hasattr(frame, "evaluate"):
+                continue
+            try:
+                details = await self._maybe_await(frame.evaluate("""() => { const vis=e=>{if(!e)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0};
+                  const inputs=[...document.querySelectorAll('input:not([type="hidden"]),textarea,[contenteditable="true"]')].filter(vis);
+                  const buttons=[...document.querySelectorAll('button,[role="button"],a')].filter(vis);
+                  const labels=buttons.map(x=>(x.getAttribute('aria-label')||x.innerText||'').trim().toLowerCase());
+                  const body=document.body, sig=[location.href,document.title,body?body.childElementCount:0,inputs.length,buttons.length].join('|');
+                  return {signature:sig,visible_text_input_count:inputs.length,visible_button_count:buttons.length,
+                    display_name_control:inputs.some(x=>/name|display/i.test([x.name,x.id,x.placeholder,x.getAttribute('aria-label')].join(' '))),
+                    final_join_control:labels.some(x=>x==='join'||x==='join meeting'),
+                    prejoin_control:labels.some(x=>/mute|microphone|camera|audio/.test(x)),
+                    meaningful_content:!!body&&(body.childElementCount>0)&&(inputs.length>0||buttons.length>0)}; }"""))
+            except Exception:
+                continue
+            if not isinstance(details, Mapping) or "signature" not in details:
+                continue
+            best_score = score
+            for key in ("signature", "visible_text_input_count", "visible_button_count", "display_name_control", "final_join_control", "prejoin_control", "meaningful_content"):
+                result[key] = details.get(key, result[key])
+            result["frame_generation"] = url + "|" + str(result["signature"])
+        return result
+
+    @staticmethod
+    def _browser_join_probe_transition_evidence(before, after):
+        if (
+            after.get("outer_visible")
+            and not after.get("iframe_visible")
+            and not after.get("display_name_control")
+            and not after.get("final_join_control")
+            and not after.get("prejoin_control")
+        ):
+            return []
+        evidence = []
+        if before.get("outer_visible") and not after.get("outer_visible"):
+            evidence.append("browser_join_control_hidden")
+        if not before.get("iframe_visible") and after.get("iframe_visible"):
+            evidence.append("guest_iframe_became_visible")
+        if not before.get("iframe_bounding_box") and after.get("iframe_bounding_box"):
+            evidence.append("guest_iframe_bounding_box_became_nonzero")
+        if before.get("signature") != after.get("signature") and after.get("signature"):
+            evidence.append("guest_document_signature_changed")
+        if int(after.get("visible_text_input_count") or 0) > int(before.get("visible_text_input_count") or 0):
+            evidence.append("visible_text_input_appeared")
+        for key, label in (("display_name_control", "display_name_control_appeared"), ("final_join_control", "final_join_control_appeared"), ("prejoin_control", "prejoin_control_appeared"), ("meaningful_content", "guest_meaningful_content_appeared")):
+            if not before.get(key) and after.get(key):
+                evidence.append(label)
+        return evidence
+
+    def _browser_join_activation_event(self, *, selector, method, method_attempt_index, total_attempt_index,
+                                       box, click_point, metadata, before, after, evidence, started,
+                                       exception=None, dispatched=False):
+        before = dict(before or {})
+        after = dict(after or before)
+        return {
+            "attempt_id": str(self.config.get("attempt_id") or ""),
+            "state": WebexJoinState.BROWSER_JOIN_REQUIRED.value,
+            "selector": selector,
+            "method": method,
+            "method_attempt_index": method_attempt_index,
+            "total_attempt_index": total_attempt_index,
+            "bounding_box": box,
+            "click_point": {"x": click_point[0], "y": click_point[1]} if click_point else None,
+            "element_at_point": metadata.get("element_at_point"),
+            "target_contains_element_at_point": metadata.get("target_contains_element_at_point", metadata.get("center_target_is_descendant")),
+            "tag": metadata.get("tag"),
+            "role": metadata.get("role"),
+            "aria_label": metadata.get("aria_label"),
+            "iframe_visible_before": bool(before.get("iframe_visible")),
+            "iframe_visible_after": bool(after.get("iframe_visible")),
+            "outer_visible_before": bool(before.get("outer_visible")),
+            "outer_visible_after": bool(after.get("outer_visible")),
+            "signature_before": str(before.get("signature") or ""),
+            "signature_after": str(after.get("signature") or ""),
+            "transition_evidence": list(evidence or []),
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            "remaining_global_deadline_sec": self._remaining_join_deadline_sec(),
+            "exception_type": type(exception).__name__ if exception else None,
+            "exception_message": str(exception) if exception else None,
+            "input_dispatched": bool(dispatched),
+        }
+
+    def _remaining_join_deadline_sec(self):
+        return self._join_deadline.remaining_sec() if self._join_deadline else None
+
+    def _browser_join_snapshot_signature(self, snapshot):
+        baseline = self._browser_join_probe_baseline(snapshot or {})
+        return "|".join(str(baseline.get(key) or "") for key in (
+            "outer_visible", "iframe_visible", "signature", "visible_text_input_count", "visible_button_count"
+        ))
+
     def _browser_join_transition_evidence(self, before, after):
         evidence = []
-        before_action = self._browser_join_action_from_snapshot(before)
-        after_action = self._browser_join_action_from_snapshot(after)
+        before_action = self._browser_join_action_from_snapshot(before, emit=False)
+        after_action = self._browser_join_action_from_snapshot(after, emit=False)
         before_controls = self._browser_join_controls_from_snapshot(before)
         after_controls = self._browser_join_controls_from_snapshot(after)
         if before_action and (not after_action or len(after_controls) < len(before_controls)):
@@ -5089,6 +5451,22 @@ class WebexAdapter(BrowserMeetingAdapter):
         if self._is_terminal_join_state(joined_state):
             self._progress("display_name_fill_skipped", {"reason": "joined_state_detected", "status": joined_state["status"]})
             return {"success": False, "selector": None, "skipped": True, "join_state": joined_state}
+        if snapshot is not None:
+            frame = self._webclient_frame_from_snapshot(snapshot) or {}
+            if frame and (
+                not frame.get("iframe_visible")
+                or int(frame.get("visible_text_input_count") or 0) == 0
+            ):
+                signature = str(frame.get("document_signature") or frame.get("url") or frame.get("scope") or "")
+                key = ("snapshot", signature)
+                if key not in self._empty_display_name_frame_attempts:
+                    self._empty_display_name_frame_attempts.add(key)
+                    self._progress("display_name_fill_skipped", {
+                        "reason": "hidden_or_empty_guest_frame",
+                        "iframe_visible": bool(frame.get("iframe_visible")),
+                        "document_signature": signature,
+                    })
+                return {"success": False, "selector": None, "skipped": True}
         result = await self._fill_display_name(display_name, timeout_ms=timeout_ms)
         if result:
             return {"success": True, "selector": result}
@@ -5119,12 +5497,12 @@ class WebexAdapter(BrowserMeetingAdapter):
         display_name = str(display_name or self._display_name())
         self._last_display_name_fill_method = None
         frame_candidate = self._select_live_webclient_frame_candidate()
-        if frame_candidate:
+        input_debug = await self._input_debug_info()
+        if frame_candidate and input_debug.get("visible_text_input_count", 0) > 0:
             self._progress(
                 "webex_display_name_frame_selected",
                 {key: frame_candidate.get(key) for key in ("scope", "url", "name", "score")},
             )
-        input_debug = await self._input_debug_info()
         frame_attempt_key = None
         if frame_candidate:
             frame_attempt_key = (frame_candidate.get("scope"), frame_candidate.get("url"), frame_candidate.get("name"))

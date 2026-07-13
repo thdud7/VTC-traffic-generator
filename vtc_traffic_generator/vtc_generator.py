@@ -48,6 +48,8 @@ session_stop_requested = threading.Event()
 active_adapter_lock = threading.Lock()
 active_adapter = None
 active_loop = None
+active_join_task = None
+connect_thread = None
 connection_status_lock = threading.Lock()
 connection_status = {
     "state": "idle",
@@ -153,8 +155,10 @@ def wait_for_all_clients_ready(vtc_clients):
     behavior = config.get("behavior", {})
     timeout_sec = float(config.get("connect_timeout_sec", behavior.get("connect_timeout_sec", 180) if isinstance(behavior, dict) else 180))
     deadline = time.time() + timeout_sec
+    diagnostics_margin = float(config.get("join_diagnostics_finalization_margin_sec", 5))
+    rpc_margin = float(config.get("readiness_rpc_scheduling_margin_sec", 2))
     last_statuses = {}
-    while time.time() < deadline:
+    while True:
         statuses = poll_client_connection_statuses(vtc_clients)
         terminal_errors = terminal_client_errors(statuses)
         if terminal_errors:
@@ -166,9 +170,48 @@ def wait_for_all_clients_ready(vtc_clients):
             emit_event(config, "client_media_barrier_ready", {"statuses": statuses})
             return statuses
         last_statuses = statuses
+        now = time.time()
+        active_deadlines = [
+            float(status.get("join_deadline_at"))
+            for status in statuses.values()
+            if client_join_is_progressing(status) and status.get("join_deadline_at") is not None
+        ]
+        if active_deadlines:
+            deadline = max(deadline, max(active_deadlines) + diagnostics_margin + rpc_margin)
+        if now >= deadline:
+            # One final status read closes the race where the adapter publishes
+            # its terminal result as the controller's local timer expires.
+            statuses = poll_client_connection_statuses(vtc_clients)
+            terminal_errors = terminal_client_errors(statuses)
+            if terminal_errors:
+                summary = json.dumps(terminal_errors, sort_keys=True)
+                emit_event(config, "client_readiness_barrier_failed", {"statuses": statuses, "failures": terminal_errors})
+                raise RuntimeError("Client connection failed before behavior start: " + summary)
+            remaining = [
+                float(status.get("join_deadline_at"))
+                for status in statuses.values()
+                if client_join_is_progressing(status)
+                and status.get("join_deadline_at") is not None
+                and float(status.get("join_deadline_at")) > now
+            ]
+            if remaining:
+                deadline = max(remaining) + diagnostics_margin + rpc_margin
+                last_statuses = statuses
+                time.sleep(0.5)
+                continue
+            last_statuses = statuses
+            break
         time.sleep(0.5)
     emit_event(config, "client_readiness_barrier_failed", {"statuses": last_statuses, "reason": "timeout"})
     raise TimeoutError("Timed out waiting for all clients to become media-ready: " + json.dumps(last_statuses, sort_keys=True))
+
+
+def client_join_is_progressing(status):
+    return (
+        isinstance(status, dict)
+        and status.get("state") in {"initializing", "launching", "connecting", "joining", "meeting_joined"}
+        and not terminal_client_errors({0: status})
+    )
 
 
 def run_random_dialog_controller(vtc_clients):
@@ -1520,6 +1563,8 @@ def call_client_action_with_result(
 
 
 def request_clients_to_stop_sessions(vtc_clients):
+    latest_statuses = poll_client_connection_statuses(vtc_clients)
+    emit_event(config, "client_status_before_stop", {"statuses": latest_statuses})
     for client in vtc_clients:
         uri = 'http://' + client.ip + ':' + str(client.port)
         try:
@@ -1531,6 +1576,10 @@ def request_clients_to_stop_sessions(vtc_clients):
                 "client_stop_session_error",
                 {"client": client.ip, "port": client.port, "error": str(exc)},
             )
+    wait_for_clients_to_finish_sessions(
+        vtc_clients,
+        float(config.get("client_connect_shutdown_wait_sec", 15)),
+    )
 
 
 def wait_for_clients_to_finish_sessions(vtc_clients, timeout_sec):
@@ -1542,7 +1591,7 @@ def wait_for_clients_to_finish_sessions(vtc_clients, timeout_sec):
             print("Client shutdown status: " + json.dumps(statuses, sort_keys=True))
             last_statuses = statuses
 
-        if all(status.get("state") in {"done", "error"} for status in statuses.values()):
+        if all(status.get("state") in {"done", "error", "cancelled"} for status in statuses.values()):
             emit_event(config, "client_sessions_finished", {"statuses": statuses})
             return True
         time.sleep(1)
@@ -3028,6 +3077,7 @@ def run_adapter_action(method_name, event_name, details=None):
 async def connect_vtc_session(duration):
     global active_adapter
     global active_loop
+    global active_join_task
 
     service = get_service_name(config)
     packet_capture = PacketCaptureSession.from_config(config)
@@ -3061,6 +3111,7 @@ async def connect_vtc_session(duration):
         with active_adapter_lock:
             active_adapter = adapter
             active_loop = asyncio.get_running_loop()
+            active_join_task = asyncio.current_task()
 
         if hasattr(adapter, "launch") and hasattr(adapter, "connect_to_meeting"):
             set_connection_status(
@@ -3205,6 +3256,23 @@ async def connect_vtc_session(duration):
             service,
         )
         return result
+    except asyncio.CancelledError:
+        stop_reason = "cancelled"
+        current = get_connection_status()
+        original_error = current.get("original_error") or current.get("error")
+        set_connection_status(
+            "cancelled", connected=False, ready=False, media_ready=False,
+            error=original_error, vtc_url=config.get("vtc_url"), stage="connect_vtc_session",
+            reason="stop_requested_during_connect", cancel_reason="stop_vtc_session_request",
+            original_error=original_error,
+        )
+        if adapter is not None and not closed and hasattr(adapter, "close"):
+            try:
+                await asyncio.shield(adapter.close())
+                closed = True
+            except Exception:
+                pass
+        return None
     except Exception as exc:
         stop_reason = f"failure:{type(exc).__name__}"
         terminal_error = str(exc)
@@ -3269,6 +3337,10 @@ async def connect_vtc_session(duration):
                 {"vtc_url": config.get("vtc_url")},
                 service,
             )
+        elif stop_reason == "cancelled":
+            # The cancellation status above is terminal; cleanup must not turn
+            # it into a second adapter/connect-thread error.
+            pass
         else:
             set_connection_status(
                 "error",
@@ -3280,6 +3352,8 @@ async def connect_vtc_session(duration):
                 stage="connect_vtc_session",
                 reason="analysis_done_after_error",
                 error_code=terminal_error_code,
+                terminal_error=True,
+                original_error=terminal_error,
             )
             emit_event(
                 config,
@@ -3293,8 +3367,10 @@ async def connect_vtc_session(duration):
             if active_adapter is adapter:
                 active_adapter = None
                 active_loop = None
+                active_join_task = None
 
 def run_connect(duration):
+    global connect_thread
     session_stop_requested.clear()
     attempt_id = str(config.get("attempt_id") or uuid.uuid4())
     config["attempt_id"] = attempt_id
@@ -3303,18 +3379,26 @@ def run_connect(duration):
         try:
             asyncio.run(connect_vtc_session(duration))
         except Exception as exc:
-            set_connection_status(
-                "error", connected=False, ready=False, media_ready=False,
-                error=str(exc), error_code=type(exc).__name__, stage="connect_thread",
-                reason="connect_thread_exception", attempt_id=attempt_id,
-                terminal_error=True, traceback_text=traceback.format_exc(),
-            )
+            current = get_connection_status()
+            if not current.get("terminal_error"):
+                set_connection_status(
+                    "error", connected=False, ready=False, media_ready=False,
+                    error=str(exc), error_code=type(exc).__name__, stage="connect_thread",
+                    reason="connect_thread_exception", attempt_id=attempt_id,
+                    terminal_error=True, traceback_text=traceback.format_exc(),
+                    original_error=current.get("original_error") or current.get("error") or str(exc),
+                )
+            else:
+                emit_event(config, "connect_thread_exit_after_terminal_error", {
+                    "error": str(exc), "preserved_error": current.get("error"), "attempt_id": attempt_id,
+                })
 
     thread = threading.Thread(
         target=connect_worker,
         daemon=True,
     )
     thread.start()
+    connect_thread = thread
     return True
 
 
@@ -3328,10 +3412,25 @@ async def wait_for_session_duration_or_stop(duration_sec):
 
 
 def stop_vtc_session():
+    global active_join_task
     session_stop_requested.set()
-    emit_event(config, "stop_vtc_session_request", {"success": True})
+    status = get_connection_status()
+    set_connection_status(
+        "cancellation_requested",
+        connected=bool(status.get("connected")), ready=False, media_ready=False,
+        error=status.get("error"), error_code=status.get("error_code"),
+        vtc_url=status.get("vtc_url") or config.get("vtc_url"), stage="connect_vtc_session",
+        reason="stop_vtc_session_request", cancel_reason="stop_vtc_session_request",
+        original_error=status.get("original_error") or status.get("error"),
+    )
+    emit_event(config, "stop_vtc_session_request", {"success": True, "state_before": status.get("state")})
     emit_event(config, "session_stop_request_received", {"success": True})
     append_action_log(config, "session_stop_request_received", {"success": True})
+    with active_adapter_lock:
+        loop = active_loop
+        task = active_join_task
+    if loop is not None and task is not None and not task.done():
+        loop.call_soon_threadsafe(task.cancel)
     return True
 
 
@@ -3366,6 +3465,8 @@ def set_connection_status(
     attempt_id=None,
     terminal_error=False,
     traceback_text=None,
+    cancel_reason=None,
+    original_error=None,
 ):
     updated_at = time.time()
     status = {
@@ -3382,6 +3483,8 @@ def set_connection_status(
         "attempt_id": str(attempt_id or config.get("attempt_id") or ""),
         "terminal_error": bool(terminal_error),
         "traceback": traceback_text,
+        "cancel_reason": cancel_reason,
+        "original_error": original_error,
     }
     with connection_status_lock:
         previous = dict(connection_status)
@@ -3449,7 +3552,18 @@ def mark_media_ready(vtc_url=None):
 
 def get_connection_status():
     with connection_status_lock:
-        return dict(connection_status)
+        status = dict(connection_status)
+    with active_adapter_lock:
+        adapter = active_adapter
+    deadline = getattr(adapter, "_join_deadline", None) if adapter is not None else None
+    if deadline is not None and status.get("state") in {"initializing", "launching", "joining", "meeting_joined"}:
+        try:
+            remaining = max(0.0, float(deadline.remaining_sec()))
+            status["join_deadline_remaining_sec"] = remaining
+            status["join_deadline_at"] = time.time() + remaining
+        except Exception:
+            pass
+    return status
 
 
 def adapter_not_ready_rejection(action, emit=True):
