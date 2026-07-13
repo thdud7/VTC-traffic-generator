@@ -5751,21 +5751,49 @@ class WebexAdapter(BrowserMeetingAdapter):
         before_windows = self._webex_window_list()
         evidence_before = self._external_protocol_dialog_evidence(before_windows)
         navigation_attempt = stage == "after_goto"
+        proactive_attempt = bool(
+            navigation_attempt
+            and not evidence_before
+            and generation not in self._external_protocol_dismissed_generations
+        )
+
+        def attempt_details(*, attempt_count=0, evidence_after=None, success=False, skip_reason=None):
+            if evidence_after is None:
+                evidence_after = evidence_before
+            return {
+                "trigger_stage": stage,
+                "navigation_generation": generation,
+                "attempt_count": attempt_count,
+                "proactive_attempt": proactive_attempt,
+                "dialog_evidence_before": evidence_before,
+                "dialog_evidence_after": evidence_after,
+                "success": bool(success),
+                "skip_reason": skip_reason,
+            }
+
         if navigation_attempt and generation in self._external_protocol_dismissed_generations:
-            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "already_attempted_for_navigation", "generation": generation})
+            self._progress(
+                "external_protocol_dismiss_skipped",
+                attempt_details(skip_reason="already_attempted_for_navigation"),
+            )
             return False
         if not navigation_attempt and not evidence_before:
-            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "no_dialog_evidence", "generation": generation})
+            self._progress(
+                "external_protocol_dismiss_skipped",
+                attempt_details(skip_reason="no_dialog_evidence"),
+            )
             return False
         if not navigation_attempt and generation in self._external_protocol_extra_dismissed_generations:
-            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "evidence_retry_already_attempted", "generation": generation})
+            self._progress(
+                "external_protocol_dismiss_skipped",
+                attempt_details(skip_reason="evidence_retry_already_attempted"),
+            )
             return False
         if navigation_attempt:
             self._external_protocol_dismissed_generations.add(generation)
         else:
             self._external_protocol_extra_dismissed_generations.add(generation)
 
-        self._progress("external_protocol_dismiss_attempt", {"trigger_stage": stage})
         method = str(adapter_config.get("external_protocol_dismiss_method", "auto") or "auto").lower()
         strict = bool(adapter_config.get("strict_external_protocol_dismiss", False))
         attempts = []
@@ -5797,7 +5825,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             for action, script in self._macos_external_protocol_dismiss_scripts():
                 await record(["osascript", "-e", script], action)
 
-        if method in {"auto", "xdotool", "system"} and system == "Linux" and shutil.which("xdotool"):
+        if method in {"auto", "xdotool", "system"} and system == "Linux":
             display = self._configured_display()
             if shutil.which("wmctrl"):
                 await record(["wmctrl", "-a", "Webex"], "external_protocol_prompt_linux_activate_webex")
@@ -5833,26 +5861,28 @@ class WebexAdapter(BrowserMeetingAdapter):
             }
             self._append_browser_log("webex_external_protocol_prompt_permission_blocked", json.dumps(details, default=str))
             emit_event(self.config, "webex_external_protocol_prompt_permission_blocked", details, self.service_name)
-            if strict:
-                raise RuntimeError(
-                    "Webex external protocol prompt dismissal is blocked by macOS Automation/Accessibility permission: "
-                    f"{permission_issue}"
-                )
-
         after_windows = self._webex_window_list()
         evidence_after = self._external_protocol_dialog_evidence(after_windows)
         success = bool(evidence_before and not evidence_after)
-        self._progress("external_protocol_dismiss_done", {
-            "trigger_stage": stage, "success": success, "attempt_count": len(attempts),
-            "dialog_evidence_before": evidence_before, "dialog_evidence_after": evidence_after,
-        })
+        details = attempt_details(
+            attempt_count=len(attempts),
+            evidence_after=evidence_after,
+            success=success,
+        )
+        self._progress("external_protocol_dismiss_attempt", details)
+        self._progress("external_protocol_dismiss_done", details)
+        if permission_issue and strict:
+            raise RuntimeError(
+                "Webex external protocol prompt dismissal is blocked by macOS Automation/Accessibility permission: "
+                f"{permission_issue}"
+            )
         if not success:
-            details = {"stage": stage, "attempts": attempts}
-            self._append_browser_log("webex_external_protocol_prompt_dismiss_failed", json.dumps(details, default=str))
-            emit_event(self.config, "webex_external_protocol_prompt_dismiss_failed", details, self.service_name)
+            failure_details = {"stage": stage, "attempts": attempts, **details}
+            self._append_browser_log("webex_external_protocol_prompt_dismiss_failed", json.dumps(failure_details, default=str))
+            emit_event(self.config, "webex_external_protocol_prompt_dismiss_failed", failure_details, self.service_name)
             if strict:
                 diagnostics = await self._maybe_await(
-                    self.collect_diagnostics(stage="webex_external_protocol_prompt_blocking", extra=details)
+                    self.collect_diagnostics(stage="webex_external_protocol_prompt_blocking", extra=failure_details)
                 )
                 raise RuntimeError(f"Webex external protocol prompt could not be dismissed. Diagnostics: {diagnostics}")
         return success

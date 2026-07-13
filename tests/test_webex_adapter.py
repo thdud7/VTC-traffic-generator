@@ -115,6 +115,94 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertGreater(first_count, 0)
         self.assertEqual(len(calls), first_count)
 
+    def test_external_protocol_initial_after_goto_attempt_once_per_generation(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter._external_protocol_navigation_generation = 1
+        calls = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: calls.append(command) or {"success": True}
+
+        with patch.object(adapter, "_webex_window_list", return_value=[]):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value=None):
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+                    first_count = len(calls)
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+
+        self.assertGreater(first_count, 0)
+        self.assertEqual(len(calls), first_count)
+
+    def test_external_protocol_post_transition_requires_evidence(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter._external_protocol_navigation_generation = 1
+        calls = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: calls.append(command) or {"success": True}
+
+        with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value=None):
+                with patch.object(adapter, "_webex_window_list", return_value=[]):
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="post_browser_join_transition"))
+                self.assertEqual(calls, [])
+
+                with patch.object(adapter, "_webex_window_list", side_effect=[["Open Webex dialog"], []]):
+                    self.assertTrue(
+                        asyncio.run(
+                            adapter._dismiss_external_protocol_prompt(stage="post_browser_join_transition")
+                        )
+                    )
+
+        self.assertGreater(len(calls), 0)
+
+    def test_external_protocol_new_navigation_generation_allows_new_initial_attempt(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        calls = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: calls.append(command) or {"success": True}
+
+        with patch.object(adapter, "_webex_window_list", return_value=[]):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value=None):
+                    adapter._external_protocol_navigation_generation = 1
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+                    first_generation_count = len(calls)
+                    adapter._external_protocol_navigation_generation = 2
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+
+        self.assertGreater(first_generation_count, 0)
+        self.assertGreater(len(calls), first_generation_count)
+
+    def test_external_protocol_command_success_without_evidence_is_not_reported_as_dismissed(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter._external_protocol_navigation_generation = 1
+        progress = []
+        adapter._progress = lambda stage, details=None: progress.append((stage, details))
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: {"success": True}
+
+        with patch.object(adapter, "_webex_window_list", return_value=[]):
+            with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
+                with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which", return_value=None):
+                    dismissed = asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+
+        attempt = next(details for stage, details in progress if stage == "external_protocol_dismiss_attempt")
+        self.assertFalse(dismissed)
+        self.assertEqual(
+            set(attempt),
+            {
+                "trigger_stage",
+                "navigation_generation",
+                "attempt_count",
+                "proactive_attempt",
+                "dialog_evidence_before",
+                "dialog_evidence_after",
+                "success",
+                "skip_reason",
+            },
+        )
+        self.assertGreater(attempt["attempt_count"], 0)
+        self.assertTrue(attempt["proactive_attempt"])
+        self.assertEqual(attempt["dialog_evidence_before"], [])
+        self.assertEqual(attempt["dialog_evidence_after"], [])
+        self.assertFalse(attempt["success"])
+        self.assertIsNone(attempt["skip_reason"])
+
     def test_join_deadline_reserves_time_for_action_and_transition(self):
         deadline = JoinDeadline.after(0.01)
         with self.assertRaisesRegex(JoinDeadlineExceeded, "reserve unavailable"):
