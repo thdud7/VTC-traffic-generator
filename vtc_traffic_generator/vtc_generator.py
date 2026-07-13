@@ -13,6 +13,8 @@ from pathlib import Path, PurePath
 import asyncio
 import concurrent.futures
 import threading
+import traceback
+import uuid
 from datetime import datetime, timezone
 from concurrent.futures import wait as wait_futures
 
@@ -56,6 +58,9 @@ connection_status = {
     "error_code": None,
     "stage": None,
     "reason": None,
+    "attempt_id": None,
+    "terminal_error": False,
+    "traceback": None,
     "vtc_url": None,
     "updated_at": None,
     "transition_history": [],
@@ -99,6 +104,7 @@ def action_log_path(log_config):
 
 
 def run_controller():
+    config["attempt_id"] = str(uuid.uuid4())
     num_clients = len(config['vtc_clients'])
     vtc_clients = []
     icsi_policy = None
@@ -121,15 +127,48 @@ def run_controller():
 
     # Threaded VTC client initialization
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(vtc_clients))
-    list(executor.map(VtcClient.initialize_client, vtc_clients))
-    executor.shutdown(wait=False)
+    try:
+        list(executor.map(VtcClient.initialize_client, vtc_clients))
+        wait_for_all_clients_ready(vtc_clients)
 
-    if icsi_policy:
-        wait_for_clients_before_replay(vtc_clients)
-        run_icsi_replay_controller(vtc_clients, icsi_policy)
-        return
+        if icsi_policy:
+            run_icsi_replay_controller(vtc_clients, icsi_policy)
+            return
 
-    run_random_dialog_controller(vtc_clients)
+        run_random_dialog_controller(vtc_clients)
+    except Exception:
+        request_clients_to_stop_sessions(vtc_clients)
+        for client in vtc_clients:
+            try:
+                with xmlrpc.client.ServerProxy(f"http://{client.ip}:{client.port}", allow_none=True) as proxy:
+                    proxy.stop_video(client.video_pid)
+            except Exception:
+                pass
+        raise
+    finally:
+        executor.shutdown(wait=False)
+
+
+def wait_for_all_clients_ready(vtc_clients):
+    behavior = config.get("behavior", {})
+    timeout_sec = float(config.get("connect_timeout_sec", behavior.get("connect_timeout_sec", 180) if isinstance(behavior, dict) else 180))
+    deadline = time.time() + timeout_sec
+    last_statuses = {}
+    while time.time() < deadline:
+        statuses = poll_client_connection_statuses(vtc_clients)
+        terminal_errors = terminal_client_errors(statuses)
+        if terminal_errors:
+            summary = json.dumps(terminal_errors, sort_keys=True)
+            emit_event(config, "client_readiness_barrier_failed", {"statuses": statuses, "failures": terminal_errors})
+            print("Client readiness barrier failed: " + summary, file=sys.stderr)
+            raise RuntimeError("Client connection failed before behavior start: " + summary)
+        if statuses and all(client_is_media_ready(status) for status in statuses.values()):
+            emit_event(config, "client_media_barrier_ready", {"statuses": statuses})
+            return statuses
+        last_statuses = statuses
+        time.sleep(0.5)
+    emit_event(config, "client_readiness_barrier_failed", {"statuses": last_statuses, "reason": "timeout"})
+    raise TimeoutError("Timed out waiting for all clients to become media-ready: " + json.dumps(last_statuses, sort_keys=True))
 
 
 def run_random_dialog_controller(vtc_clients):
@@ -286,9 +325,18 @@ def poll_client_connection_statuses(vtc_clients):
     return statuses
 
 
+def rpc_response_success(response):
+    return bool(response.get("success")) if isinstance(response, dict) else bool(response)
+
+
 def client_is_media_ready(status):
     state = status.get("state")
-    return bool(status.get("media_ready") or status.get("ready") or state in MEDIA_READY_CONNECTION_STATES)
+    return bool(
+        status.get("connected")
+        and status.get("ready")
+        and status.get("media_ready")
+        and state in MEDIA_READY_CONNECTION_STATES
+    )
 
 
 def count_media_ready_clients(statuses):
@@ -299,7 +347,12 @@ def terminal_client_errors(statuses):
     return {
         index: status
         for index, status in statuses.items()
-        if status.get("state") in TERMINAL_CONNECTION_STATES
+        if (
+            status.get("state") in TERMINAL_CONNECTION_STATES
+            or status.get("terminal_error")
+            or status.get("state") == "finalizing_error"
+            or status.get("error_code") == "JoinDeadlineExceeded"
+        )
     }
 
 
@@ -715,7 +768,7 @@ def call_audio_warmup(client, bot_index, duration_ms, timeout_sec):
     }
     try:
         with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            success = bool(proxy.warmup_audio_pipeline(int(duration_ms)))
+            success = rpc_response_success(proxy.warmup_audio_pipeline(int(duration_ms)))
     except Exception as exc:
         success = False
         details["failure_reason"] = str(exc)
@@ -1139,7 +1192,7 @@ def send_start_speech_request(client, utterance, scenario_start_utc_dt, scenario
     )
     try:
         with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            success = bool(proxy.start_speech(utterance["playback_duration_sec"], xmlrpc_safe_value(metadata)))
+            success = rpc_response_success(proxy.start_speech(utterance["playback_duration_sec"], xmlrpc_safe_value(metadata)))
     except Exception as exc:
         success = False
         details["failure_reason"] = str(exc)
@@ -1441,7 +1494,7 @@ def call_client_action_with_result(
     }
     try:
         with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            success = bool(getattr(proxy, method_name)(bool(enabled)))
+            success = rpc_response_success(getattr(proxy, method_name)(bool(enabled)))
     except Exception as exc:
         success = False
         result_details["failure_reason"] = str(exc)
@@ -1755,7 +1808,8 @@ def call_client_action(client, bot_index, method_name, enabled):
     }
     try:
         with xmlrpc.client.ServerProxy(uri, allow_none=True) as proxy:
-            success = bool(getattr(proxy, method_name)(bool(enabled)))
+            response = getattr(proxy, method_name)(bool(enabled))
+            success = bool(response.get("success")) if isinstance(response, dict) else bool(response)
         details["success"] = success
         emit_event(config, event_name, details)
         append_action_log(config, event_name, details)
@@ -1788,7 +1842,7 @@ class VtcClient:
     def initialize_client(self):
         uri = 'http://' + self.ip + ':' + str(self.port)
         with xmlrpc.client.ServerProxy(uri) as proxy:
-            proxy.initialize_vtc_client()
+            proxy.initialize_vtc_client(config.get("attempt_id"))
 
         # Start client video stream to virtual camera device
         if config['videoconference']:
@@ -1832,7 +1886,12 @@ def run_client(client_config):
 # Initialize client
 # Set pulse audio devices and device volume
 # Check for v4l2 kernel mod
-def initialize_vtc_client():
+def initialize_vtc_client(attempt_id=None):
+    config["attempt_id"] = str(attempt_id or uuid.uuid4())
+    set_connection_status(
+        "idle", connected=False, ready=False, media_ready=False,
+        stage="initialize_vtc_client", reason="initialized", attempt_id=config["attempt_id"],
+    )
     print("Initializing VTC client")
     if pulsectl is None:
         raise RuntimeError("Client mode requires the pulsectl Python package.")
@@ -2123,6 +2182,9 @@ def parse_volumedetect_value(text, key):
 
 # XMLRPC
 def dialog_cycle():
+    rejection = adapter_not_ready_rejection("dialog_cycle")
+    if rejection:
+        return rejection
     print(config['bot_name'] + " speaking now.")
     emit_event(config, "speech_start", {"bot_name": config.get("bot_name")})
     append_action_log(config, "speech_start", {"bot_name": config.get("bot_name"), "source": "dialog_cycle"})
@@ -2167,6 +2229,9 @@ def start_speech(duration_sec, metadata=None):
     global speech_until
 
     metadata = dict(metadata or {})
+    rejection = adapter_not_ready_rejection("start_speech")
+    if rejection:
+        return rejection
     duration_sec = float(duration_sec)
     now = time.time()
 
@@ -2507,6 +2572,9 @@ def choose_audio_file():
 
 # No XMLRPC needed, simply a local function on the remote VTC client
 def play_audio(audio_file_path):
+    rejection = adapter_not_ready_rejection("audio_playback")
+    if rejection:
+        return rejection
     audio_devices = virtual_audio_config()
     details = {
         "audio_file_path": str(audio_file_path),
@@ -2543,6 +2611,9 @@ def play_audio(audio_file_path):
 
 
 def warmup_audio_pipeline(duration_ms=500):
+    rejection = adapter_not_ready_rejection("audio_pipeline_warmup")
+    if rejection:
+        return rejection
     audio_devices = virtual_audio_config()
     duration_sec = max(0.05, float(duration_ms) / 1000.0)
     details = {
@@ -2895,15 +2966,20 @@ def run_adapter_action(method_name, event_name, details=None):
     details.setdefault("requested_state", requested_state)
     details.setdefault("rpc_received_utc", utc_now_iso())
     details.setdefault("rpc_received_monotonic_ns", start_ns)
+    rejection = adapter_not_ready_rejection(event_name, emit=False)
+    if rejection:
+        details.update(rejection)
+        emit_event(config, "control_rpc_rejected", details)
+        append_action_log(config, "control_rpc_rejected", details)
+        return details
+
     with active_adapter_lock:
         adapter = active_adapter
         loop = active_loop
 
     if adapter is None or loop is None or loop.is_closed():
-        details.update({"success": False, "error": "active adapter is not available"})
-        emit_event(config, event_name, details)
-        append_action_log(config, event_name, details)
-        return False
+        details.update({"success": False, "reason": "adapter_not_ready", "connection_state": get_connection_status().get("state")})
+        return details
 
     try:
         state_attr = {
@@ -3034,6 +3110,20 @@ async def connect_vtc_session(duration):
                 {"vtc_url": config.get("vtc_url"), "status": join_status, "media_ready": media_ready},
                 service,
             )
+            if connected and not media_ready and hasattr(adapter, "wait_until_media_ready"):
+                readiness_timeout = float(config.get("media_readiness_timeout_sec", config.get("connect_timeout_sec", 180)))
+                media_ready = bool(await adapter.wait_until_media_ready(config.get("vtc_url"), readiness_timeout))
+                if not media_ready:
+                    raise TimeoutError(
+                        f"Adapter connected in state {join_status} but did not become media-ready "
+                        f"within {readiness_timeout:.1f}s"
+                    )
+                set_connection_status(
+                    "running", connected=True, ready=True, media_ready=True, error=None,
+                    vtc_url=config.get("vtc_url"), stage="media_readiness_barrier",
+                    reason="adapter_media_ready",
+                )
+                emit_event(config, "meeting_join_ready", {"vtc_url": config.get("vtc_url"), "status": "joined", "media_ready": True}, service)
             await wait_for_session_duration_or_stop(duration * 60)
             set_connection_status(
                 "leaving",
@@ -3206,8 +3296,22 @@ async def connect_vtc_session(duration):
 
 def run_connect(duration):
     session_stop_requested.clear()
+    attempt_id = str(config.get("attempt_id") or uuid.uuid4())
+    config["attempt_id"] = attempt_id
+
+    def connect_worker():
+        try:
+            asyncio.run(connect_vtc_session(duration))
+        except Exception as exc:
+            set_connection_status(
+                "error", connected=False, ready=False, media_ready=False,
+                error=str(exc), error_code=type(exc).__name__, stage="connect_thread",
+                reason="connect_thread_exception", attempt_id=attempt_id,
+                terminal_error=True, traceback_text=traceback.format_exc(),
+            )
+
     thread = threading.Thread(
-        target=lambda: asyncio.run(connect_vtc_session(duration)),
+        target=connect_worker,
         daemon=True,
     )
     thread.start()
@@ -3259,6 +3363,9 @@ def set_connection_status(
     stage=None,
     reason=None,
     error_code=None,
+    attempt_id=None,
+    terminal_error=False,
+    traceback_text=None,
 ):
     updated_at = time.time()
     status = {
@@ -3272,6 +3379,9 @@ def set_connection_status(
         "reason": reason,
         "vtc_url": vtc_url,
         "updated_at": updated_at,
+        "attempt_id": str(attempt_id or config.get("attempt_id") or ""),
+        "terminal_error": bool(terminal_error),
+        "traceback": traceback_text,
     }
     with connection_status_lock:
         previous = dict(connection_status)
@@ -3340,6 +3450,24 @@ def mark_media_ready(vtc_url=None):
 def get_connection_status():
     with connection_status_lock:
         return dict(connection_status)
+
+
+def adapter_not_ready_rejection(action, emit=True):
+    status = get_connection_status()
+    if status.get("connected") and status.get("ready") and status.get("media_ready"):
+        return None
+    rejection = {
+        "success": False,
+        "reason": "adapter_not_ready",
+        "connection_state": status.get("state"),
+        "stage": status.get("stage"),
+        "attempt_id": status.get("attempt_id") or config.get("attempt_id"),
+        "action": action,
+    }
+    if emit:
+        emit_event(config, "control_rpc_rejected", rejection)
+        append_action_log(config, "control_rpc_rejected", rejection)
+    return rejection
 
 
 # XMLRPC

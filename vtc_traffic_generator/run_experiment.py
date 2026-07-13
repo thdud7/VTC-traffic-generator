@@ -329,6 +329,9 @@ def render_inventory(experiment, clients, output_dir):
         event_log_path = str(client.get("event_log_path", f"/tmp/vtc-{client['name']}/events-{run_log_id}.jsonl"))
         app_log_path = str(client.get("app_log_path", f"/tmp/vtc-{client['name']}/jitsi-electron-{run_log_id}.log"))
         adapter_log_path = str(client.get("adapter_log_path", f"/tmp/vtc-{client['name']}/adapter-{run_log_id}.log"))
+        client_adapter_config = client.get("adapter_config", {}) if isinstance(client.get("adapter_config"), dict) else {}
+        default_adapter_config = defaults.get("adapter_config", {}) if isinstance(defaults.get("adapter_config"), dict) else {}
+        browser_channel = str(client_adapter_config.get("browser_channel", default_adapter_config.get("browser_channel", "")))
         screen_share_window = resolve_screen_share_window(experiment, client, defaults)
         screen_share_window_enabled = bool(screen_share_window.get("enabled", False))
         screen_share_window_title = str(screen_share_window.get("title") or f"VTC Share Window - {client['name']}")
@@ -363,6 +366,7 @@ def render_inventory(experiment, clients, output_dir):
             f"event_log_path={quote_inventory_value(event_log_path)}",
             f"app_log_path={quote_inventory_value(app_log_path)}",
             f"adapter_log_path={quote_inventory_value(adapter_log_path)}",
+            f"browser_channel={quote_inventory_value(browser_channel)}",
             f"screen_share_window_enabled={quote_inventory_value(str(screen_share_window_enabled).lower())}",
             f"screen_share_window_title={quote_inventory_value(screen_share_window_title)}",
             f"screen_share_window_html_path={quote_inventory_value(screen_share_window_html_path)}",

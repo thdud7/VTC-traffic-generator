@@ -83,6 +83,24 @@
     - name: Verify Chrome or Chromium is available for browser services
       ansible.builtin.shell: |
         set -euo pipefail
+        if [ "{{ browser_channel | default('') }}" = "chrome" ]; then
+          test -x /opt/google/chrome/chrome || {
+            echo "browser_channel=chrome requires executable /opt/google/chrome/chrome" >&2
+            exit 1
+          }
+          DISPLAY="{{ vtc_display | default(':99') }}" {{ python_bin | default('python3') }} - <<'PY'
+        import asyncio
+        from playwright.async_api import async_playwright
+
+        async def verify():
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(channel="chrome", headless=True, args=["--no-sandbox"])
+                await browser.close()
+
+        asyncio.run(verify())
+        PY
+          exit 0
+        fi
         for browser in google-chrome google-chrome-stable chromium chromium-browser; do
           if command -v "$browser" >/dev/null 2>&1; then
             exit 0

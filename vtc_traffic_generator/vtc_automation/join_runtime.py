@@ -40,6 +40,16 @@ class JoinDeadline:
         if self.expired():
             raise JoinDeadlineExceeded(f"Webex join deadline expired during {stage}")
 
+    def require_reserve(self, stage: str, reserve_sec: float) -> None:
+        """Fail before starting work that cannot finish inside the global budget."""
+        reserve_sec = max(0.0, float(reserve_sec))
+        remaining = self.remaining_sec()
+        if remaining < reserve_sec:
+            raise JoinDeadlineExceeded(
+                f"Webex join deadline reserve unavailable during {stage}: "
+                f"remaining={remaining:.3f}s required={reserve_sec:.3f}s"
+            )
+
 
 async def wait_with_deadline(awaitable, deadline: JoinDeadline, stage: str, cap_sec: float | None = None):
     """Await work within the global budget and always reap a timed-out task."""

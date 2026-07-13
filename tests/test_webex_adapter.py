@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,9 +19,181 @@ from vtc_traffic_generator.vtc_automation import test_adapter
 from vtc_traffic_generator.vtc_automation.adapters.webex import PlaywrightTimeoutError, TargetClosedError
 from vtc_traffic_generator.vtc_automation.adapters.registry import get_adapter, list_supported_services
 from vtc_traffic_generator.vtc_automation.adapters.webex import WebexAdapter
+from vtc_traffic_generator.vtc_automation.event_log import events_for_attempt
+from vtc_traffic_generator.vtc_automation.join_runtime import JoinDeadline, JoinDeadlineExceeded
+import vtc_traffic_generator.vtc_generator as generator_module
 
 
 class WebexAdapterTests(unittest.TestCase):
+    def test_browser_join_role_button_div_is_valid_target(self):
+        adapter = WebexAdapter({"adapter_config": {}})
+        item = {
+            "tag": "DIV", "id": "broadcom-center-right", "role": "button",
+            "aria_label": "Join from this browser", "text": "Join from this browser",
+        }
+        match = adapter._snapshot_browser_join_control_match([item])
+        self.assertEqual(match["selector"], "#broadcom-center-right")
+
+    def test_browser_join_does_not_require_descendant_button_or_anchor(self):
+        adapter = WebexAdapter({"adapter_config": {}})
+        match = adapter._snapshot_browser_join_control_match([{
+            "tag": "DIV", "id": "broadcom-center-right", "role": "button",
+            "aria_label": "Join from this browser", "text": "",
+        }])
+        self.assertIsNotNone(match)
+        self.assertNotIn(" button", match["selector"])
+        self.assertNotIn(" a", match["selector"])
+
+    def test_browser_join_locator_timeout_falls_back_to_real_keyboard_or_mouse(self):
+        adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#broadcom-center-right"}
+        adapter.page.click_timeout_selectors.add("#broadcom-center-right")
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from this browser"}}
+        result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+        self.assertEqual(result["method"], "keyboard_enter")
+        self.assertIn("Enter", adapter.page.keyboard.presses)
+        self.assertTrue(result["transition_evidence"])
+
+    def test_browser_join_action_requires_transition(self):
+        adapter = _join_test_adapter("joined", {"browser_join_click_total_timeout_sec": 0.1})
+        adapter.page.visible = {"#broadcom-center-right"}
+        adapter._wait_for_browser_join_transition = lambda *args, **kwargs: asyncio.sleep(0, result=[])
+        state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from this browser"}}
+        with self.assertRaisesRegex(RuntimeError, "browser_join_click_timeout"):
+            asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
+
+    def test_preloaded_guest_iframe_is_not_ready(self):
+        adapter = WebexAdapter({"adapter_config": {}})
+        snapshot = {
+            "page": {"iframe_elements": [{"url": "https://web.webex.com/guest-join-meeting", "visible": False}]},
+            "frames": [{
+                "scope": "frame[0]", "url": "https://web.webex.com/guest-join-meeting",
+                "document_ready_state": "complete", "body_child_count": 0,
+                "visible_inputs": [], "visible_buttons_links": [], "visible_text": "",
+            }],
+        }
+        frame = adapter._webclient_frame_from_snapshot(snapshot)
+        self.assertTrue(frame["webclient_frame_exists"])
+        self.assertFalse(frame["iframe_visible"])
+        self.assertFalse(frame["webclient_frame_ready"])
+
+    def test_guest_iframe_ready_after_dom_activation(self):
+        adapter = WebexAdapter({"adapter_config": {}})
+        snapshot = {
+            "page": {"iframe_elements": [{"url": "https://web.webex.com/guest-join-meeting", "visible": True}]},
+            "frames": [{
+                "scope": "frame[0]", "url": "https://web.webex.com/guest-join-meeting",
+                "document_ready_state": "complete", "body_child_count": 3,
+                "document_signature": "activated", "visible_text": "Enter your name",
+                "visible_inputs": [{"tag": "INPUT", "text": "", "aria_label": "Display name"}],
+                "visible_buttons_links": [],
+            }],
+        }
+        self.assertTrue(adapter._webclient_frame_from_snapshot(snapshot)["webclient_frame_ready"])
+
+    def test_candidate_is_acted_on_in_same_state_machine_tick(self):
+        adapter = _join_test_adapter("joined")
+        snapshot = {"page": {"scope": "page", "visible_buttons_links": [{
+            "tag": "DIV", "id": "broadcom-center-right", "role": "button",
+            "aria_label": "Join from this browser", "text": "Join from this browser",
+        }]}, "frames": []}
+        state = asyncio.run(adapter._download_retry_page_state_from_snapshot(snapshot=snapshot, timeout_ms=1))
+        action, payload = adapter._select_prejoin_action(snapshot, state)
+        self.assertEqual(action, "click_browser_join")
+        self.assertEqual(payload["selector"], "#broadcom-center-right")
+
+    def test_external_protocol_dismiss_is_not_repeated_without_evidence(self):
+        adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
+        adapter._external_protocol_navigation_generation = 1
+        calls = []
+        adapter._run_external_protocol_command = lambda command, action_name, env_display=None: calls.append(command) or {"success": True}
+        with patch.object(adapter, "_webex_window_list", return_value=[]):
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="post_browser_join_transition"))
+        first_count = len(calls)
+        self.assertGreater(first_count, 0)
+        self.assertEqual(len(calls), first_count)
+
+    def test_join_deadline_reserves_time_for_action_and_transition(self):
+        deadline = JoinDeadline.after(0.01)
+        with self.assertRaisesRegex(JoinDeadlineExceeded, "reserve unavailable"):
+            deadline.require_reserve("browser_join_activation", 5.0)
+
+    def test_control_rpc_rejected_before_adapter_ready(self):
+        old_config = getattr(generator_module, "config", None)
+        generator_module.config = {"bot_name": "bot", "attempt_id": "attempt", "event_log_path": "/tmp/vtc-test-control-rejection.jsonl"}
+        try:
+            generator_module.set_connection_status("joining", stage="adapter_join", reason="join_start")
+            response = generator_module.set_microphone(True)
+            self.assertFalse(response["success"])
+            self.assertEqual(response["reason"], "adapter_not_ready")
+            self.assertEqual(response["connection_state"], "joining")
+        finally:
+            if old_config is not None:
+                generator_module.config = old_config
+
+    def test_controller_does_not_start_behavior_before_all_clients_ready(self):
+        old_config = getattr(generator_module, "config", None)
+        generator_module.config = {"vtc_clients": [["127.0.0.1", 1]], "duration": 0, "videoconference": False, "role": "controller"}
+        try:
+            with patch.object(generator_module.VtcClient, "initialize_client", return_value=None), \
+                 patch.object(generator_module, "wait_for_all_clients_ready", side_effect=RuntimeError("not ready")), \
+                 patch.object(generator_module, "request_clients_to_stop_sessions"), \
+                 patch.object(generator_module, "run_random_dialog_controller") as behavior:
+                with self.assertRaisesRegex(RuntimeError, "not ready"):
+                    generator_module.run_controller()
+                behavior.assert_not_called()
+        finally:
+            if old_config is not None:
+                generator_module.config = old_config
+
+    def test_controller_aborts_when_one_client_connect_fails(self):
+        client = generator_module.VtcClient("127.0.0.1", 1)
+        statuses = {0: {"state": "error", "connected": False, "ready": False, "media_ready": False, "terminal_error": True}}
+        old_config = getattr(generator_module, "config", None)
+        generator_module.config = {"connect_timeout_sec": 0.1, "role": "controller"}
+        try:
+            with patch.object(generator_module, "poll_client_connection_statuses", return_value=statuses):
+                with self.assertRaisesRegex(RuntimeError, "Client connection failed"):
+                    generator_module.wait_for_all_clients_ready([client])
+        finally:
+            if old_config is not None:
+                generator_module.config = old_config
+
+    def test_controller_returns_nonzero_on_join_failure(self):
+        self.test_controller_does_not_start_behavior_before_all_clients_ready()
+
+    def test_connect_thread_exception_is_visible_via_status_rpc(self):
+        old_config = getattr(generator_module, "config", None)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            generator_module.config = {"attempt_id": "attempt-thread", "event_log_path": str(Path(tmpdir) / "events.jsonl")}
+            async def fail(_duration):
+                raise JoinDeadlineExceeded("expired")
+            try:
+                with patch.object(generator_module, "connect_vtc_session", side_effect=fail):
+                    generator_module.run_connect(0)
+                    deadline = time.time() + 1
+                    while time.time() < deadline and not generator_module.get_connection_status().get("terminal_error"):
+                        time.sleep(0.01)
+                status = generator_module.get_connection_status()
+                self.assertEqual(status["error_code"], "JoinDeadlineExceeded")
+                self.assertIn("JoinDeadlineExceeded", status["traceback"])
+            finally:
+                if old_config is not None:
+                    generator_module.config = old_config
+
+    def test_current_attempt_ignores_stale_event_errors(self):
+        records = [
+            {"attempt_id": "old", "event": "adapter_error"},
+            {"attempt_id": "current", "event": "meeting_join_ready"},
+        ]
+        self.assertEqual(events_for_attempt(records, "current"), [records[1]])
+
+    def test_browser_channel_chrome_requires_exact_executable(self):
+        playbook = Path("ansible/deploy_clients.yml").read_text(encoding="utf-8")
+        self.assertIn('test -x /opt/google/chrome/chrome', playbook)
+        self.assertIn('launch(channel="chrome"', playbook)
     def test_webex_is_registered_for_common_adapter_selection(self):
         self.assertIn("webex", list_supported_services())
         adapter = get_adapter({"vtc_platform": "webex", "adapter_config": {}})
@@ -904,7 +1077,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertIn(("#name", "bot-local-1"), adapter.page.fills)
 
-    def test_external_protocol_prompt_dismissed_after_goto_and_during_prejoin_loop(self):
+    def test_external_protocol_prompt_dismissed_once_after_goto_not_each_prejoin_tick(self):
         adapter = _join_test_adapter("joined")
         stages = []
 
@@ -917,7 +1090,7 @@ class WebexAdapterTests(unittest.TestCase):
         asyncio.run(adapter.connect_to_meeting("https://example.webex.com/meet/test", "bot"))
 
         self.assertIn("after_goto", stages)
-        self.assertIn("prejoin_loop", stages)
+        self.assertNotIn("prejoin_loop", stages)
 
     def test_connect_to_meeting_retries_when_title_reports_target_closed_after_goto(self):
         first = ClosingAfterGotoPage("joined")
@@ -1012,7 +1185,7 @@ class WebexAdapterTests(unittest.TestCase):
         }
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
-            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         rendered = json.dumps(commands, ensure_ascii=False).lower()
         self.assertNotIn(" to quit", rendered)
@@ -1030,7 +1203,7 @@ class WebexAdapterTests(unittest.TestCase):
         adapter._run_external_protocol_command = run
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
-            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         rendered = json.dumps(commands, ensure_ascii=False)
         self.assertNotIn("Open Webex", rendered)
@@ -1046,7 +1219,7 @@ class WebexAdapterTests(unittest.TestCase):
         }
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
-            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         self.assertIn("취소", json.dumps(commands, ensure_ascii=False))
 
@@ -1077,7 +1250,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
             with contextlib.redirect_stdout(output):
-                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         progress = output.getvalue()
         self.assertIn("external_protocol_dismiss_attempt", progress)
@@ -1094,7 +1267,7 @@ class WebexAdapterTests(unittest.TestCase):
         }
 
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Darwin"):
-            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+            asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         script = json.dumps(commands, ensure_ascii=False)
         self.assertIn("Google Chrome for Testing", script)
@@ -1134,7 +1307,7 @@ class WebexAdapterTests(unittest.TestCase):
                     stderr="System Events에 오류 발생: osascript에 보조 접근이 허용되지 않습니다. (-25211)",
                 )
                 with self.assertRaisesRegex(RuntimeError, "Automation/Accessibility"):
-                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+                    asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
     def test_macos_external_protocol_permission_error_is_non_fatal_by_default(self):
         adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
@@ -1146,7 +1319,7 @@ class WebexAdapterTests(unittest.TestCase):
                     returncode=1,
                     stderr="System Events에 오류 발생: osascript에 보조 접근이 허용되지 않습니다. (-25211)",
                 )
-                self.assertTrue(asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit")))
+                self.assertFalse(asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto")))
 
     def test_linux_external_protocol_fallback_uses_xdotool_escape(self):
         adapter = WebexAdapter({"adapter_config": {"dismiss_external_protocol_dialog": True}})
@@ -1160,7 +1333,7 @@ class WebexAdapterTests(unittest.TestCase):
         with patch("vtc_traffic_generator.vtc_automation.adapters.webex.platform.system", return_value="Linux"):
             with patch("vtc_traffic_generator.vtc_automation.adapters.webex.shutil.which") as which:
                 which.side_effect = lambda name: f"/usr/bin/{name}" if name == "xdotool" else None
-                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="unit"))
+                asyncio.run(adapter._dismiss_external_protocol_prompt(stage="after_goto"))
 
         self.assertIn(["xdotool", "key", "Escape"], commands)
 
@@ -1509,14 +1682,16 @@ class WebexAdapterTests(unittest.TestCase):
 
         self.assertEqual(result["selector"], "#broadcom-center-right")
         self.assertEqual(result["scope"], "frame[1]")
-        self.assertEqual(result["method"], "js_candidate_click")
-        self.assertEqual(frame.js_candidate_clicks, ["#broadcom-center-right"])
+        self.assertEqual(result["method"], "locator_click")
+        self.assertIn("browser_join_control_hidden", result["transition_evidence"])
+        self.assertEqual(frame.js_candidate_clicks, [])
         self.assertNotIn('button:has-text("Join Meeting")', outer.waits + frame.waits)
 
-    def test_browser_join_candidate_js_click_succeeds_without_broad_final_join_probe(self):
+    def test_browser_join_candidate_real_click_succeeds_without_broad_final_join_probe(self):
         adapter = _join_test_adapter("joined")
         outer = adapter.page
         outer.visible = {"#broadcom-center-right"}
+        outer.selector_texts["#broadcom-center-right"] = "Join from this browser"
         outer.selector_texts["#broadcom-center-right"] = "Join from this browser"
         outer.js_candidate_click_result = {"ok": True, "method": "js_candidate_click"}
         state = {
@@ -1536,8 +1711,9 @@ class WebexAdapterTests(unittest.TestCase):
         self.assertNotIn('button:has-text("Join Meeting")', outer.waits)
         self.assertNotIn('button:has-text("Join Meeting")', outer.clicks)
 
-    def test_browser_join_container_resolves_inner_clickable_target(self):
+    def test_browser_join_role_button_is_the_clickable_target(self):
         adapter = _join_test_adapter("joined")
+        adapter.page.visible = {"#broadcom-center-right"}
         adapter.page.js_candidate_click_result = {
             "ok": True, "method": "dom_text_click", "clicked_tag": "BUTTON",
             "target_selector": '[data-vtc-browser-join-target="child"]',
@@ -1546,8 +1722,8 @@ class WebexAdapterTests(unittest.TestCase):
 
         result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
 
-        self.assertEqual(result["clicked_tag"], "BUTTON")
-        self.assertEqual(result["method"], "dom_text_click")
+        self.assertEqual(result["tag"], "div")
+        self.assertEqual(result["method"], "locator_click")
 
     def test_browser_join_page_failure_retries_frame_zero(self):
         adapter = _join_test_adapter("joined")
@@ -1556,6 +1732,7 @@ class WebexAdapterTests(unittest.TestCase):
         outer.timeout_selectors.add("#broadcom-center-right")
         outer.js_candidate_click_result = {"ok": False, "reason": "blocked"}
         frame = FakeWebexFrame("joined", url="https://example.webex.com/download/frame")
+        frame.visible = {"#broadcom-center-right"}
         frame.js_candidate_click_result = {"ok": True, "method": "dom_text_click", "clicked_tag": "A"}
         outer.frames = [frame]
         state = {"browser_join_action": {"scope": "page", "selector": "#broadcom-center-right", "text": "Join from browser"}}
@@ -1580,8 +1757,11 @@ class WebexAdapterTests(unittest.TestCase):
         adapter = _join_test_adapter("joined")
         outer = adapter.page
         target = '[data-vtc-browser-join-target="text"]'
-        outer.visible = {target}
-        outer.click_timeout_selectors.add(target)
+        outer.visible = {"#broadcom-center-right"}
+        outer.selector_texts["#broadcom-center-right"] = "Join from this browser"
+        outer.click_timeout_selectors.add("#broadcom-center-right")
+        outer.keyboard = None
+        outer.rects["#broadcom-center-right"] = {"x": 10, "y": 20, "width": 80, "height": 20}
         outer.js_candidate_click_result = {
             "ok": False, "reason": "events_blocked", "target_selector": target,
             "rect": {"x": 10, "y": 20, "width": 80, "height": 20},
@@ -1590,7 +1770,7 @@ class WebexAdapterTests(unittest.TestCase):
 
         result = asyncio.run(adapter._click_browser_join_from_state(state, timeout_ms=5))
 
-        self.assertEqual(result["method"], "coordinate_click")
+        self.assertEqual(result["method"], "mouse_click")
         self.assertEqual(outer.mouse.clicks, [(50.0, 30.0)])
 
     def test_browser_join_candidate_click_fallbacks_are_bounded(self):
@@ -2814,6 +2994,10 @@ class FakeWebexLocator:
         self.page.clicks.append(self.selector)
         self.page.focused_selector = self.selector
         self.page.select_all = False
+        if self.selector in {"#browser", "#broadcom-center-right"}:
+            self.page.visible.discard(self.selector)
+            if self.page.js_candidate_click_callback:
+                self.page.js_candidate_click_callback(self.selector)
         if self.selector == "#got-it" or "Got it" in self.selector or "확인" in self.selector or "알겠습니다" in self.selector:
             self.page.visible.discard("#got-it")
         if self.selector == "#try-again" or "Try again" in self.selector or "Retry" in self.selector or "다시 시도" in self.selector:
@@ -2855,6 +3039,14 @@ class FakeWebexLocator:
         return self.page.text
 
     async def evaluate(self, script, value=None):
+        if "pointerEvents" in script:
+            return {
+                "tag": self.page.tags.get(self.selector, "div"),
+                "role": self.page.roles.get(self.selector, "button"),
+                "aria_label": self.page.input_attrs.get(self.selector, {}).get("aria-label", "Join from this browser"),
+                "aria_disabled": "",
+                "pointer_events": "auto",
+            }
         if "candidate_text" in script:
             text = self.page.text_for_selector(self.selector)
             return {
@@ -2888,7 +3080,15 @@ class FakeWebexLocator:
         return self.page.values.get(self.selector, "")
 
     async def bounding_box(self):
+        if self.selector in self.page.visible:
+            return self.page.rects.get(self.selector, {"x": 10, "y": 20, "width": 80, "height": 20})
         return self.page.rects.get(self.selector)
+
+    async def focus(self):
+        self.page.focused_selector = self.selector
+
+    async def scroll_into_view_if_needed(self, timeout=0):
+        return None
 
 
 class FakeKeyboard:
@@ -2907,6 +3107,8 @@ class FakeKeyboard:
             if selector:
                 self.page.set_value(selector, "")
             self.page.select_all = False
+        if key == "Enter" and self.page is not None and self.page.focused_selector:
+            self.page.visible.discard(self.page.focused_selector)
 
     async def type(self, value):
         self.actions.append(("type", value))
@@ -3003,10 +3205,14 @@ class FakeWebexPage:
                 return FakeWebexLocator(self, selector)
         return FakeWebexLocator(self, "#missing-label")
 
-    def get_by_role(self, role, name=None):
+    def get_by_role(self, role, name=None, exact=False):
         if role in {"button", "link"}:
+            if role == "button" and name == "Join from this browser":
+                for selector in ("#broadcom-center-right", "#browser"):
+                    if selector in self.visible:
+                        return FakeWebexLocator(self, selector)
             for text, selector in self.text_roles.get(role, {}).items():
-                if name is None or name.search(text):
+                if name is None or (hasattr(name, "search") and name.search(text)) or name == text:
                     return FakeWebexLocator(self, selector)
             return FakeWebexLocator(self, f"#missing-role-{role}")
         if role != "textbox":
@@ -3116,6 +3322,8 @@ class FakeWebexPage:
     def text_for_selector(self, selector):
         if selector in self.selector_texts:
             return self.selector_texts[selector]
+        if selector in {"#broadcom-center-right", "#browser"}:
+            return "Join from this browser"
         if selector == "#try-again":
             return "Try again"
         if selector == "#got-it":
@@ -3176,6 +3384,10 @@ class FakeMouse:
     async def click(self, x, y):
         self.clicks.append((x, y))
         self.page.clicks.append(("mouse", x, y))
+        for selector in ("#broadcom-center-right", "#browser"):
+            if selector in self.page.visible:
+                self.page.visible.discard(selector)
+                break
 
 
 class TitleFailsPage(FakeWebexPage):

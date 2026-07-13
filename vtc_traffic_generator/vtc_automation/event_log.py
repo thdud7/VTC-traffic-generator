@@ -52,6 +52,7 @@ def emit_event(
         "run_id": str(config.get("execution_id") or config.get("run_id") or "unknown"),
         "experiment_id": str(config.get("experiment_id") or config.get("run_id") or "unknown"),
         "execution_id": str(config.get("execution_id") or config.get("run_id") or "unknown"),
+        "attempt_id": str(config.get("attempt_id") or "unknown"),
         "bot_id": get_bot_id(config),
         "service": service or get_service_name(config),
         "role": role,
@@ -66,6 +67,12 @@ def emit_event(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as event_file:
         event_file.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def events_for_attempt(records, attempt_id: str) -> list[dict[str, Any]]:
+    """Return only records from the current connect/controller attempt."""
+    expected = str(attempt_id)
+    return [record for record in records if str(record.get("attempt_id") or "") == expected]
 
 
 def resolve_git_sha(cwd: str | Path | None = None) -> str:

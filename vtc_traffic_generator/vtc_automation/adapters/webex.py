@@ -87,6 +87,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             'button:has-text("쿠키 설정 관리")',
         ],
         "join_from_browser": [
+            '#broadcom-center-right',
+            '[role="button"][aria-label="Join from this browser"]',
             'button:has-text("Join from your browser")',
             'a:has-text("Join from your browser")',
             'button:has-text("Join from this browser")',
@@ -145,6 +147,8 @@ class WebexAdapter(BrowserMeetingAdapter):
             '[aria-label*="웹"]',
         ],
         "browser_join": [
+            '#broadcom-center-right',
+            '[role="button"][aria-label="Join from this browser"]',
             'button:has-text("Join from your browser")',
             'a:has-text("Join from your browser")',
             'button:has-text("Join from this browser")',
@@ -790,6 +794,9 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._join_state = WebexJoinState.NAVIGATING
         self._join_transition_history = []
         self._wmctrl_cache = None
+        self._external_protocol_navigation_generation = 0
+        self._external_protocol_dismissed_generations = set()
+        self._external_protocol_extra_dismissed_generations = set()
 
     def _progress(self, stage, details=None):
         payload = {"stage": stage, **dict(details or {})}
@@ -1013,6 +1020,16 @@ class WebexAdapter(BrowserMeetingAdapter):
         except (TypeError, ValueError):
             return default
 
+    def _deadline_reserve(self, key, default):
+        try:
+            return max(0.0, float(self.adapter_config().get(key, default)))
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _require_join_reserve(self, stage, reserve_sec):
+        if self._join_deadline is not None:
+            self._join_deadline.require_reserve(stage, reserve_sec)
+
     async def launch(self):
         if self.page is not None:
             return None
@@ -1115,6 +1132,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         self._join_deadline = JoinDeadline.after(hard_cap)
         self._join_state = WebexJoinState.NAVIGATING
         self._join_transition_history = []
+        self._external_protocol_navigation_generation += 1
         if self.page is None:
             await wait_with_deadline(self.launch(), self._join_deadline, "browser_launch")
         self._meeting_joined_notified = False
@@ -1137,7 +1155,8 @@ class WebexAdapter(BrowserMeetingAdapter):
                 self._join_deadline,
                 "page_load_settle",
             )
-            await self._dismiss_external_protocol_prompt(stage="after_goto_settle")
+            # The navigation generation already received its one evidence-free
+            # protocol-dialog dismissal immediately after goto.
 
         prejoin_result = await wait_with_deadline(
             self._run_prejoin_transition_loop(display_name),
@@ -1170,6 +1189,7 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         if prejoin_result["status"] == "final_join":
             self._progress("final_join_button_seen", {"selector": prejoin_result.get("selector")})
+        self._require_join_reserve("final_join", self._deadline_reserve("final_join_action_reserve_sec", 2.0))
         join_selector = await wait_with_deadline(
             self._click_final_join_control(display_name),
             self._join_deadline,
@@ -1444,17 +1464,9 @@ class WebexAdapter(BrowserMeetingAdapter):
         while asyncio.get_running_loop().time() < deadline:
             iteration += 1
             self._progress("webex_prejoin_loop_iteration_start", {"iteration": iteration, "state_attempts": state_attempts})
-            # Protocol dismissal is deliberately outside the DOM scan and hard bounded.
-            try:
-                await asyncio.wait_for(
-                    self._dismiss_external_protocol_prompt(stage="prejoin_loop"),
-                    timeout=float(self.adapter_config().get("external_protocol_dismiss_timeout_sec", 3.0)),
-                )
-            except asyncio.TimeoutError:
-                self._progress("external_protocol_dismiss_timeout", {"iteration": iteration})
-
             # Exactly one page/frame snapshot is produced per iteration.  Both joined
             # classification and action selection consume this immutable snapshot.
+            self._require_join_reserve("prejoin_snapshot", self._deadline_reserve("snapshot_reserve_sec", 0.35))
             try:
                 snapshot = await asyncio.wait_for(
                     self._page_state_snapshot(timeout_ms=min(timeout, 250)),
@@ -1476,8 +1488,14 @@ class WebexAdapter(BrowserMeetingAdapter):
             if state_attempts[fingerprint] > max_state_attempts:
                 return await self._bounded_prejoin_failure("webex_prejoin_state_attempts_exhausted", page_state)
             if action == "final_join":
+                self._require_join_reserve("final_join", self._deadline_reserve("final_join_action_reserve_sec", 2.0))
                 return {"status": "final_join", "selector": payload.get("selector"), "visible_text": payload.get("text", "")}
             if action == "click_browser_join":
+                self._require_join_reserve(
+                    "browser_join_activation",
+                    self._deadline_reserve("browser_join_action_reserve_sec", 3.0)
+                    + self._deadline_reserve("post_click_transition_reserve_sec", 2.0),
+                )
                 clicked = await self._click_browser_join_from_state(page_state, timeout_ms=min(timeout, 1000))
                 if not clicked:  # defensive: candidate failures normally raise above
                     await self._raise_browser_join_click_not_found(page_state)
@@ -1502,7 +1520,6 @@ class WebexAdapter(BrowserMeetingAdapter):
             if action != "click_try_again":
                 await asyncio.sleep(0.2 if action != "wait" else 0.5)
 
-        await self._dismiss_external_protocol_prompt(stage="prejoin_timeout")
         joined_state = await self._scan_joined_state_all_surfaces(timeout_ms=timeout)
         if self._is_terminal_join_state(joined_state):
             return joined_state
@@ -1751,13 +1768,17 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _post_browser_join_transition_loop(self, display_name, timeout_ms=None):
         timeout_sec = self._post_browser_join_transition_timeout_sec()
+        final_reserve = self._deadline_reserve("final_join_action_reserve_sec", 2.0)
+        if self._join_deadline is not None:
+            self._join_deadline.require_reserve("post_browser_join_transition", final_reserve + 0.25)
+            timeout_sec = min(timeout_sec, max(0.1, self._join_deadline.remaining_sec() - final_reserve))
         deadline = asyncio.get_running_loop().time() + timeout_sec
         self._progress("webex_post_browser_join_transition_start", {"timeout_sec": timeout_sec})
         await self._cancel_stale_probe_tasks(reason="post_browser_join_transition_start")
         self._discard_browser_join_snapshot_state()
         last_result = {"status": "continue", "selector": None, "visible_text": ""}
         while asyncio.get_running_loop().time() < deadline:
-            await self._dismiss_external_protocol_prompt(stage="post_browser_join_transition")
+            self._require_join_reserve("post_browser_join_snapshot", final_reserve + 0.2)
             self._progress("webex_post_browser_join_rescan_start", {"page_count": len(self._known_playwright_pages())})
             result = await self._post_browser_join_rescan(display_name, timeout_ms=timeout_ms)
             last_result = result
@@ -1897,6 +1918,7 @@ class WebexAdapter(BrowserMeetingAdapter):
             "browser_join_action": browser_join_action,
             "try_again_action": try_again_action,
             "browser_join_problem_detected": browser_join_problem_detected,
+            "_activation_snapshot": snapshot,
         }
         if browser_join_problem_detected:
             self._progress(
@@ -2090,6 +2112,14 @@ class WebexAdapter(BrowserMeetingAdapter):
                 snapshot[key] = str(result.get(key) or snapshot.get(key) or "")
             for key in ("frame_urls", "visible_inputs", "visible_buttons_links"):
                 snapshot[key] = list(result.get(key) or [])
+            if "iframe_elements" in result:
+                snapshot["iframe_elements"] = list(result.get("iframe_elements") or [])
+            if "document_ready_state" in result:
+                snapshot["document_ready_state"] = str(result.get("document_ready_state") or "")
+            if "body_child_count" in result:
+                snapshot["body_child_count"] = int(result.get("body_child_count") or 0)
+            if "document_signature" in result:
+                snapshot["document_signature"] = str(result.get("document_signature") or "")
             # Compatibility for lightweight Playwright test doubles and older
             # injected evaluate bridges which only understand the legacy probes.
             # Real browsers return the complete combined shape in one evaluate.
@@ -2143,6 +2173,13 @@ class WebexAdapter(BrowserMeetingAdapter):
           return {
             title: document.title || "", url: location.href || "",
             frame_urls: Array.from(document.querySelectorAll("iframe,frame")).slice(0, 40).map(el => el.src || ""),
+            iframe_elements: Array.from(document.querySelectorAll("iframe,frame")).slice(0, 40).map(el => ({
+              url: el.src || "", id: el.id || "", name: el.name || "", visible: visible(el)
+            })),
+            document_ready_state: document.readyState || "",
+            body_child_count: document.body ? document.body.children.length : 0,
+            document_signature: [location.href, document.title, document.body ? document.body.children.length : 0,
+              document.querySelectorAll('input,button,[role="button"]').length].join("|"),
             visible_inputs: Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]')).filter(visible).slice(0, 80).map(describe),
             visible_buttons_links: Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(visible).slice(0, 160).map(describe),
             visible_text: norm(visibleNodes.map(el => el.children.length ? "" : el.textContent).join(" ")).slice(0, 20000),
@@ -2247,6 +2284,8 @@ class WebexAdapter(BrowserMeetingAdapter):
     def _webclient_frame_from_snapshot(self, snapshot):
         best = None
         frame_scopes = self._page_locator_scopes(prefer_meeting_frame=False)[1:]
+        page_snapshot = snapshot.get("page") or {}
+        iframe_elements = page_snapshot.get("iframe_elements")
         for index, details in enumerate(snapshot.get("frames") or []):
             url = str(details.get("url") or "")
             name = str(details.get("name") or details.get("scope") or "")
@@ -2275,7 +2314,26 @@ class WebexAdapter(BrowserMeetingAdapter):
                 for item in visible_buttons
                 if isinstance(item, Mapping)
             )
-            ready = bool(not outer_download_shell and (visible_inputs or join_button or continue_button or prejoin_control))
+            matching_iframes = [
+                item for item in (iframe_elements or [])
+                if str(item.get("url") or "") == url or "guest-join-meeting" in str(item.get("url") or "").lower()
+            ]
+            iframe_visible = (
+                any(bool(item.get("visible")) for item in matching_iframes)
+                if iframe_elements is not None
+                else True
+            )
+            document_ready_state = str(details.get("document_ready_state") or "")
+            body_child_count = int(details.get("body_child_count") or 0)
+            document_loaded = document_ready_state in {"interactive", "complete"} if document_ready_state else True
+            meaningful_content = bool(visible_inputs or join_button or continue_button or prejoin_control)
+            ready = bool(
+                not outer_download_shell
+                and iframe_visible
+                and document_loaded
+                and meaningful_content
+                and (body_child_count > 0 or "body_child_count" not in details)
+            )
             score = url_score + (10 if visible_inputs else 0) + (6 if join_button else 0) + (3 if prejoin_text else 0)
             detected = bool(not outer_download_shell and (url_score >= 10 or (url_score > 0 and (visible_inputs or join_button or prejoin_text))))
             if not detected:
@@ -2290,6 +2348,10 @@ class WebexAdapter(BrowserMeetingAdapter):
                 "continue_button_detected": continue_button,
                 "prejoin_control_detected": prejoin_control,
                 "prejoin_text": prejoin_text,
+                "iframe_visible": iframe_visible,
+                "document_ready_state": document_ready_state,
+                "body_child_count": body_child_count,
+                "document_signature": str(details.get("document_signature") or ""),
                 "webclient_frame_exists": True,
                 "webclient_frame_ready": ready,
                 "score": score,
@@ -3754,7 +3816,8 @@ class WebexAdapter(BrowserMeetingAdapter):
 
     async def _maybe_run_post_join_media_check(self, vtc_url):
         if not bool(self.adapter_config().get("post_join_media_check", False)):
-            return None
+            self._notify_media_ready(vtc_url)
+            return True
 
         timeout_sec = float(self.adapter_config().get("post_join_media_check_timeout_sec", 2))
         try:
@@ -3775,6 +3838,28 @@ class WebexAdapter(BrowserMeetingAdapter):
             if bool(self.adapter_config().get("fail_on_post_join_media_unverified", False)):
                 raise
             return False
+
+    async def wait_until_media_ready(self, vtc_url, timeout_sec):
+        """Promote waiting-room joins only after the in-meeting DOM becomes ready."""
+        deadline = asyncio.get_running_loop().time() + max(0.0, float(timeout_sec))
+        while asyncio.get_running_loop().time() < deadline:
+            snapshot = await self._page_state_snapshot(timeout_ms=250)
+            state = self._normalize_join_state(
+                await self._scan_joined_state_all_surfaces(timeout_ms=250, snapshot=snapshot)
+            )
+            if state.get("status") == "joined":
+                self._record_join_transition(
+                    WebexJoinState.JOINED,
+                    "media_readiness_poll",
+                    snapshot=snapshot,
+                    selector=state.get("selector"),
+                    evidence=state.get("joined_source") or state.get("source"),
+                )
+                media_ready = await self._maybe_run_post_join_media_check(vtc_url)
+                if media_ready:
+                    return True
+            await asyncio.sleep(0.5)
+        return False
 
     async def _apply_prejoin_media_preferences(self):
         if not bool(self.adapter_config().get("apply_initial_media_state_in_prejoin", True)):
@@ -3913,7 +3998,8 @@ class WebexAdapter(BrowserMeetingAdapter):
         emit_event(self.config, "webex_sanity_check_started", {}, self.service_name)
 
         def record(name, ok, message="", optional=False):
-            item = {"name": name, "ok": bool(ok), "message": message, "optional": bool(optional)}
+            status = "ok" if ok else ("warn" if optional else "fail")
+            item = {"name": name, "ok": bool(ok), "status": status, "message": message, "optional": bool(optional)}
             checks.append(item)
             if not ok:
                 warnings.append(item)
@@ -3923,7 +4009,16 @@ class WebexAdapter(BrowserMeetingAdapter):
         record("display", bool(display), "DISPLAY is not configured")
         if shutil.which("xdpyinfo"):
             result = self._run_sanity_command(["xdpyinfo"], env_display=display)
-            record("xdpyinfo", result.returncode == 0, result.stderr.strip() or result.stdout.strip(), optional=True)
+            summary = {"display": display, "returncode": result.returncode}
+            for line in (result.stdout or "").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("dimensions:"):
+                    summary["dimensions"] = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("depth of root window:"):
+                    summary["depth"] = stripped.split(":", 1)[1].strip()
+            if result.stderr.strip():
+                summary["stderr"] = result.stderr.strip()[:500]
+            record("xdpyinfo", result.returncode == 0, json.dumps(summary, sort_keys=True), optional=True)
         else:
             record("xdpyinfo", False, "xdpyinfo not found", optional=True)
 
@@ -3944,7 +4039,14 @@ class WebexAdapter(BrowserMeetingAdapter):
         record("ffmpeg", bool(shutil.which("ffmpeg")), "ffmpeg not found", optional=True)
         executable = self.launch_options().get("executable_path")
         channel = self.launch_options().get("channel") or self.adapter_config().get("browser_channel")
-        record("browser_executable_or_channel", bool(executable or channel), "no Chrome/Chromium executable or channel configured/found", optional=True)
+        resolved_browser = executable or ("/opt/google/chrome/chrome" if channel == "chrome" else None)
+        browser_ok = bool(resolved_browser and Path(str(resolved_browser)).is_file() and os.access(str(resolved_browser), os.X_OK))
+        record(
+            "browser_executable_or_channel",
+            browser_ok,
+            json.dumps({"channel": channel, "resolved_path": resolved_browser}),
+            optional=False,
+        )
 
         fallback = self.adapter_config().get("fallback", {})
         needs_window_tools = bool(
@@ -4484,18 +4586,21 @@ class WebexAdapter(BrowserMeetingAdapter):
             "timeout_sec": total_timeout,
         }
         self._progress("browser_join_click_attempt", attempt)
+        before_snapshot = state.get("_activation_snapshot")
         await self._dismiss_browser_join_cookie_banner(timeout)
+        if before_snapshot is None:
+            before_snapshot = await self._page_state_snapshot(timeout_ms=min(timeout, 250))
         if action.get("selector"):
             try:
                 clicked = await asyncio.wait_for(
-                    self._click_browser_join_candidate(scopes, action, timeout),
+                    self._click_browser_join_candidate(scopes, action, timeout, before_snapshot),
                     timeout=total_timeout,
                 )
             except asyncio.TimeoutError:
                 self._progress("browser_join_click_timeout", attempt)
                 await self._maybe_await(self.collect_diagnostics(stage="browser_join_click_timeout", extra=attempt))
                 raise RuntimeError(f"browser_join_click_timeout. Diagnostics: {attempt}")
-            if clicked:
+            if clicked and clicked.get("transition_evidence"):
                 self._browser_join_clicked_once = True
                 self._progress("browser_join_click_success", clicked)
                 return clicked
@@ -4567,7 +4672,7 @@ class WebexAdapter(BrowserMeetingAdapter):
         except (TypeError, ValueError):
             return 5.0
 
-    async def _click_browser_join_candidate(self, scopes, action, timeout_ms):
+    async def _click_browser_join_candidate(self, scopes, action, timeout_ms, before_snapshot=None):
         selector = action.get("selector")
         scope_name = action.get("scope")
         preferred = [item for item in scopes if item[0] == scope_name]
@@ -4581,76 +4686,174 @@ class WebexAdapter(BrowserMeetingAdapter):
 
         for candidate_scope_name, scope in ordered_scopes:
             clicked = await self._click_browser_join_candidate_in_scope(
-                candidate_scope_name, scope, selector, action.get("text"), timeout_ms
+                candidate_scope_name, scope, selector, action.get("text"), timeout_ms, before_snapshot
             )
             if clicked:
                 return clicked
         return None
 
-    async def _click_browser_join_candidate_in_scope(self, scope_name, scope, selector, text, timeout_ms):
-        resolved = await self._js_click_browser_join_candidate(scope_name, scope, selector, text, timeout_ms)
-        if resolved and resolved.get("ok"):
-            return resolved
+    async def _click_browser_join_candidate_in_scope(
+        self, scope_name, scope, selector, text, timeout_ms, before_snapshot=None
+    ):
+        locator_candidates = []
+        if scope_name == "page" and hasattr(scope, "get_by_role"):
+            try:
+                locator_candidates.append((
+                    'role=button[name="Join from this browser"]',
+                    scope.get_by_role("button", name="Join from this browser", exact=True).first,
+                ))
+            except TypeError:
+                pass
+        fallback_selectors = [selector, "#broadcom-center-right", '[role="button"][aria-label="Join from this browser"]']
+        seen_selectors = {item[0] for item in locator_candidates}
+        for fallback_selector in fallback_selectors:
+            if fallback_selector and fallback_selector not in seen_selectors:
+                locator_candidates.append((fallback_selector, scope.locator(fallback_selector).first))
+                seen_selectors.add(fallback_selector)
 
-        target_selector = (resolved or {}).get("target_selector") or selector
-
-        methods = (
-            ("playwright_locator_click", {"timeout": timeout_ms}),
-            ("playwright_force_click", {"timeout": timeout_ms, "force": True}),
-        )
-        locator = scope.locator(target_selector).first
-        try:
-            await locator.wait_for(state="visible", timeout=timeout_ms)
-        except Exception as exc:
+        locator = None
+        target_selector = None
+        box = None
+        metadata = {}
+        last_error = None
+        for candidate_selector, candidate_locator in locator_candidates:
+            try:
+                await candidate_locator.wait_for(state="visible", timeout=timeout_ms)
+                enabled = await self._maybe_await(candidate_locator.is_enabled(timeout=timeout_ms)) if hasattr(candidate_locator, "is_enabled") else True
+                candidate_box = await self._maybe_await(candidate_locator.bounding_box()) if hasattr(candidate_locator, "bounding_box") else None
+                candidate_metadata = await self._browser_join_target_metadata(candidate_locator)
+                if not enabled or candidate_metadata.get("aria_disabled") == "true" or not candidate_box:
+                    raise RuntimeError("browser join target is disabled or has no bounding box")
+                if float(candidate_box.get("width", 0)) <= 0 or float(candidate_box.get("height", 0)) <= 0:
+                    raise RuntimeError("browser join target has an empty bounding box")
+                if candidate_metadata.get("pointer_events") == "none":
+                    raise RuntimeError("browser join target has pointer-events:none")
+                if candidate_metadata.get("center_target_is_descendant") is False:
+                    raise RuntimeError("browser join target does not own the center hit-test element")
+                locator, target_selector, box, metadata = candidate_locator, candidate_selector, candidate_box, candidate_metadata
+                break
+            except Exception as exc:
+                last_error = exc
+        if locator is None:
             self._progress(
                 "browser_join_click_failed",
                 {"selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text,
-                 "method": "resolved_target_visibility", "reason": "not_visible", "error": repr(exc)},
+                 "method": "resolved_target_visibility", "reason": "not_visible", "error": repr(last_error)},
             )
             return None
-        for method, kwargs in methods:
-            try:
-                await locator.click(**kwargs)
-                return {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": method}
-            except PlaywrightTimeoutError as exc:
-                self._progress(
-                    "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "timeout", "error": repr(exc)},
-                )
-            except self._safe_playwright_errors() as exc:
-                self._last_page_metadata_error = exc
-                self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
-                self._progress(
-                    "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "playwright_error", "error": repr(exc)},
-                )
-            except Exception as exc:
-                self._append_browser_log("browser_join_candidate_click_unavailable", repr(exc))
-                self._progress(
-                    "browser_join_click_failed",
-                    {"selector": selector, "scope": scope_name, "text": text, "method": method, "reason": "error", "error": repr(exc)},
-                )
 
-        try:
-            box = (resolved or {}).get("rect")
-            if not box:
-                box = await asyncio.wait_for(self._maybe_await(locator.bounding_box()), timeout=timeout_ms / 1000)
-            if box:
-                x = float(box.get("x", 0)) + float(box.get("width", 0)) / 2
-                y = float(box.get("y", 0)) + float(box.get("height", 0)) / 2
-                mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
-                if mouse and hasattr(mouse, "click"):
-                    await asyncio.wait_for(self._maybe_await(mouse.click(x, y)), timeout=timeout_ms / 1000)
-                    clicked = {"ok": True, "selector": selector, "target_selector": target_selector, "scope": scope_name, "text": text, "method": "coordinate_click", "x": x, "y": y}
-                    self._progress("browser_join_coordinate_click_success", clicked)
-                    return clicked
-        except Exception as exc:
-            self._append_browser_log("browser_join_candidate_coordinate_click_unavailable", repr(exc))
+        methods = (("locator_click", "locator"), ("keyboard_enter", "keyboard"), ("mouse_click", "mouse"))
+        for method, kind in methods:
+            started = time.monotonic()
+            original_exception = None
+            try:
+                if kind == "locator":
+                    await locator.click(timeout=min(timeout_ms, 350))
+                elif kind == "keyboard":
+                    await self._maybe_await(locator.scroll_into_view_if_needed(timeout=timeout_ms)) if hasattr(locator, "scroll_into_view_if_needed") else None
+                    await self._maybe_await(locator.focus()) if hasattr(locator, "focus") else None
+                    keyboard = getattr(scope, "keyboard", None) or getattr(self.page, "keyboard", None)
+                    if keyboard is None:
+                        raise RuntimeError("Playwright keyboard is unavailable")
+                    await self._maybe_await(keyboard.press("Enter"))
+                else:
+                    mouse = getattr(scope, "mouse", None) or getattr(self.page, "mouse", None)
+                    if mouse is None:
+                        raise RuntimeError("Playwright mouse is unavailable")
+                    points = self._browser_join_click_points(box)
+                    point = points[0]
+                    await self._maybe_await(mouse.click(point[0], point[1]))
+            except Exception as exc:
+                original_exception = str(exc)
+            evidence = []
+            if original_exception is None:
+                evidence = await self._wait_for_browser_join_transition(
+                    before_snapshot, timeout_sec=self._deadline_reserve("browser_join_method_transition_sec", 0.7)
+                )
+            attempt = {
+                "selector": selector,
+                "target_selector": target_selector,
+                "scope": scope_name,
+                "text": text,
+                "tag": metadata.get("tag"),
+                "role": metadata.get("role"),
+                "aria_label": metadata.get("aria_label"),
+                "bounding_box": box,
+                "method": method,
+                "action_elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                "remaining_global_deadline_sec": self._join_deadline.remaining_sec() if self._join_deadline else None,
+                "playwright_exception": original_exception,
+                "transition_evidence": evidence,
+            }
+            self._progress("browser_join_activation_attempt", attempt)
+            if evidence:
+                return {"ok": True, **attempt}
         self._progress(
             "browser_join_click_failed",
-            {"selector": selector, "scope": scope_name, "text": text, "method": "coordinate_click", "reason": "no_clickable_box"},
+            {"selector": selector, "scope": scope_name, "text": text, "method": "real_input_sequence", "reason": "no_transition"},
         )
         return None
+
+    async def _browser_join_target_metadata(self, locator):
+        try:
+            result = await self._maybe_await(locator.evaluate("""el => { const s=getComputedStyle(el), r=el.getBoundingClientRect();
+              const hit=document.elementFromPoint(r.left+r.width/2, r.top+r.height/2); return {
+              tag:(el.tagName||'').toLowerCase(), role:el.getAttribute('role')||'',
+              aria_label:el.getAttribute('aria-label')||'', aria_disabled:el.getAttribute('aria-disabled')||'',
+              pointer_events:s.pointerEvents||'', center_target_is_descendant:!!hit && (hit===el || el.contains(hit))}; }"""))
+            return dict(result) if isinstance(result, Mapping) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _browser_join_click_points(box):
+        x, y = float(box["x"]), float(box["y"])
+        width, height = float(box["width"]), float(box["height"])
+        return [(x + width / 2, y + height / 2), (x + min(16, width * 0.2), y + min(16, height * 0.2))]
+
+    async def _wait_for_browser_join_transition(self, before_snapshot, timeout_sec):
+        if not before_snapshot:
+            return []
+        deadline = asyncio.get_running_loop().time() + max(0.05, timeout_sec)
+        while asyncio.get_running_loop().time() < deadline:
+            after = await self._page_state_snapshot(timeout_ms=200)
+            evidence = self._browser_join_transition_evidence(before_snapshot, after)
+            if evidence:
+                return evidence
+            await asyncio.sleep(0.1)
+        return []
+
+    def _browser_join_transition_evidence(self, before, after):
+        evidence = []
+        before_action = self._browser_join_action_from_snapshot(before)
+        after_action = self._browser_join_action_from_snapshot(after)
+        before_controls = self._browser_join_controls_from_snapshot(before)
+        after_controls = self._browser_join_controls_from_snapshot(after)
+        if before_action and (not after_action or len(after_controls) < len(before_controls)):
+            evidence.append("browser_join_control_hidden")
+        before_frame = self._webclient_frame_from_snapshot(before) or {}
+        after_frame = self._webclient_frame_from_snapshot(after) or {}
+        if not before_frame.get("iframe_visible") and after_frame.get("iframe_visible"):
+            evidence.append("guest_iframe_became_visible")
+        if before_frame.get("document_signature") != after_frame.get("document_signature") and after_frame.get("document_signature"):
+            evidence.append("guest_document_signature_changed")
+        if int(after_frame.get("body_child_count") or 0) > int(before_frame.get("body_child_count") or 0):
+            evidence.append("guest_body_content_increased")
+        if int(after_frame.get("visible_text_input_count") or 0) > int(before_frame.get("visible_text_input_count") or 0):
+            evidence.append("visible_text_input_appeared")
+        if int(after_frame.get("visible_button_count") or 0) > int(before_frame.get("visible_button_count") or 0):
+            evidence.append("visible_control_count_increased")
+        if not before_frame.get("webclient_frame_ready") and after_frame.get("webclient_frame_ready"):
+            evidence.append("webclient_frame_ready")
+        return evidence
+
+    def _browser_join_controls_from_snapshot(self, snapshot):
+        controls = []
+        for details in [snapshot.get("page") or {}, *(snapshot.get("frames") or [])]:
+            match = self._snapshot_browser_join_control_match(details.get("visible_buttons_links") or [])
+            if match:
+                controls.append((details.get("scope"), match.get("selector"), match.get("text")))
+        return controls
 
     async def _js_click_browser_join_candidate(self, scope_name, scope, selector, text, timeout_ms):
         script = r"""
@@ -5544,6 +5747,24 @@ class WebexAdapter(BrowserMeetingAdapter):
         if not bool(adapter_config.get("dismiss_external_protocol_dialog", True)):
             return False
 
+        generation = self._external_protocol_navigation_generation
+        before_windows = self._webex_window_list()
+        evidence_before = self._external_protocol_dialog_evidence(before_windows)
+        navigation_attempt = stage == "after_goto"
+        if navigation_attempt and generation in self._external_protocol_dismissed_generations:
+            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "already_attempted_for_navigation", "generation": generation})
+            return False
+        if not navigation_attempt and not evidence_before:
+            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "no_dialog_evidence", "generation": generation})
+            return False
+        if not navigation_attempt and generation in self._external_protocol_extra_dismissed_generations:
+            self._progress("external_protocol_dismiss_skipped", {"trigger_stage": stage, "reason": "evidence_retry_already_attempted", "generation": generation})
+            return False
+        if navigation_attempt:
+            self._external_protocol_dismissed_generations.add(generation)
+        else:
+            self._external_protocol_extra_dismissed_generations.add(generation)
+
         self._progress("external_protocol_dismiss_attempt", {"trigger_stage": stage})
         method = str(adapter_config.get("external_protocol_dismiss_method", "auto") or "auto").lower()
         strict = bool(adapter_config.get("strict_external_protocol_dismiss", False))
@@ -5618,8 +5839,13 @@ class WebexAdapter(BrowserMeetingAdapter):
                     f"{permission_issue}"
                 )
 
-        success = any(item.get("success") for item in attempts)
-        self._progress("external_protocol_dismiss_done", {"trigger_stage": stage, "success": success, "attempt_count": len(attempts)})
+        after_windows = self._webex_window_list()
+        evidence_after = self._external_protocol_dialog_evidence(after_windows)
+        success = bool(evidence_before and not evidence_after)
+        self._progress("external_protocol_dismiss_done", {
+            "trigger_stage": stage, "success": success, "attempt_count": len(attempts),
+            "dialog_evidence_before": evidence_before, "dialog_evidence_after": evidence_after,
+        })
         if not success:
             details = {"stage": stage, "attempts": attempts}
             self._append_browser_log("webex_external_protocol_prompt_dismiss_failed", json.dumps(details, default=str))
@@ -5630,6 +5856,14 @@ class WebexAdapter(BrowserMeetingAdapter):
                 )
                 raise RuntimeError(f"Webex external protocol prompt could not be dismissed. Diagnostics: {diagnostics}")
         return success
+
+    @staticmethod
+    def _external_protocol_dialog_evidence(window_list):
+        tokens = (
+            "open webex", "launch application", "external protocol", "xdg-open",
+            "webex 열기", "애플리케이션 열기", "앱을 여시겠습니까",
+        )
+        return [line for line in (window_list or []) if any(token in str(line).lower() for token in tokens)]
 
     def _macos_external_protocol_dismiss_scripts(self):
         process_names = ("Google Chrome for Testing", "Google Chrome", "Chromium")
